@@ -107,7 +107,7 @@ Scans:
 
 Detection basis:
 
-- deterministic pattern scoring for instruction override, secret exfiltration, destructive commands, hidden text, role simulation, and obfuscation
+- deterministic pattern scoring from vendored shared scanner for instruction override, secret exfiltration, destructive commands, hidden text, role simulation, and obfuscation
 - LLM review for suspicious resources
 - SHA-256 cache to avoid repeated LLM calls for unchanged files
 - automatic activation when Pi tools install or update skills, prompts, or extensions
@@ -178,6 +178,7 @@ Features:
 - Checks IPv4 addresses against DNSBL zones
 - Supports explicit public or private/local IP HTTPS URLs
 - Supports saved IP URLs via commands
+- Scans fetched web content with the same shared agent-risk scanner and omits suspicious/dangerous previews by default
 
 Secure DNS providers currently used:
 
@@ -199,6 +200,7 @@ Useful parameters:
 - `urls`: explicit HTTPS URLs to check/fetch directly
 - `maxResults`: 1-10
 - `fetchPages`: whether to fetch page previews
+- `includeRiskyContent`: include suspicious/dangerous previews instead of omitting them, default false
 
 Saved IP URL commands:
 
@@ -228,9 +230,11 @@ cp permission-policy/index.ts ~/.pi/agent/extensions/permission-policy/index.ts
 
 mkdir -p ~/.pi/agent/extensions/web-search
 cp web-search/index.ts ~/.pi/agent/extensions/web-search/index.ts
+cp -R web-search/lib ~/.pi/agent/extensions/web-search/lib
 
 mkdir -p ~/.pi/agent/extensions/prompt-shield
 cp prompt-shield/index.ts ~/.pi/agent/extensions/prompt-shield/index.ts
+cp -R prompt-shield/lib ~/.pi/agent/extensions/prompt-shield/lib
 ```
 
 Then in Pi:

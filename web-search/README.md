@@ -12,7 +12,8 @@ Adds a `secure_web_search` tool for web research.
 - Checks malware-filtering secure DNS providers including Quad9 and Cloudflare Family/Security DNS, and blocks hosts those providers refuse to resolve.
 - Allows user-supplied public or private/local IP addresses via explicit `urls`, but checks IPv4 addresses against DNSBL before fetching.
 - Checks IPv4 addresses against DNSBL zones before fetching result pages.
-- Fetches text previews from pages that pass security checks.
+- Scans titles, snippets, and fetched page previews with the shared agent-risk scanner.
+- Omits suspicious/dangerous page previews by default while still returning citation metadata and scan findings.
 
 ## Tool
 
@@ -27,6 +28,7 @@ Parameters:
 - `urls`: optional explicit HTTPS URLs to security-check and fetch directly, including public or private/local IP URLs
 - `maxResults`: 1-10, default 5
 - `fetchPages`: whether to fetch and preview pages, default true
+- `includeRiskyContent`: include suspicious/dangerous previews instead of omitting them, default false
 
 ## Saved IP URLs
 
@@ -72,6 +74,7 @@ For global use:
 ```bash
 mkdir -p ~/.pi/agent/extensions/web-search
 cp index.ts ~/.pi/agent/extensions/web-search/index.ts
+cp -R lib ~/.pi/agent/extensions/web-search/lib
 ```
 
 Then run:
@@ -82,7 +85,7 @@ Then run:
 
 ## Security notes
 
-No web search extension can fully prove a website is safe. This extension is defensive by default: it rejects non-HTTPS URLs, hosts that fail secure DNS consistency checks, hosts blocked by malware-filtering DNS providers, and DNSBL-listed IPv4 addresses. Raw IP HTTPS URLs, including private/local IPs, are allowed only after DNSBL checks where applicable and TLS certificate validation. DNSBL lists and malware-filtering DNS are useful signals but not complete malicious-site detectors.
+No web search extension can fully prove a website is safe. This extension is defensive by default: it rejects non-HTTPS URLs, hosts that fail secure DNS consistency checks, hosts blocked by malware-filtering DNS providers, and DNSBL-listed IPv4 addresses. Raw IP HTTPS URLs, including private/local IPs, are allowed only after DNSBL checks where applicable and TLS certificate validation. DNSBL lists and malware-filtering DNS are useful signals but not complete malicious-site detectors. Fetched web content is untrusted prompt input, so suspicious/dangerous previews are omitted by default.
 
 Secure DNS providers currently used:
 

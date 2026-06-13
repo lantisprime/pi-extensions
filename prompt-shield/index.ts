@@ -1,5 +1,6 @@
 import { complete, type UserMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { scanTextForAgentRisk, type Finding, type RiskLevel } from "./lib/security-scan";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -50,10 +51,8 @@ const RESOURCE_PATH_MARKERS = [
 
 type ResourceKind = "skill" | "prompt" | "extension";
 type ResourceProvenance = "project" | "global";
-type RiskLevel = "safe" | "suspicious" | "dangerous";
 type ShieldMode = "monitor" | "ask" | "blockDangerous";
 
-type Finding = { severity: number; category: string; match: string; reason: string };
 type ResourceFile = { path: string; kind: ResourceKind; provenance: ResourceProvenance };
 type ScanResult = {
 	path: string;
@@ -83,25 +82,6 @@ type ShieldState = {
 	dangerousCount: number;
 	strictPermissions: boolean;
 };
-
-const PATTERNS: Array<{ regex: RegExp; severity: number; category: string; reason: string }> = [
-	{ regex: /ignore (all )?(previous|prior|above|system|developer) instructions/gi, severity: 5, category: "instruction-override", reason: "Attempts to override higher-priority instructions" },
-	{ regex: /forget (all )?(previous|prior|above) instructions/gi, severity: 5, category: "instruction-override", reason: "Attempts to reset instructions" },
-	{ regex: /do not (tell|inform|notify|ask) (the )?user/gi, severity: 4, category: "concealment", reason: "Attempts to hide behavior from user" },
-	{ regex: /(?:system|developer|assistant|tool)\s*:/gi, severity: 2, category: "role-simulation", reason: "May be simulating chat roles" },
-	{ regex: /<\/?(?:system|developer|assistant|tool)>/gi, severity: 3, category: "role-simulation", reason: "May be simulating privileged messages" },
-	{ regex: /(?:api[_-]?key|token|password|secret|private key|credential)/gi, severity: 3, category: "secret-access", reason: "Mentions secrets or credentials" },
-	{ regex: /(?:~\/\.ssh|~\/\.aws|~\/\.config\/gh|\.env\b|\.npmrc|\.pypirc)/gi, severity: 4, category: "sensitive-path", reason: "Mentions sensitive credential paths" },
-	{ regex: /(?:exfiltrate|upload|send|post).{0,120}(?:secret|token|password|key|\.env|ssh)/gi, severity: 7, category: "exfiltration", reason: "Potential secret exfiltration instruction" },
-	{ regex: /\b(?:curl|wget|nc|netcat|scp|rsync|ssh)\b/gi, severity: 3, category: "network", reason: "Network-capable command" },
-	{ regex: /\b(?:curl|wget)\b[^\n|]*\|\s*(?:sh|bash|zsh)/gi, severity: 7, category: "remote-code", reason: "Pipes downloaded content into shell" },
-	{ regex: /\brm\s+-rf\s+(?:\/|~|\$HOME|\.\.)/gi, severity: 8, category: "destructive", reason: "Dangerous recursive deletion" },
-	{ regex: /\b(?:sudo|chmod\s+777|chown|git\s+push|git\s+reset\s+--hard)\b/gi, severity: 4, category: "privileged-or-mutating", reason: "Privileged or destructive command" },
-	{ regex: /(?:\.\.\/|\/etc\/|\/Users\/|\/home\/|~\/)/gi, severity: 2, category: "outside-project", reason: "References paths outside project" },
-	{ regex: /[A-Za-z0-9+/]{200,}={0,2}/g, severity: 3, category: "obfuscation", reason: "Long base64-like blob" },
-	{ regex: /<!--[\s\S]{0,500}?(?:ignore|system|developer|secret|token)[\s\S]{0,500}?-->/gi, severity: 4, category: "hidden-html", reason: "Suspicious hidden HTML comment" },
-	{ regex: /[\u200B-\u200D\uFEFF]/g, severity: 3, category: "hidden-text", reason: "Zero-width hidden characters" },
-];
 
 export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => scanAndNotify(ctx, false));
@@ -265,17 +245,10 @@ async function walk(dir: string): Promise<string[]> {
 }
 
 function scanContent(filePath: string, kind: ResourceKind, provenance: ResourceProvenance, content: string, hash: string, size: number, config: ShieldConfig): ScanResult {
-	const findings: Finding[] = [];
-	for (const pattern of PATTERNS) {
-		for (const match of [...content.matchAll(pattern.regex)].slice(0, 5)) {
-			findings.push({ severity: pattern.severity, category: pattern.category, match: (match[0] || "").slice(0, 160), reason: pattern.reason });
-		}
-	}
-	let score = findings.reduce((sum, finding) => sum + finding.severity, 0);
-	if (provenance === "project" && score > 0) score += 1;
+	const scan = scanTextForAgentRisk(content, { source: kind, provenance, maxMatchesPerPattern: 5 });
 	const approved = config.approved[filePath] === hash;
 	const denied = config.denied[filePath] === hash;
-	return { path: filePath, kind, provenance, hash, size, risk: denied ? "dangerous" : riskFromScore(score), score, approved, denied, findings };
+	return { path: filePath, kind, provenance, hash, size, risk: denied ? "dangerous" : scan.risk, score: scan.score, approved, denied, findings: scan.findings };
 }
 
 async function llmReview(ctx: ExtensionContext, file: ResourceFile, content: string, findings: Finding[]): Promise<ScanResult["llm"] | undefined> {
@@ -406,7 +379,6 @@ function parseMode(value: string | undefined): ShieldMode | undefined {
 	if (value === "block-dangerous" || value === "blockDangerous") return "blockDangerous";
 	return undefined;
 }
-function riskFromScore(score: number): RiskLevel { if (score >= 8) return "dangerous"; if (score >= 3) return "suspicious"; return "safe"; }
 function normalizeRisk(value: unknown): RiskLevel | undefined { const text = String(value || "").toLowerCase(); return text === "safe" || text === "suspicious" || text === "dangerous" ? text : undefined; }
 function maxRisk(a: RiskLevel, b: RiskLevel): RiskLevel { const order: Record<RiskLevel, number> = { safe: 0, suspicious: 1, dangerous: 2 }; return order[b] > order[a] ? b : a; }
 function sha256(value: string) { return createHash("sha256").update(value).digest("hex"); }

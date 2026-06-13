@@ -27,7 +27,7 @@ It also scans global user resources:
 
 ## Scanning basis
 
-Prompt Shield uses deterministic pattern scoring plus optional LLM review.
+Prompt Shield uses deterministic pattern scoring plus optional LLM review. The deterministic scanner is vendored from the repo shared scanner (`shared/security-scan.ts` -> `prompt-shield/lib/security-scan.ts`) so web-search and prompt-shield use consistent risk categories while remaining independently installable.
 
 Pattern categories include:
 
@@ -234,6 +234,12 @@ Smoke test:
 
 ```bash
 prompt-shield/test-fixtures/run-smoke-test.sh
+```
+
+Shared scanner unit smoke test:
+
+```bash
+scripts/test-security-scan.mjs
 ```
 
 ## Limitations

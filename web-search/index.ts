@@ -1,5 +1,6 @@
 import { complete, type UserMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { scanTextForAgentRisk, type AgentRiskScanResult } from "./lib/security-scan";
 import { Type } from "typebox";
 import dns from "node:dns/promises";
 import { promises as fs } from "node:fs";
@@ -35,7 +36,9 @@ type SearchResult = {
 	url: string;
 	snippet: string;
 	security: SecurityReport;
+	contentScan: AgentRiskScanResult;
 	contentPreview?: string;
+	previewOmitted?: string;
 };
 
 type SecurityReport = {
@@ -124,6 +127,9 @@ export default function (pi: ExtensionAPI) {
 			fetchPages: Type.Optional(
 				Type.Boolean({ description: "Fetch result pages and include text previews after security checks" }),
 			),
+			includeRiskyContent: Type.Optional(
+				Type.Boolean({ description: "Include suspicious/dangerous fetched content previews instead of omitting them. Default false." }),
+			),
 		}),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const maxResults = Math.max(1, Math.min(Number(params.maxResults || DEFAULT_MAX_RESULTS), 10));
@@ -146,10 +152,20 @@ export default function (pi: ExtensionAPI) {
 				try {
 					const security = await securityCheckUrl(raw.url, signal);
 					let contentPreview: string | undefined;
+					let previewOmitted: string | undefined;
+					let scanInput = `${raw.title}\n${raw.snippet}`;
 					if (params.fetchPages !== false) {
-						contentPreview = await fetchPagePreview(raw.url, signal);
+						const fetchedPreview = await fetchPagePreview(raw.url, signal);
+						scanInput += `\n${fetchedPreview}`;
+						const previewScan = scanTextForAgentRisk(scanInput, { source: "web", provenance: "external" });
+						if (previewScan.risk === "safe" || params.includeRiskyContent === true) {
+							contentPreview = fetchedPreview;
+						} else {
+							previewOmitted = `Preview omitted because web content scan was ${previewScan.risk}. Use includeRiskyContent=true only for security research.`;
+						}
 					}
-					results.push({ ...raw, security, contentPreview });
+					const contentScan = scanTextForAgentRisk(scanInput, { source: "web", provenance: "external" });
+					results.push({ ...raw, security, contentScan, contentPreview, previewOmitted });
 				} catch (error) {
 					rejected.push({ url: raw.url, reason: error instanceof Error ? error.message : String(error) });
 				}
@@ -449,9 +465,16 @@ function formatResults(question: string, plan: SearchPlan, results: SearchResult
 		lines.push(
 			`\n${index + 1}. ${result.title}`,
 			`URL: ${result.url}`,
-			`Security: HTTPS validated, ${dnsText}`,
+			`Security: HTTPS validated, ${dnsText}, content scan: ${result.contentScan.risk}`,
 			`Snippet: ${result.snippet}`,
 		);
+		if (result.contentScan.risk !== "safe") {
+			lines.push("Content scan findings:");
+			for (const finding of result.contentScan.findings.slice(0, 5)) {
+				lines.push(`- ${finding.category}: ${finding.reason} (${finding.match})`);
+			}
+		}
+		if (result.previewOmitted) lines.push(result.previewOmitted);
 		if (result.contentPreview) lines.push(`Preview: ${result.contentPreview}`);
 	}
 	if (rejected.length) {
