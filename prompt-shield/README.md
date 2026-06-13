@@ -192,6 +192,34 @@ Current risk state consumed by permission-policy:
 ~/.pi/agent/prompt-shield/state.json
 ```
 
+## Helper scripts
+
+Maintenance scripts live in:
+
+```text
+prompt-shield/scripts/
+```
+
+Approve the currently installed trusted global extension hashes after reinstalling/updating this repo's extensions:
+
+```bash
+prompt-shield/scripts/approve-installed-extensions.sh
+```
+
+Show Prompt Shield mode, state, approvals, and unapproved risky cached resources:
+
+```bash
+prompt-shield/scripts/status.sh
+```
+
+Run a non-interactive Prompt Shield scan through Pi, then print status:
+
+```bash
+prompt-shield/scripts/rescan.sh
+```
+
+These scripts help avoid the common false-positive case where Prompt Shield reports the trusted `permission-policy`, `prompt-shield`, or `web-search` extension files after their hashes change.
+
 ## Tests
 
 Fixtures live in:

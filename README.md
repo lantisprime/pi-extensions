@@ -137,6 +137,14 @@ Storage:
 ~/.pi/agent/prompt-shield/state.json
 ```
 
+Helper scripts:
+
+```text
+prompt-shield/scripts/approve-installed-extensions.sh
+prompt-shield/scripts/status.sh
+prompt-shield/scripts/rescan.sh
+```
+
 See [`prompt-shield/README.md`](prompt-shield/README.md) for details.
 
 ---
