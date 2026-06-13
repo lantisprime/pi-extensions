@@ -219,7 +219,11 @@ async function scanProject(ctx: ExtensionContext, forceLlm: boolean, config: Shi
 				const llm = await llmReview(ctx, file, content, result.findings);
 				if (llm) {
 					result.llm = llm;
-					result.risk = maxRisk(result.risk, llm.classification);
+					// Project resources are adversarial until proven otherwise, so keep the
+					// stricter of deterministic and LLM risk. Global user resources are often
+					// defensive security code that mentions dangerous strings as signatures;
+					// allow LLM review to downgrade those false positives.
+					result.risk = file.provenance === "global" ? llm.classification : maxRisk(result.risk, llm.classification);
 				}
 			}
 			results.push(result);

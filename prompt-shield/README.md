@@ -62,6 +62,7 @@ LLM review is included, but designed to avoid slowing Pi down:
 - Only relevant excerpts around deterministic findings are sent to the LLM.
 - LLM input is capped at 16 KB.
 - LLM JSON output is parsed robustly even if the model wraps JSON in extra text.
+- For project resources, Prompt Shield keeps the stricter of deterministic and LLM risk. For global user resources, LLM review can downgrade defensive-code false positives where dangerous words appear only as scanner/signature text.
 
 You can force LLM review with:
 
