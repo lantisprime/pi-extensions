@@ -127,3 +127,24 @@ Clears persistent and current-session permissions for the current project.
 ```
 
 Sets the current project's permission mode and updates the status line.
+
+## Tests
+
+Classification unit tests:
+
+```bash
+permission-policy/test-fixtures/run-all-tests.sh
+```
+
+Runs 85 classification unit tests covering destructive detection, git detection, read-only command classification, outside-project detection, tool classification, and read-only auto allowance logic.
+
+End-to-end scenarios verified against a live Pi instance:
+
+- Default ask mode blocks unapproved operations
+- readOnlyAuto allows read-only shell/git commands
+- readOnlyAuto blocks non-read-only bash and writes
+- Project permissions persist across Pi invocations
+- Prompt Shield strict mode bypasses readOnlyAuto grants
+- /permissions reset clears project permissions
+
+Note: Some e2e scenarios (outside-project read blocking) rely on the model calling the actual tool, which some models refuse to do. Classification logic for those cases is covered by unit tests.

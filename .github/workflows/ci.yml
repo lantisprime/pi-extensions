@@ -27,3 +27,6 @@ jobs:
 
       - name: Run shared scanner smoke tests
         run: scripts/test-security-scan.mjs
+
+      - name: Run permission-policy classification unit tests
+        run: npx --yes tsx permission-policy/test-fixtures/test-classification.ts
