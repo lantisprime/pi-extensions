@@ -21,6 +21,7 @@ const DEFAULT_MAX_RESULTS = 5;
 const FETCH_TIMEOUT_MS = 12_000;
 const MAX_FETCH_BYTES = 2_000_000;
 const MAX_REDIRECTS = 5;
+const MAX_QUESTION_LENGTH = 2_000;
 const CONFIG_PATH = path.join(os.homedir(), ".pi", "agent", "web-search", "config.json");
 
 type WebSearchConfig = {
@@ -41,6 +42,7 @@ type SearchResult = {
 	contentScan: AgentRiskScanResult;
 	contentPreview?: string;
 	previewOmitted?: string;
+	blockedDangerous?: boolean;
 };
 
 type SecurityReport = {
@@ -112,8 +114,8 @@ export default function (pi: ExtensionAPI) {
 		name: TOOL_NAME,
 		label: "Secure Web Search",
 		description:
-			"Search the web with security checks. Uses the current LLM to suggest relevant sites/queries, validates HTTPS/TLS, checks DNS consistency with secure DNS providers, checks malware-filtering DNS, and rejects DNSBL-listed hosts.",
-		promptSnippet: "Search the web with HTTPS, secure DNS, malware DNS, and DNSBL security checks",
+			"Search the web with security checks. Uses the current LLM to suggest relevant sites/queries, validates HTTPS/TLS, checks DNS consistency with secure DNS providers, checks malware-filtering DNS, and rejects DNSBL-listed hosts. Scans the question before search planning. Supports blockDangerous to omit dangerous results and blockPrivateIps (default true) to reject private/reserved IPs.",
+		promptSnippet: "Search the web with HTTPS, secure DNS, malware DNS, DNSBL security checks, and content scanning",
 		promptGuidelines: [
 			"Use secure_web_search when the user asks for current external information or web research.",
 			"secure_web_search returns URLs and previews; cite URLs when using its results.",
@@ -140,11 +142,20 @@ export default function (pi: ExtensionAPI) {
 			includeSavedIpUrls: Type.Optional(
 				Type.Boolean({ description: "Include saved IP URLs from /web-search-ip. Default false to avoid accidental local/internal access." }),
 			),
+			blockDangerous: Type.Optional(
+				Type.Boolean({ description: "Entirely omit results whose content scan is dangerous, not just their previews. Default false." }),
+			),
+			blockPrivateIps: Type.Optional(
+				Type.Boolean({ description: "Reject explicit URL targets that resolve to private/reserved IP ranges. Default true." }),
+			),
 		}),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const maxResults = Math.max(1, Math.min(Number(params.maxResults || DEFAULT_MAX_RESULTS), 10));
+			const blockDangerous = params.blockDangerous === true;
+			const blockPrivateIps = params.blockPrivateIps !== false;
 			const config = await loadConfig();
-			const plan = await createSearchPlan(ctx, params.question, params.sites || [], signal);
+			const questionScan = scanTextForAgentRisk(params.question, { source: "web", provenance: "external" });
+			const plan = await createSearchPlan(ctx, params.question, params.sites || [], signal, questionScan);
 			onUpdate?.({ content: [{ type: "text", text: `Search plan: ${plan.queries.join(" | ")}` }] });
 
 			const explicitUrls = [...(params.includeSavedIpUrls === true ? config.ipUrls : []), ...(params.urls || [])];
@@ -160,6 +171,10 @@ export default function (pi: ExtensionAPI) {
 			for (const raw of rawResults) {
 				if (results.length >= maxResults) break;
 				try {
+					if (blockPrivateIps && isPrivateIpHostname(raw.url)) {
+						rejected.push({ url: raw.url, reason: "blocked: resolves to private/reserved IP" });
+						continue;
+					}
 					const security = await securityCheckUrl(raw.url, signal);
 					let contentPreview: string | undefined;
 					let previewOmitted: string | undefined;
@@ -175,7 +190,8 @@ export default function (pi: ExtensionAPI) {
 						}
 					}
 					const contentScan = scanTextForAgentRisk(scanInput, { source: "web", provenance: "external" });
-					results.push({ ...raw, security, contentScan, contentPreview, previewOmitted });
+					const blockedDangerous = blockDangerous && contentScan.risk === "dangerous";
+					results.push({ ...raw, security, contentScan, contentPreview, previewOmitted, blockedDangerous });
 				} catch (error) {
 					rejected.push({ url: raw.url, reason: error instanceof Error ? error.message : String(error) });
 				}
@@ -185,7 +201,7 @@ export default function (pi: ExtensionAPI) {
 				content: [
 					{
 						type: "text",
-						text: formatResults(params.question, plan, results, rejected),
+						text: formatResults(params.question, plan, results, rejected, questionScan),
 					},
 				],
 				details: { question: params.question, plan, savedIpUrls: params.includeSavedIpUrls === true ? config.ipUrls : [], results, rejected },
@@ -245,11 +261,17 @@ async function createSearchPlan(
 	question: string,
 	requestedSites: string[],
 	signal?: AbortSignal,
+	questionScan?: AgentRiskScanResult,
 ): Promise<SearchPlan> {
 	const fallbackSites = requestedSites.map(cleanDomain).filter(Boolean).slice(0, 5) as string[];
-	const fallback = { queries: [question], sites: fallbackSites };
+	const fallback = { queries: [question.slice(0, MAX_QUESTION_LENGTH)], sites: fallbackSites };
+	// If the question itself is dangerous, skip LLM plan generation entirely; the
+	// content scan findings are reported to the caller and this avoids sending a
+	// prompt-injection payload into the search-planning LLM.
+	if (questionScan?.risk === "dangerous") return fallback;
 	if (!ctx.model) return fallback;
 
+	const sanitizedQuestion = question.slice(0, MAX_QUESTION_LENGTH);
 	try {
 		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
 		if (!auth.ok || !auth.apiKey) return fallback;
@@ -258,7 +280,7 @@ async function createSearchPlan(
 			content: [
 				{
 					type: "text",
-					text: `Question: ${question}\nUser requested sites: ${requestedSites.join(", ") || "none"}\n\nReturn JSON only: {"queries":["..."],"sites":["domain.com"]}. Pick reputable, relevant sources. Prefer official docs, standards bodies, vendor docs, academic/government sources, and primary sources. Maximum 3 queries and 5 sites.`,
+					text: `Question: ${sanitizedQuestion}\nUser requested sites: ${requestedSites.join(", ") || "none"}\n\nReturn JSON only: {"queries":["..."],"sites":["domain.com"]}. Pick reputable, relevant sources. Prefer official docs, standards bodies, vendor docs, academic/government sources, and primary sources. Maximum 3 queries and 5 sites.`,
 				},
 			],
 			timestamp: Date.now(),
@@ -278,12 +300,15 @@ async function createSearchPlan(
 			.join("\n")
 			.trim();
 		const parsed = JSON.parse(text) as Partial<SearchPlan>;
+		// Sanitize LLM-generated sites: reject IP addresses, paths, and non-domain strings
+		// so the model cannot inject raw IP targets or malicious full URLs.
+		const sanitizedSites = sanitizeList(parsed.sites, [])
+			.map(cleanDomain)
+			.filter(Boolean)
+			.filter((domain) => !net.isIP(domain) && !domain.includes("/"));
 		return {
-			queries: sanitizeList(parsed.queries, [question]).slice(0, 3),
-			sites: [...new Set([...fallbackSites, ...sanitizeList(parsed.sites, []).map(cleanDomain).filter(Boolean)])].slice(
-				0,
-				5,
-			) as string[],
+			queries: sanitizeList(parsed.queries, [sanitizedQuestion]).slice(0, 3),
+			sites: [...new Set([...fallbackSites, ...sanitizedSites])].slice(0, 5) as string[],
 		};
 	} catch {
 		return fallback;
@@ -521,12 +546,28 @@ async function fetchWithTimeout(url: string, init: RequestInit = {}) {
 	}
 }
 
-function formatResults(question: string, plan: SearchPlan, results: SearchResult[], rejected: Array<{ url: string; reason: string }>) {
-	const lines = [`Secure web search for: ${question}`, "", `Queries: ${plan.queries.join(" | ")}`];
+function formatResults(question: string, plan: SearchPlan, results: SearchResult[], rejected: Array<{ url: string; reason: string }>, questionScan?: AgentRiskScanResult) {
+	const lines = [`Secure web search for: ${question}`, ""];
+	if (questionScan && questionScan.risk !== "safe") {
+		lines.push(`Question security scan: ${questionScan.risk} (score ${questionScan.score})`);
+		for (const finding of questionScan.findings.slice(0, 5)) {
+			lines.push(`- ${finding.category}: ${finding.reason} (${finding.match})`);
+		}
+		lines.push("");
+	}
+	lines.push(`Queries: ${plan.queries.join(" | ")}`);
 	if (plan.sites.length) lines.push(`Preferred sites: ${plan.sites.join(", ")}`);
 	lines.push("", "Results:");
 	if (!results.length) lines.push("No results passed security checks.");
+	const dangerousBlocked = results.filter((r) => r.blockedDangerous);
+	if (dangerousBlocked.length) {
+		lines.push(`${dangerousBlocked.length} result(s) blocked by blockDangerous flag (content scan classified as dangerous).`);
+	}
 	for (const [index, result] of results.entries()) {
+		if (result.blockedDangerous) {
+			lines.push(`\n${index + 1}. [BLOCKED] ${result.title}`, `URL: ${result.url} (blocked: content scan was dangerous, score ${result.contentScan.score})`);
+			continue;
+		}
 		const dnsText = result.security.dns === "raw-ip"
 			? `raw IP checked (${result.security.addresses.join(", ")}), DNSBL ${result.security.dnsbl}`
 			: `secure DNS ${result.security.secureDns} (${result.security.addresses.join(", ")}), malware DNS ${result.security.malwareDns}, DNSBL ${result.security.dnsbl}`;
@@ -595,5 +636,32 @@ function cleanDomain(value: string) {
 		return new URL(withProtocol).hostname.toLowerCase().replace(/^www\./, "");
 	} catch {
 		return "";
+	}
+}
+
+// PRIVATE_IP_RANGES covers RFC 1918, loopback, link-local, CGNAT, and documentation ranges.
+const PRIVATE_IP_RANGES = [
+	/^127\./, /^10\./, /^172\.(1[6-9]|2[0-9]|3[0-1])\./, /^192\.168\./,
+	/^169\.254\./, /^100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\./,
+	/^192\.0\.2\./, /^198\.51\.100\./, /^203\.0\.113\./,
+	/^0\./, /^fc00:/i, /^fd00:/i, /^fe80:/i, /^::1$/, /^::$/, /^::/,
+];
+
+function isPrivateIpHostname(urlOrHostname: string): boolean {
+	try {
+		const hostname = extractHostname(urlOrHostname);
+		if (!net.isIP(hostname)) return false;
+		return PRIVATE_IP_RANGES.some((rx) => rx.test(hostname));
+	} catch {
+		return false;
+	}
+}
+
+function extractHostname(urlOrHostname: string): string {
+	try {
+		const parsed = new URL(urlOrHostname.includes("://") ? urlOrHostname : `https://${urlOrHostname}`);
+		return parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+	} catch {
+		return urlOrHostname.toLowerCase();
 	}
 }

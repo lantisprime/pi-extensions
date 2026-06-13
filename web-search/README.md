@@ -14,7 +14,12 @@ Adds a `secure_web_search` tool for web research.
 - Checks IPv4 addresses against DNSBL zones before fetching result pages.
 - Caps fetched text responses before buffering them.
 - Scans titles, snippets, and fetched page previews with the shared agent-risk scanner.
+- Scans the user's search question before generating a search plan; dangerous questions skip LLM plan generation to avoid prompt-injection vectors.
 - Omits suspicious/dangerous page previews by default while still returning citation metadata and scan findings.
+- Optionally blocks dangerous results entirely instead of only omitting their previews (`blockDangerous`).
+- Block private/reserved IP targets by default in explicit URLs (`blockPrivateIps`, default true).
+- Truncates questions to 2000 characters before sending to the search-planning LLM.
+- Sanitizes LLM-generated sites to reject IP addresses and URL paths, preventing the model from injecting raw IP targets.
 
 ## Tool
 
@@ -31,6 +36,8 @@ Parameters:
 - `fetchPages`: whether to fetch and preview pages, default true
 - `includeRiskyContent`: include suspicious/dangerous previews instead of omitting them, default false
 - `includeSavedIpUrls`: include globally saved IP URLs from `/web-search-ip`, default false
+- `blockDangerous`: entirely omit results whose content scan is dangerous (not just previews), default false
+- `blockPrivateIps`: reject explicit URL targets that resolve to private/reserved IP ranges, default true
 
 ## Saved IP URLs
 
@@ -87,7 +94,7 @@ Then run:
 
 ## Security notes
 
-No web search extension can fully prove a website is safe. This extension is defensive by default: it rejects non-HTTPS URLs and non-HTTPS redirects, validates each redirect hop before fetching a preview, caps response bodies, rejects hosts that fail secure DNS consistency checks, rejects hosts blocked by malware-filtering DNS providers, and rejects DNSBL-listed IPv4 addresses. Raw IP HTTPS URLs, including private/local IPs, are allowed only after DNSBL checks where applicable and TLS certificate validation. DNSBL lists and malware-filtering DNS are useful signals but not complete malicious-site detectors; transient provider failures are reported as `unchecked`. Fetched web content is untrusted prompt input, so suspicious/dangerous previews are omitted by default.
+No web search extension can fully prove a website is safe. This extension is defensive by default: it scans user questions for prompt-injection before generating search plans (dangerous questions skip LLM planning), rejects non-HTTPS URLs and non-HTTPS redirects, validates each redirect hop before fetching a preview, caps response bodies, rejects hosts that fail secure DNS consistency checks, rejects hosts blocked by malware-filtering DNS providers, rejects DNSBL-listed IPv4 addresses, and blocks private/reserved IP targets (can opt out with `blockPrivateIps: false`). Raw IP HTTPS URLs, including private/local IPs when explicitly allowed, go through DNSBL checks where applicable and TLS certificate validation. DNSBL lists and malware-filtering DNS are useful signals but not complete malicious-site detectors; transient provider failures are reported as `unchecked`. Fetched web content is untrusted prompt input, so suspicious/dangerous previews are omitted by default. Use `blockDangerous: true` to omit dangerous results entirely.
 
 Secure DNS providers currently used:
 
