@@ -57,9 +57,9 @@ Commands:
 Status line:
 
 ```text
-permission: ask
-permission: read-only
-permission: auto
+│ permission: ask
+│ permission: read-only
+│ permission: auto
 ```
 
 Shortcut:
@@ -112,6 +112,8 @@ Detection basis:
 - SHA-256 cache to avoid repeated LLM calls for unchanged files
 - automatic activation when Pi tools install or update skills, prompts, or extensions
 - hash-based approvals and denials
+- LLM review before approving/denying resources to help identify false positives
+- scan summaries that suggest exact follow-up commands
 - permission-policy integration via stricter permissions when unapproved risk is active
 
 Commands:

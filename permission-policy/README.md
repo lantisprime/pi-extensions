@@ -89,9 +89,9 @@ Then restart Pi or run `/reload`.
 The extension shows the current mode in Pi's status/footer line:
 
 ```text
-permission: ask
-permission: read-only
-permission: auto
+│ permission: ask
+│ permission: read-only
+│ permission: auto
 ```
 
 It also registers this shortcut:

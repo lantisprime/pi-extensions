@@ -120,6 +120,8 @@ Approvals are hash-based. If an approved file changes, it must be reviewed again
 /prompt-shield reset
 ```
 
+Approving or denying a resource forces LLM review first, so defensive extensions/skills that mention dangerous terms as scanner signatures can be identified as likely false positives before approval. If a resource is still classified as dangerous, Prompt Shield asks for confirmation before approving that exact hash.
+
 ## Permission-policy integration
 
 Prompt Shield writes current risk state to:
@@ -142,7 +144,7 @@ Show cached scan status.
 /prompt-shield scan
 ```
 
-Rescan project resources using deterministic scanning and LLM review only for suspicious files.
+Rescan project resources using deterministic scanning and LLM review only for suspicious files. Scan output always includes suggested follow-up commands, including exact approve/deny commands for risky resources.
 
 ```text
 /prompt-shield llm

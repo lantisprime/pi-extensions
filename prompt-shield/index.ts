@@ -159,8 +159,14 @@ async function handleCommand(args: string, ctx: ExtensionContext) {
 	}
 	if (action === "approve" || action === "deny") {
 		const target = resolveRequestedPath(rest.join(" "), ctx.cwd);
-		const result = await findOrScan(target, ctx, false);
+		// Force LLM review before approval/denial so the user sees whether a finding
+		// is likely a false positive, especially for defensive extensions/skills.
+		const result = await findOrScan(target, ctx, true);
 		if (!result) return ctx.ui.notify(`No scanned resource found for: ${target}`, "warning");
+		if (action === "approve" && result.risk === "dangerous" && result.llm?.classification !== "safe" && ctx.hasUI) {
+			const ok = await ctx.ui.confirm("Approve risky resource?", `${formatResult(result)}\n\nApprove this exact hash anyway?`);
+			if (!ok) return ctx.ui.notify("Prompt Shield approval cancelled", "info");
+		}
 		if (action === "approve") {
 			config.approved[result.path] = result.hash;
 			delete config.denied[result.path];
@@ -170,8 +176,8 @@ async function handleCommand(args: string, ctx: ExtensionContext) {
 		}
 		config.updatedAt = new Date().toISOString();
 		await saveConfig(config);
-		await appendAudit({ event: `resource-${action}d`, path: result.path, hash: result.hash });
-		return ctx.ui.notify(`Prompt Shield ${action}d: ${result.path}`, "info");
+		await appendAudit({ event: `resource-${action}d`, path: result.path, hash: result.hash, risk: result.risk, llm: result.llm });
+		return ctx.ui.notify([`Prompt Shield ${action}d: ${result.path}`, "", "Review:", formatResult(result)].join("\n"), "info");
 	}
 	if (action === "approvals") return ctx.ui.notify(formatApprovals(config), "info");
 	if (action === "reset") {
@@ -192,7 +198,7 @@ async function scanAndNotify(ctx: ExtensionContext, verbose: boolean, forceLlm =
 	await saveState({ updatedAt: new Date().toISOString(), cwd: ctx.cwd, riskyCount: risky.length, dangerousCount: dangerous.length, strictPermissions: risky.length > 0 });
 	await appendAudit({ event: "scan", cwd: ctx.cwd, count: results.length, risky: risky.length, dangerous: dangerous.length });
 	if (!ctx.hasUI) return;
-	ctx.ui.setStatus("prompt-shield", risky.length ? `shield: ${dangerous.length ? `${dangerous.length} danger` : `${risky.length} risk`}` : "shield: ok");
+	ctx.ui.setStatus("prompt-shield", risky.length ? `│ shield: ${dangerous.length ? `${dangerous.length} danger` : `${risky.length} risk`}` : "│ shield: ok");
 	if (verbose || risky.length) ctx.ui.notify(formatSummary(results), dangerous.length ? "warning" : "info");
 }
 
@@ -338,10 +344,29 @@ async function findOrScan(requestedPath: string, ctx: ExtensionContext, forceLlm
 }
 
 function formatSummary(results: ScanResult[]) {
-	if (!results.length) return "Prompt Shield: no project/global skills/prompts/extensions found to scan.";
+	if (!results.length) return [
+		"Prompt Shield: no project/global skills/prompts/extensions found to scan.",
+		"",
+		"Suggested commands:",
+		"/prompt-shield scan",
+		"/prompt-shield mode monitor|ask|block-dangerous",
+	].join("\n");
 	const risky = results.filter((r) => r.risk !== "safe" && !r.approved);
 	const lines = [`Prompt Shield scanned ${results.length} resource(s).`, `Risky unapproved: ${risky.length}`, ""];
 	for (const result of (risky.length ? risky : results).slice(0, 12)) lines.push(formatResult(result));
+	lines.push("", "Suggested commands:");
+	if (risky.length) {
+		for (const result of risky.slice(0, 5)) {
+			lines.push(`/prompt-shield approve ${result.path}`);
+			lines.push(`/prompt-shield deny ${result.path}`);
+		}
+		lines.push("/prompt-shield llm");
+		lines.push("/prompt-shield approvals");
+	} else {
+		lines.push("/prompt-shield scan");
+		lines.push("/prompt-shield approvals");
+		lines.push("/prompt-shield mode monitor|ask|block-dangerous");
+	}
 	return lines.join("\n");
 }
 

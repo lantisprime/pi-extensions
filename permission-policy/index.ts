@@ -454,7 +454,7 @@ async function updatePermissionStatus(ctx: ExtensionContext) {
 	if (!ctx.hasUI) return;
 	const projectPath = await getProjectPath(ctx.cwd);
 	const policy = await loadPolicy(projectPath);
-	ctx.ui.setStatus("permission-policy", `permission: ${modeShortLabel(policy.mode)}`);
+	ctx.ui.setStatus("permission-policy", `│ permission: ${modeShortLabel(policy.mode)}`);
 }
 
 function modeShortLabel(mode: PermissionMode): string {
