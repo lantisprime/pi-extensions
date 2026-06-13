@@ -2,6 +2,35 @@
 
 This project contains custom [Pi](https://pi.dev) extensions.
 
+## Shared scanner packaging approach
+
+The repo has a shared deterministic agent-risk scanner source:
+
+```text
+shared/security-scan.ts
+```
+
+However, each extension is intended to remain independently installable. To avoid runtime cross-extension dependencies, the shared scanner is **vendored** into extensions that need it:
+
+```text
+prompt-shield/lib/security-scan.ts
+web-search/lib/security-scan.ts
+```
+
+After editing `shared/security-scan.ts`, sync the vendored copies:
+
+```bash
+scripts/sync-shared.sh
+```
+
+Then run the scanner smoke test:
+
+```bash
+scripts/test-security-scan.mjs
+```
+
+This gives the project one source of truth for scanner logic while preserving independent extension installs.
+
 ## Extensions
 
 ### Permission Policy
