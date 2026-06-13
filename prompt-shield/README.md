@@ -63,8 +63,8 @@ LLM review is included, but designed to avoid slowing Pi down:
 - Only the first 80 KB of each file is pattern-scanned.
 - Only relevant excerpts around deterministic findings are sent to the LLM.
 - LLM input is capped at 16 KB.
-- LLM JSON output is parsed robustly even if the model wraps JSON in extra text; unavailable or unparsable LLM review is logged in the audit file.
-- For project resources, Prompt Shield keeps the stricter of deterministic and LLM risk. For global user resources, LLM review can downgrade defensive-code false positives where dangerous words appear only as scanner/signature text.
+- LLM JSON output is parsed robustly even if the model wraps JSON in extra text; unavailable, timed-out, or unparsable LLM review is logged in the audit file.
+- Prompt Shield keeps the stricter of deterministic and LLM risk. LLM review is advisory and does not automatically downgrade deterministic findings.
 
 You can force LLM review with:
 
@@ -122,7 +122,9 @@ Approvals are hash-based. If an approved file changes, it must be reviewed again
 /prompt-shield reset
 ```
 
-Approving or denying a resource forces LLM review first, so defensive extensions/skills that mention dangerous terms as scanner signatures can be identified as likely false positives before approval. If a resource is still classified as dangerous, Prompt Shield asks for confirmation before approving that exact hash.
+Approving a resource uses cached/normal scan results so the command returns quickly and does not leave the editor waiting on a nested model call. Run `/prompt-shield llm` first if you want explicit model review before approval. Prompt Shield asks for confirmation before approving any non-safe exact hash; approval trusts only that exact hash.
+
+Denying a resource deletes the file from disk so Pi can no longer load it. Recording an untrusted hash alone does not stop Pi from loading the file, so deny resolves the risk by removing it. Prompt Shield asks for confirmation before deleting (skipped in non-interactive mode), then rescans and clears the now-removed resource from cache and state. Scans also prune stale approvals/denials whose files no longer exist.
 
 ## Permission-policy integration
 
@@ -204,7 +206,7 @@ Maintenance scripts live in:
 prompt-shield/scripts/
 ```
 
-Approve the currently installed trusted global extension hashes after reinstalling/updating this repo's extensions:
+Approve the currently installed trusted global extension hashes after reinstalling/updating this repo's extensions. The script also refreshes cached approval flags and current Prompt Shield strict-permission state so permission-policy stops prompting once all current cached risks are approved:
 
 ```bash
 prompt-shield/scripts/approve-installed-extensions.sh
@@ -236,6 +238,12 @@ Smoke test:
 
 ```bash
 prompt-shield/test-fixtures/run-smoke-test.sh
+```
+
+Cache-management scenario test, including negative approval/deny/stale cases:
+
+```bash
+prompt-shield/test-fixtures/run-cache-management-test.sh
 ```
 
 Shared scanner unit smoke test:
