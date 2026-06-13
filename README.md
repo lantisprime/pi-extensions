@@ -140,8 +140,8 @@ Detection basis:
 - LLM review for suspicious resources
 - SHA-256 cache to avoid repeated LLM calls for unchanged files
 - automatic activation when Pi tools install or update skills, prompts, or extensions
-- hash-based approvals and denials
-- LLM review before approving/denying resources to help identify false positives
+- hash-based approvals and denials; deny deletes risky resources from disk
+- LLM review for suspicious resources on scan (approve/deny do not force it)
 - scan summaries that suggest exact follow-up commands
 - permission-policy integration via stricter permissions when unapproved risk is active
 
@@ -205,9 +205,12 @@ Features:
 - Performs secure DNS-over-HTTPS consistency checks
 - Checks malware-filtering DNS providers
 - Checks IPv4 addresses against DNSBL zones
+- Scans user questions before search planning to block LLM prompt-injection
 - Supports explicit public or private/local IP HTTPS URLs
 - Supports saved IP URLs via commands
-- Scans fetched web content with the same shared agent-risk scanner and omits suspicious/dangerous previews by default
+- Blocks private/reserved IP targets by default (can opt out with `blockPrivateIps`)
+- Optionally blocks dangerous results entirely (`blockDangerous`)
+- Scans fetched web content with the shared agent-risk scanner and omits suspicious/dangerous previews by default
 
 Secure DNS providers currently used:
 
@@ -230,6 +233,9 @@ Useful parameters:
 - `maxResults`: 1-10
 - `fetchPages`: whether to fetch page previews
 - `includeRiskyContent`: include suspicious/dangerous previews instead of omitting them, default false
+- `includeSavedIpUrls`: include globally saved IP URLs, default false
+- `blockDangerous`: omit dangerous results entirely, not just previews, default false
+- `blockPrivateIps`: reject private/reserved IP targets, default true
 
 Saved IP URL commands:
 
