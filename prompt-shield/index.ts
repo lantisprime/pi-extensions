@@ -103,7 +103,7 @@ export default function (pi: ExtensionAPI) {
 				return { block: true, reason: `Prompt Shield blocked dangerous ${kind}: ${target}` };
 			}
 			if (config.mode === "ask" && result.risk !== "safe" && !result.approved && ctx.hasUI) {
-				const ok = await ctx.ui.confirm("Prompt Shield warning", formatResult(result));
+				const ok = await ctx.ui.confirm("Prompt Shield warning", formatResult(result, ctx.cwd));
 				if (!ok) return { block: true, reason: `Prompt Shield denied ${kind}: ${target}` };
 			}
 		}
@@ -144,7 +144,7 @@ async function handleCommand(args: string, ctx: ExtensionContext) {
 		const result = await findOrScan(target, ctx, true);
 		if (!result) return ctx.ui.notify(`No scanned resource found for: ${target}`, "warning");
 		if (action === "approve" && result.risk === "dangerous" && result.llm?.classification !== "safe" && ctx.hasUI) {
-			const ok = await ctx.ui.confirm("Approve risky resource?", `${formatResult(result)}\n\nApprove this exact hash anyway?`);
+			const ok = await ctx.ui.confirm("Approve risky resource?", `${formatResult(result, ctx.cwd)}\n\nApprove this exact hash anyway?`);
 			if (!ok) return ctx.ui.notify("Prompt Shield approval cancelled", "info");
 		}
 		if (action === "approve") {
@@ -157,7 +157,7 @@ async function handleCommand(args: string, ctx: ExtensionContext) {
 		config.updatedAt = new Date().toISOString();
 		await saveConfig(config);
 		await appendAudit({ event: `resource-${action}d`, path: result.path, hash: result.hash, risk: result.risk, llm: result.llm });
-		return ctx.ui.notify([`Prompt Shield ${action}d: ${result.path}`, "", "Review:", formatResult(result)].join("\n"), "info");
+		return ctx.ui.notify([`Prompt Shield ${action}d: ${result.path}`, "", "Review:", formatResult(result, ctx.cwd)].join("\n"), "info");
 	}
 	if (action === "approvals") return ctx.ui.notify(formatApprovals(config), "info");
 	if (action === "reset") {
@@ -166,7 +166,7 @@ async function handleCommand(args: string, ctx: ExtensionContext) {
 		return ctx.ui.notify("Prompt Shield approvals, denials, and cache reset", "info");
 	}
 	const cache = await loadCache();
-	ctx.ui.notify([`Mode: ${config.mode}`, formatSummary(Object.values(cache.results))].join("\n\n"), "info");
+	ctx.ui.notify([`Mode: ${config.mode}`, formatSummary(Object.values(cache.results), ctx.cwd)].join("\n\n"), "info");
 }
 
 async function scanAndNotify(ctx: ExtensionContext, verbose: boolean, forceLlm = false) {
@@ -179,7 +179,7 @@ async function scanAndNotify(ctx: ExtensionContext, verbose: boolean, forceLlm =
 	await appendAudit({ event: "scan", cwd: ctx.cwd, count: results.length, risky: risky.length, dangerous: dangerous.length });
 	if (!ctx.hasUI) return;
 	ctx.ui.setStatus("prompt-shield", risky.length ? `│ shield: ${dangerous.length ? `${dangerous.length} danger` : `${risky.length} risk`}` : "│ shield: ok");
-	if (verbose || risky.length) ctx.ui.notify(formatSummary(results), dangerous.length ? "warning" : "info");
+	if (verbose || risky.length) ctx.ui.notify(formatSummary(results, ctx.cwd), dangerous.length ? "warning" : "info");
 }
 
 async function scanProject(ctx: ExtensionContext, forceLlm: boolean, config: ShieldConfig): Promise<ScanResult[]> {
@@ -269,9 +269,15 @@ async function llmReview(ctx: ExtensionContext, file: ResourceFile, content: str
 		const text = response.content.filter((c): c is { type: "text"; text: string } => c.type === "text").map((c) => c.text).join("\n").trim();
 		const parsed = parseJsonObject(text) as { classification?: string; reason?: string } | undefined;
 		const classification = normalizeRisk(parsed?.classification);
-		if (!classification) return undefined;
+		if (!classification) {
+			await appendAudit({ event: "llm-review-parse-failed", path: file.path, response: text.slice(0, 1000) });
+			return undefined;
+		}
 		return { classification, reason: String(parsed?.reason || "No reason provided").slice(0, 1000) };
-	} catch { return undefined; }
+	} catch (error) {
+		await appendAudit({ event: "llm-review-failed", path: file.path, error: error instanceof Error ? error.message : String(error) });
+		return undefined;
+	}
 }
 
 function buildLlmExcerpt(content: string, findings: Finding[]) {
@@ -316,7 +322,7 @@ async function findOrScan(requestedPath: string, ctx: ExtensionContext, forceLlm
 	return results.find((r) => normalizeForSearch(r.path) === normalized || normalizeForSearch(path.relative(ctx.cwd, r.path)) === normalized || r.path.endsWith(requestedPath));
 }
 
-function formatSummary(results: ScanResult[]) {
+function formatSummary(results: ScanResult[], cwd = process.cwd()) {
 	if (!results.length) return [
 		"Prompt Shield: no project/global skills/prompts/extensions found to scan.",
 		"",
@@ -326,7 +332,7 @@ function formatSummary(results: ScanResult[]) {
 	].join("\n");
 	const risky = results.filter((r) => r.risk !== "safe" && !r.approved);
 	const lines = [`Prompt Shield scanned ${results.length} resource(s).`, `Risky unapproved: ${risky.length}`, ""];
-	for (const result of (risky.length ? risky : results).slice(0, 12)) lines.push(formatResult(result));
+	for (const result of (risky.length ? risky : results).slice(0, 12)) lines.push(formatResult(result, cwd));
 	lines.push("", "Suggested commands:");
 	if (risky.length) {
 		for (const result of risky.slice(0, 5)) {
@@ -343,8 +349,8 @@ function formatSummary(results: ScanResult[]) {
 	return lines.join("\n");
 }
 
-function formatResult(result: ScanResult) {
-	const rel = path.relative(process.cwd(), result.path);
+function formatResult(result: ScanResult, cwd = process.cwd()) {
+	const rel = path.relative(cwd, result.path);
 	const lines = [`${result.risk.toUpperCase()} score=${result.score} ${result.provenance} ${result.kind} ${rel}`, `approved=${result.approved} denied=${result.denied}`];
 	for (const finding of result.findings.slice(0, 3)) lines.push(`  - ${finding.category}: ${finding.reason} (${finding.match})`);
 	if (result.llm) lines.push(`  - LLM: ${result.llm.classification} - ${result.llm.reason}`);
@@ -366,10 +372,11 @@ async function loadConfig(): Promise<ShieldConfig> {
 	catch { return defaultConfig(); }
 }
 function defaultConfig(): ShieldConfig { return { updatedAt: new Date().toISOString(), mode: "monitor", approved: {}, denied: {} }; }
-async function saveConfig(config: ShieldConfig) { await fs.mkdir(CONFIG_DIR, { recursive: true }); await fs.writeFile(CONFIG_PATH, `${JSON.stringify(config, null, "\t")}\n`, "utf8"); }
+async function saveConfig(config: ShieldConfig) { await writeJsonAtomic(CONFIG_PATH, config); }
 async function loadCache(): Promise<CacheFile> { try { return JSON.parse(await fs.readFile(CACHE_PATH, "utf8")) as CacheFile; } catch { return { updatedAt: new Date().toISOString(), results: {} }; } }
-async function saveCache(cache: CacheFile) { await fs.mkdir(CONFIG_DIR, { recursive: true }); await fs.writeFile(CACHE_PATH, `${JSON.stringify(cache, null, "\t")}\n`, "utf8"); }
-async function saveState(state: ShieldState) { await fs.mkdir(CONFIG_DIR, { recursive: true }); await fs.writeFile(STATE_PATH, `${JSON.stringify(state, null, "\t")}\n`, "utf8"); }
+async function saveCache(cache: CacheFile) { await writeJsonAtomic(CACHE_PATH, cache); }
+async function saveState(state: ShieldState) { await writeJsonAtomic(STATE_PATH, state); }
+async function writeJsonAtomic(filePath: string, data: unknown) { await fs.mkdir(path.dirname(filePath), { recursive: true }); const temp = `${filePath}.${process.pid}.${Date.now()}.tmp`; await fs.writeFile(temp, `${JSON.stringify(data, null, "\t")}\n`, "utf8"); await fs.rename(temp, filePath); }
 async function appendAudit(data: Record<string, unknown>) { await fs.mkdir(CONFIG_DIR, { recursive: true }); await fs.appendFile(AUDIT_PATH, `${JSON.stringify({ timestamp: new Date().toISOString(), ...data })}\n`, "utf8"); }
 async function readAuditTail() { try { const lines = (await fs.readFile(AUDIT_PATH, "utf8")).trim().split("\n").slice(-20); return lines.length ? lines.join("\n") : "Prompt Shield audit log is empty."; } catch { return "Prompt Shield audit log is empty."; } }
 
@@ -382,7 +389,7 @@ function parseMode(value: string | undefined): ShieldMode | undefined {
 function normalizeRisk(value: unknown): RiskLevel | undefined { const text = String(value || "").toLowerCase(); return text === "safe" || text === "suspicious" || text === "dangerous" ? text : undefined; }
 function maxRisk(a: RiskLevel, b: RiskLevel): RiskLevel { const order: Record<RiskLevel, number> = { safe: 0, suspicious: 1, dangerous: 2 }; return order[b] > order[a] ? b : a; }
 function sha256(value: string) { return createHash("sha256").update(value).digest("hex"); }
-function isTextResource(file: string) { return /\.(md|txt|json|ya?ml|ts|js)$/i.test(file); }
+function isTextResource(file: string) { return /\.(md|txt|json|ya?ml|toml|ini|ts|tsx|js|jsx|mjs|cjs|py|sh|bash|zsh|html?|xml|css|env|npmrc|pypirc)$/i.test(file) || /(^|[/\\])(?:package\.json|AGENTS\.md|CLAUDE\.md|\.env(?:\..*)?)$/i.test(file); }
 function normalizeForSearch(value: string) { return value.replace(/\\/g, "/").toLowerCase(); }
 function resolveRequestedPath(value: string, cwd: string) { return path.isAbsolute(value) ? path.resolve(value) : path.resolve(cwd, value); }
 function parseJsonObject(text: string): unknown { try { return JSON.parse(text); } catch { const match = text.match(/\{[\s\S]*\}/); if (!match) return undefined; try { return JSON.parse(match[0]); } catch { return undefined; } } }

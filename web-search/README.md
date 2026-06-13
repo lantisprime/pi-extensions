@@ -6,12 +6,13 @@ Adds a `secure_web_search` tool for web research.
 
 - Uses the current Pi LLM to suggest relevant search queries and reputable websites.
 - Searches DuckDuckGo HTML results.
-- Allows only HTTPS result URLs.
+- Allows only HTTPS result URLs and re-checks every redirect target before fetching previews.
 - Relies on Node/fetch TLS validation for SSL certificate and hostname checks.
 - Performs secure DNS-over-HTTPS consistency checks against providers including Cloudflare and Google.
-- Checks malware-filtering secure DNS providers including Quad9 and Cloudflare Family/Security DNS, and blocks hosts those providers refuse to resolve.
+- Tracks malware-DNS and DNSBL states as blocked, not-blocked, or unchecked instead of treating provider failures as clean or malicious.
 - Allows user-supplied public or private/local IP addresses via explicit `urls`, but checks IPv4 addresses against DNSBL before fetching.
 - Checks IPv4 addresses against DNSBL zones before fetching result pages.
+- Caps fetched text responses before buffering them.
 - Scans titles, snippets, and fetched page previews with the shared agent-risk scanner.
 - Omits suspicious/dangerous page previews by default while still returning citation metadata and scan findings.
 
@@ -29,10 +30,11 @@ Parameters:
 - `maxResults`: 1-10, default 5
 - `fetchPages`: whether to fetch and preview pages, default true
 - `includeRiskyContent`: include suspicious/dangerous previews instead of omitting them, default false
+- `includeSavedIpUrls`: include globally saved IP URLs from `/web-search-ip`, default false
 
 ## Saved IP URLs
 
-Users can save IP endpoints that should always be checked/fetched by `secure_web_search`.
+Users can save IP endpoints for explicit opt-in checking/fetching by `secure_web_search`.
 
 Commands:
 
@@ -65,7 +67,7 @@ Example file:
 }
 ```
 
-These saved URLs are prepended to each `secure_web_search` run and still go through HTTPS/TLS validation and DNSBL checks.
+Saved URLs are included only when `includeSavedIpUrls: true` is set, and still go through HTTPS/TLS validation and DNSBL checks.
 
 ## Install
 
@@ -85,7 +87,7 @@ Then run:
 
 ## Security notes
 
-No web search extension can fully prove a website is safe. This extension is defensive by default: it rejects non-HTTPS URLs, hosts that fail secure DNS consistency checks, hosts blocked by malware-filtering DNS providers, and DNSBL-listed IPv4 addresses. Raw IP HTTPS URLs, including private/local IPs, are allowed only after DNSBL checks where applicable and TLS certificate validation. DNSBL lists and malware-filtering DNS are useful signals but not complete malicious-site detectors. Fetched web content is untrusted prompt input, so suspicious/dangerous previews are omitted by default.
+No web search extension can fully prove a website is safe. This extension is defensive by default: it rejects non-HTTPS URLs and non-HTTPS redirects, validates each redirect hop before fetching a preview, caps response bodies, rejects hosts that fail secure DNS consistency checks, rejects hosts blocked by malware-filtering DNS providers, and rejects DNSBL-listed IPv4 addresses. Raw IP HTTPS URLs, including private/local IPs, are allowed only after DNSBL checks where applicable and TLS certificate validation. DNSBL lists and malware-filtering DNS are useful signals but not complete malicious-site detectors; transient provider failures are reported as `unchecked`. Fetched web content is untrusted prompt input, so suspicious/dangerous previews are omitted by default.
 
 Secure DNS providers currently used:
 

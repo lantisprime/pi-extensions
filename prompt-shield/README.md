@@ -4,7 +4,7 @@ Scans project/global Pi resources for prompt-injection and agent-security risk. 
 
 ## What it scans
 
-Prompt Shield scans project text-like files in:
+Prompt Shield scans project text-like resource files in:
 
 ```text
 .pi/skills/
@@ -16,6 +16,8 @@ Prompt Shield scans project text-like files in:
 AGENTS.md
 CLAUDE.md
 ```
+
+It scans common text/code resource extensions under those directories, including Markdown, JSON/YAML/TOML/INI, TypeScript/JavaScript variants, Python, shell scripts, HTML/XML, env/npm/pypirc files, and package metadata.
 
 It also scans global user resources:
 
@@ -40,7 +42,7 @@ Pattern categories include:
 - Remote-code patterns like `curl | sh`
 - Destructive commands like `rm -rf /`
 - Outside-project path references
-- Obfuscation, long base64-like blobs, zero-width characters, suspicious hidden HTML comments
+- Obfuscation, long base64-like blobs, URL/base64-decoded payloads, zero-width characters, suspicious hidden HTML comments
 
 Risk score:
 
@@ -61,7 +63,7 @@ LLM review is included, but designed to avoid slowing Pi down:
 - Only the first 80 KB of each file is pattern-scanned.
 - Only relevant excerpts around deterministic findings are sent to the LLM.
 - LLM input is capped at 16 KB.
-- LLM JSON output is parsed robustly even if the model wraps JSON in extra text.
+- LLM JSON output is parsed robustly even if the model wraps JSON in extra text; unavailable or unparsable LLM review is logged in the audit file.
 - For project resources, Prompt Shield keeps the stricter of deterministic and LLM risk. For global user resources, LLM review can downgrade defensive-code false positives where dangerous words appear only as scanner/signature text.
 
 You can force LLM review with:
@@ -85,7 +87,7 @@ It watches `write`, `edit`, and resource-modifying `bash` calls that target path
 ~/.pi/agent/extensions
 ```
 
-When detected, it warns before the tool runs and scans after the tool succeeds. Direct `write` calls to resource files are pre-scanned before landing, so `ask` and `block-dangerous` modes can stop risky content before it is written. It also scans on `session_start` and `resources_discover`, so `/reload` catches newly installed resources too.
+When detected, it warns before the tool runs and scans after the tool succeeds. Direct `write` calls to resource files are pre-scanned before landing, so `ask` and `block-dangerous` modes can stop risky content before it is written. Bash detection is best-effort and post-result scanning is still the backstop for generated installers or scripts. It also scans on `session_start` and `resources_discover`, so `/reload` catches newly installed resources too.
 
 Performance protection still applies: unchanged files are served from SHA-256 cache, and LLM review runs only for suspicious files unless forced.
 

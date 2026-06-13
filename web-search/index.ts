@@ -19,6 +19,8 @@ const SECURE_DNS_PROVIDERS = [
 ] as const;
 const DEFAULT_MAX_RESULTS = 5;
 const FETCH_TIMEOUT_MS = 12_000;
+const MAX_FETCH_BYTES = 2_000_000;
+const MAX_REDIRECTS = 5;
 const CONFIG_PATH = path.join(os.homedir(), ".pi", "agent", "web-search", "config.json");
 
 type WebSearchConfig = {
@@ -43,13 +45,18 @@ type SearchResult = {
 
 type SecurityReport = {
 	hostname: string;
+	finalUrl: string;
+	redirects: string[];
 	ssl: "validated-by-node-fetch";
 	dns: "ok" | "raw-ip";
-	secureDns: "ok" | "not-applicable";
-	malwareDns: "not-blocked" | "not-applicable";
+	secureDns: "ok" | "unchecked" | "not-applicable";
+	malwareDns: "blocked" | "not-blocked" | "unchecked" | "not-applicable";
 	addresses: string[];
-	dnsbl: "not-listed";
+	dnsbl: "not-listed" | "unchecked";
 };
+
+type HostSecurity = Omit<SecurityReport, "finalUrl" | "redirects" | "ssl">;
+type DnsConsistency = { addresses: string[]; secureDns: "ok" | "unchecked"; malwareDns: "not-blocked" | "unchecked" };
 
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("web-search-ip", {
@@ -130,6 +137,9 @@ export default function (pi: ExtensionAPI) {
 			includeRiskyContent: Type.Optional(
 				Type.Boolean({ description: "Include suspicious/dangerous fetched content previews instead of omitting them. Default false." }),
 			),
+			includeSavedIpUrls: Type.Optional(
+				Type.Boolean({ description: "Include saved IP URLs from /web-search-ip. Default false to avoid accidental local/internal access." }),
+			),
 		}),
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const maxResults = Math.max(1, Math.min(Number(params.maxResults || DEFAULT_MAX_RESULTS), 10));
@@ -137,7 +147,7 @@ export default function (pi: ExtensionAPI) {
 			const plan = await createSearchPlan(ctx, params.question, params.sites || [], signal);
 			onUpdate?.({ content: [{ type: "text", text: `Search plan: ${plan.queries.join(" | ")}` }] });
 
-			const explicitUrls = [...config.ipUrls, ...(params.urls || [])];
+			const explicitUrls = [...(params.includeSavedIpUrls === true ? config.ipUrls : []), ...(params.urls || [])];
 			const explicitResults = explicitUrls.map((url) => ({
 				title: `User/config supplied URL: ${url}`,
 				url,
@@ -155,7 +165,7 @@ export default function (pi: ExtensionAPI) {
 					let previewOmitted: string | undefined;
 					let scanInput = `${raw.title}\n${raw.snippet}`;
 					if (params.fetchPages !== false) {
-						const fetchedPreview = await fetchPagePreview(raw.url, signal);
+						const fetchedPreview = await fetchPagePreview(security.finalUrl, signal);
 						scanInput += `\n${fetchedPreview}`;
 						const previewScan = scanTextForAgentRisk(scanInput, { source: "web", provenance: "external" });
 						if (previewScan.risk === "safe" || params.includeRiskyContent === true) {
@@ -178,7 +188,7 @@ export default function (pi: ExtensionAPI) {
 						text: formatResults(params.question, plan, results, rejected),
 					},
 				],
-				details: { question: params.question, plan, savedIpUrls: config.ipUrls, results, rejected },
+				details: { question: params.question, plan, savedIpUrls: params.includeSavedIpUrls === true ? config.ipUrls : [], results, rejected },
 			};
 		},
 	});
@@ -199,7 +209,9 @@ async function loadConfig(): Promise<WebSearchConfig> {
 
 async function saveConfig(config: WebSearchConfig) {
 	await fs.mkdir(path.dirname(CONFIG_PATH), { recursive: true });
-	await fs.writeFile(CONFIG_PATH, `${JSON.stringify(config, null, "\t")}\n`, "utf8");
+	const temp = `${CONFIG_PATH}.${process.pid}.${Date.now()}.tmp`;
+	await fs.writeFile(temp, `${JSON.stringify(config, null, "\t")}\n`, "utf8");
+	await fs.rename(temp, CONFIG_PATH);
 }
 
 function formatSavedIpUrls(config: WebSearchConfig) {
@@ -315,69 +327,87 @@ function parseDuckDuckGoResults(html: string) {
 }
 
 async function securityCheckUrl(rawUrl: string, signal?: AbortSignal): Promise<SecurityReport> {
-	const url = new URL(rawUrl);
-	if (url.protocol !== "https:") throw new Error("blocked non-HTTPS URL");
+	let current = new URL(rawUrl);
+	const redirects: string[] = [];
+	let lastHostSecurity: HostSecurity | undefined;
+
+	for (let depth = 0; depth <= MAX_REDIRECTS; depth += 1) {
+		if (current.protocol !== "https:") throw new Error("blocked non-HTTPS URL");
+		lastHostSecurity = await checkHostSecurity(current);
+
+		// A manual HEAD request validates TLS for this exact redirect hop without
+		// silently following to an unchecked host.
+		const response = await fetchWithTimeout(current.toString(), { method: "HEAD", redirect: "manual", signal });
+		if (![301, 302, 303, 307, 308].includes(response.status)) {
+			return { ...lastHostSecurity, finalUrl: current.toString(), redirects, ssl: "validated-by-node-fetch" };
+		}
+
+		const location = response.headers.get("location");
+		if (!location) throw new Error(`redirect without Location from ${current.hostname}`);
+		const next = new URL(location, current);
+		if (next.protocol !== "https:") throw new Error(`blocked redirect to non-HTTPS URL: ${next.toString()}`);
+		redirects.push(next.toString());
+		current = next;
+	}
+
+	throw new Error(`too many redirects (>${MAX_REDIRECTS})`);
+}
+
+async function checkHostSecurity(url: URL): Promise<HostSecurity> {
 	const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
 	const ipVersion = net.isIP(hostname);
 	if (ipVersion) {
-		await checkDnsbl([hostname]);
-		// A HEAD request still forces Node/fetch TLS certificate validation. Many raw-IP HTTPS
-		// endpoints will fail here unless the certificate is valid for the IP address.
-		await fetchWithTimeout(url.toString(), { method: "HEAD", redirect: "manual", signal });
+		const dnsbl = await checkDnsbl([hostname]);
 		return {
 			hostname,
-			ssl: "validated-by-node-fetch",
 			dns: "raw-ip",
 			secureDns: "not-applicable",
 			malwareDns: "not-applicable",
 			addresses: [hostname],
-			dnsbl: "not-listed",
+			dnsbl,
 		};
 	}
-	const addresses = await resolveWithConsistencyCheck(hostname);
-	await checkDnsbl(addresses);
-	// A HEAD request forces Node/fetch TLS certificate and hostname validation.
-	await fetchWithTimeout(url.toString(), { method: "HEAD", redirect: "manual", signal });
+	const dnsResult = await resolveWithConsistencyCheck(hostname);
+	const dnsbl = await checkDnsbl(dnsResult.addresses);
 	return {
 		hostname,
-		ssl: "validated-by-node-fetch",
 		dns: "ok",
-		secureDns: "ok",
-		malwareDns: "not-blocked",
-		addresses,
-		dnsbl: "not-listed",
+		secureDns: dnsResult.secureDns,
+		malwareDns: dnsResult.malwareDns,
+		addresses: dnsResult.addresses,
+		dnsbl,
 	};
 }
 
-async function resolveWithConsistencyCheck(hostname: string): Promise<string[]> {
+async function resolveWithConsistencyCheck(hostname: string): Promise<DnsConsistency> {
 	const system = await resolveHost(hostname);
 	if (system.length === 0) throw new Error(`DNS resolution failed for ${hostname}`);
 
 	const providerResults = await Promise.all(
 		SECURE_DNS_PROVIDERS.map(async (provider) => ({
 			provider,
-			addresses: await resolveDoh(hostname, provider.url).catch(() => []),
+			result: await resolveDoh(hostname, provider.url).catch(() => ({ state: "unchecked" as const, addresses: [] })),
 		})),
 	);
 
-	const trustedAddresses = providerResults
-		.filter((result) => !result.provider.blocksMalware)
-		.flatMap((result) => result.addresses);
-	const overlap = system.filter((address) => trustedAddresses.includes(address));
+	const trusted = providerResults.filter((result) => !result.provider.blocksMalware);
+	const checkedTrustedAddresses = trusted.filter((result) => result.result.state !== "unchecked").flatMap((result) => result.result.addresses);
+	const overlap = system.filter((address) => checkedTrustedAddresses.includes(address));
 	if (overlap.length === 0) {
+		if (trusted.every((result) => result.result.state === "unchecked")) throw new Error(`secure DNS unchecked for ${hostname}`);
 		throw new Error(`secure DNS consistency check failed for ${hostname}`);
 	}
 
-	const malwareBlocks = providerResults.filter(
-		(result) => result.provider.blocksMalware && result.addresses.length === 0,
-	);
+	const malwareResults = providerResults.filter((result) => result.provider.blocksMalware);
+	const malwareBlocks = malwareResults.filter((result) => result.result.state === "blocked");
 	if (malwareBlocks.length > 0) {
 		throw new Error(
 			`blocked by malware-filtering DNS: ${malwareBlocks.map((result) => result.provider.name).join(", ")}`,
 		);
 	}
+	const malwareDns = malwareResults.some((result) => result.result.state === "unchecked") ? "unchecked" : "not-blocked";
 
-	return overlap;
+	return { addresses: overlap, secureDns: "ok", malwareDns };
 }
 
 async function resolveHost(hostname: string): Promise<string[]> {
@@ -385,12 +415,15 @@ async function resolveHost(hostname: string): Promise<string[]> {
 	return records.map((record) => record.address).filter((address) => net.isIP(address));
 }
 
-async function resolveDoh(hostname: string, endpoint: string): Promise<string[]> {
+async function resolveDoh(hostname: string, endpoint: string): Promise<{ state: "ok" | "blocked" | "unchecked"; addresses: string[] }> {
 	const answers = await Promise.all([resolveDohType(hostname, endpoint, "A"), resolveDohType(hostname, endpoint, "AAAA")]);
-	return [...new Set(answers.flat())].filter((address) => net.isIP(address));
+	if (answers.some((answer) => answer.state === "unchecked")) return { state: "unchecked", addresses: [] };
+	if (answers.every((answer) => answer.state === "blocked")) return { state: "blocked", addresses: [] };
+	const addresses = [...new Set(answers.flatMap((answer) => answer.addresses))].filter((address) => net.isIP(address));
+	return { state: "ok", addresses };
 }
 
-async function resolveDohType(hostname: string, endpoint: string, type: "A" | "AAAA"): Promise<string[]> {
+async function resolveDohType(hostname: string, endpoint: string, type: "A" | "AAAA"): Promise<{ state: "ok" | "blocked" | "unchecked"; addresses: string[] }> {
 	const url = new URL(endpoint);
 	url.searchParams.set("name", hostname);
 	url.searchParams.set("type", type);
@@ -398,14 +431,17 @@ async function resolveDohType(hostname: string, endpoint: string, type: "A" | "A
 		headers: { accept: "application/dns-json", "user-agent": USER_AGENT },
 	});
 	const data = (await response.json()) as { Status?: number; Answer?: Array<{ data?: string; type?: number }> };
-	if (data.Status !== 0) return [];
+	if (data.Status === 3) return { state: "blocked", addresses: [] };
+	if (data.Status !== 0) return { state: "unchecked", addresses: [] };
 	const expectedType = type === "A" ? 1 : 28;
-	return (data.Answer || [])
+	const addresses = (data.Answer || [])
 		.filter((answer) => answer.type === expectedType && answer.data)
 		.map((answer) => answer.data as string);
+	return { state: "ok", addresses };
 }
 
-async function checkDnsbl(addresses: string[]) {
+async function checkDnsbl(addresses: string[]): Promise<"not-listed" | "unchecked"> {
+	let unchecked = false;
 	for (const address of addresses) {
 		if (net.isIP(address) !== 4) continue;
 		const reversed = address.split(".").reverse().join(".");
@@ -415,9 +451,12 @@ async function checkDnsbl(addresses: string[]) {
 				throw new Error(`DNSBL listed: ${address} in ${zone}`);
 			} catch (error) {
 				if (error instanceof Error && error.message.startsWith("DNSBL listed")) throw error;
+				const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : "";
+				if (!["ENOTFOUND", "ENODATA", "ENODOMAIN"].includes(code)) unchecked = true;
 			}
 		}
 	}
+	return unchecked ? "unchecked" : "not-listed";
 }
 
 async function fetchPagePreview(url: string, signal?: AbortSignal) {
@@ -428,13 +467,42 @@ async function fetchPagePreview(url: string, signal?: AbortSignal) {
 async function fetchText(url: string, signal?: AbortSignal) {
 	const response = await fetchWithTimeout(url, {
 		headers: { "user-agent": USER_AGENT, accept: "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5" },
+		redirect: "manual",
 		signal,
 	});
+	if ([301, 302, 303, 307, 308].includes(response.status)) throw new Error(`unchecked redirect from ${url}`);
 	const contentType = response.headers.get("content-type") || "";
 	if (!contentType.includes("text/html") && !contentType.includes("text/plain")) {
 		throw new Error(`unsupported content-type: ${contentType || "unknown"}`);
 	}
-	return response.text();
+	return readResponseTextWithLimit(response, MAX_FETCH_BYTES);
+}
+
+async function readResponseTextWithLimit(response: Response, maxBytes: number) {
+	const length = Number(response.headers.get("content-length") || "0");
+	if (length > maxBytes) throw new Error(`response too large: ${length} bytes`);
+	if (!response.body) return response.text();
+	const reader = response.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	while (true) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		if (!value) continue;
+		total += value.byteLength;
+		if (total > maxBytes) {
+			await reader.cancel();
+			throw new Error(`response too large: >${maxBytes} bytes`);
+		}
+		chunks.push(value);
+	}
+	const bytes = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		bytes.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return new TextDecoder().decode(bytes);
 }
 
 async function fetchWithTimeout(url: string, init: RequestInit = {}) {
@@ -460,11 +528,11 @@ function formatResults(question: string, plan: SearchPlan, results: SearchResult
 	if (!results.length) lines.push("No results passed security checks.");
 	for (const [index, result] of results.entries()) {
 		const dnsText = result.security.dns === "raw-ip"
-			? `raw IP checked (${result.security.addresses.join(", ")}), DNSBL not listed`
-			: `secure DNS ok (${result.security.addresses.join(", ")}), malware DNS not blocked, DNSBL not listed`;
+			? `raw IP checked (${result.security.addresses.join(", ")}), DNSBL ${result.security.dnsbl}`
+			: `secure DNS ${result.security.secureDns} (${result.security.addresses.join(", ")}), malware DNS ${result.security.malwareDns}, DNSBL ${result.security.dnsbl}`;
 		lines.push(
 			`\n${index + 1}. ${result.title}`,
-			`URL: ${result.url}`,
+			`URL: ${result.security.finalUrl}${result.security.finalUrl === result.url ? "" : ` (from ${result.url})`}`,
 			`Security: HTTPS validated, ${dnsText}, content scan: ${result.contentScan.risk}`,
 			`Snippet: ${result.snippet}`,
 		);
