@@ -14,7 +14,12 @@ Adds a `secure_web_search` tool for web research.
 - Checks IPv4 addresses against DNSBL zones before fetching result pages.
 - Caps fetched text responses before buffering them.
 - Scans titles, snippets, and fetched page previews with the shared agent-risk scanner.
+- Scans the user's search question before generating a search plan; dangerous questions skip LLM plan generation to avoid prompt-injection vectors.
 - Omits suspicious/dangerous page previews by default while still returning citation metadata and scan findings.
+- Optionally blocks dangerous results entirely instead of only omitting their previews (`blockDangerous`).
+- Block private/reserved IP targets by default in explicit URLs (`blockPrivateIps`, default true).
+- Truncates questions to 2000 characters before sending to the search-planning LLM.
+- Sanitizes LLM-generated sites to reject IP addresses and URL paths, preventing the model from injecting raw IP targets.
 
 ## Tool
 
@@ -31,6 +36,8 @@ Parameters:
 - `fetchPages`: whether to fetch and preview pages, default true
 - `includeRiskyContent`: include suspicious/dangerous previews instead of omitting them, default false
 - `includeSavedIpUrls`: include globally saved IP URLs from `/web-search-ip`, default false
+- `blockDangerous`: entirely omit results whose content scan is dangerous (not just previews), default false
+- `blockPrivateIps`: reject explicit URL targets that resolve to private/reserved IP ranges, default true
 
 ## Saved IP URLs
 
