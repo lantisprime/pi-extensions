@@ -78,6 +78,69 @@ See [`permission-policy/README.md`](permission-policy/README.md) for details.
 
 ---
 
+### Prompt Shield
+
+Path:
+
+```text
+prompt-shield/index.ts
+```
+
+Global install location:
+
+```text
+~/.pi/agent/extensions/prompt-shield/index.ts
+```
+
+Scans project/global Pi resources for prompt-injection and agent-security risk. Supports monitor, ask, and block-dangerous modes.
+
+Scans:
+
+- `.pi/skills/`
+- `.agents/skills/`
+- `.pi/prompts/`
+- `.pi/extensions/`
+- `.pi/SYSTEM.md`
+- `.pi/APPEND_SYSTEM.md`
+- `AGENTS.md`
+- `CLAUDE.md`
+
+Detection basis:
+
+- deterministic pattern scoring for instruction override, secret exfiltration, destructive commands, hidden text, role simulation, and obfuscation
+- LLM review for suspicious resources
+- SHA-256 cache to avoid repeated LLM calls for unchanged files
+- automatic activation when Pi tools install or update skills, prompts, or extensions
+- hash-based approvals and denials
+- permission-policy integration via stricter permissions when unapproved risk is active
+
+Commands:
+
+```text
+/prompt-shield
+/prompt-shield scan
+/prompt-shield llm
+/prompt-shield audit
+/prompt-shield mode monitor|ask|block-dangerous
+/prompt-shield approve <path>
+/prompt-shield deny <path>
+/prompt-shield approvals
+/prompt-shield reset
+```
+
+Storage:
+
+```text
+~/.pi/agent/prompt-shield/config.json
+~/.pi/agent/prompt-shield/cache.json
+~/.pi/agent/prompt-shield/audit.jsonl
+~/.pi/agent/prompt-shield/state.json
+```
+
+See [`prompt-shield/README.md`](prompt-shield/README.md) for details.
+
+---
+
 ### Secure Web Search
 
 Path:
@@ -155,6 +218,9 @@ cp permission-policy/index.ts ~/.pi/agent/extensions/permission-policy/index.ts
 
 mkdir -p ~/.pi/agent/extensions/web-search
 cp web-search/index.ts ~/.pi/agent/extensions/web-search/index.ts
+
+mkdir -p ~/.pi/agent/extensions/prompt-shield
+cp prompt-shield/index.ts ~/.pi/agent/extensions/prompt-shield/index.ts
 ```
 
 Then in Pi:

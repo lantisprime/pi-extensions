@@ -31,6 +31,7 @@ type PermissionRequest = {
 };
 
 const POLICY_DIR = path.join(os.homedir(), ".pi", "agent", "permission-policy", "projects");
+const PROMPT_SHIELD_STATE_PATH = path.join(os.homedir(), ".pi", "agent", "prompt-shield", "state.json");
 const WEB_TOOL_NAMES = new Set(["web_search", "search_web", "web", "browser", "fetch", "http_get"]);
 const SESSION_PERMISSIONS = new Map<string, Partial<Record<PermissionKey, Decision>>>();
 
@@ -364,20 +365,27 @@ async function evaluateCommandWithLlm(
 }
 
 async function ensurePermission(ctx: ExtensionContext, projectPath: string, request: PermissionRequest): Promise<boolean> {
-	const sessionDecision = SESSION_PERMISSIONS.get(projectPath)?.[request.key];
-	if (sessionDecision) return sessionDecision === "allow";
+	const promptShieldStrict = await isPromptShieldStrict();
+	const sensitiveUnderShield = promptShieldStrict && isSensitiveWhenPromptShieldRiskActive(request.key);
 
-	const policy = await loadPolicy(projectPath);
-	const projectDecision = policy.permissions[request.key];
-	if (projectDecision) return projectDecision === "allow";
-
-	if (policy.mode === "readOnlyAuto" && isReadOnlyAutoAllowed(request, projectPath, ctx.cwd)) {
-		return true;
+	if (!sensitiveUnderShield) {
+		const sessionDecision = SESSION_PERMISSIONS.get(projectPath)?.[request.key];
+		if (sessionDecision) return sessionDecision === "allow";
 	}
 
-	if (policy.mode === "llmAuto" && request.command) {
-		const safe = await evaluateCommandWithLlm(ctx, request.command, projectPath);
-		if (safe === true) return true;
+	const policy = await loadPolicy(projectPath);
+	if (!sensitiveUnderShield) {
+		const projectDecision = policy.permissions[request.key];
+		if (projectDecision) return projectDecision === "allow";
+
+		if (policy.mode === "readOnlyAuto" && isReadOnlyAutoAllowed(request, projectPath, ctx.cwd)) {
+			return true;
+		}
+
+		if (policy.mode === "llmAuto" && request.command) {
+			const safe = await evaluateCommandWithLlm(ctx, request.command, projectPath);
+			if (safe === true) return true;
+		}
 	}
 
 	if (!ctx.hasUI) {
@@ -390,6 +398,7 @@ async function ensurePermission(ctx: ExtensionContext, projectPath: string, requ
 			"",
 			`Project: ${projectPath}`,
 			request.detail,
+			...(sensitiveUnderShield ? ["", "Prompt Shield has active unapproved risk, so automatic/project grants are bypassed for this sensitive action."] : []),
 			"",
 			"How should Pi handle this permission?",
 		].join("\n"),
@@ -426,6 +435,19 @@ function setSessionDecision(projectPath: string, key: PermissionKey, decision: D
 	const current = SESSION_PERMISSIONS.get(projectPath) || {};
 	current[key] = decision;
 	SESSION_PERMISSIONS.set(projectPath, current);
+}
+
+function isSensitiveWhenPromptShieldRiskActive(key: PermissionKey): boolean {
+	return key === "bashCommands" || key === "destructiveBash" || key === "git" || key === "web" || key === "writeFiles" || key === "readOutsideProject";
+}
+
+async function isPromptShieldStrict(): Promise<boolean> {
+	try {
+		const state = JSON.parse(await fs.readFile(PROMPT_SHIELD_STATE_PATH, "utf8")) as { strictPermissions?: boolean };
+		return state.strictPermissions === true;
+	} catch {
+		return false;
+	}
 }
 
 async function updatePermissionStatus(ctx: ExtensionContext) {

@@ -46,6 +46,23 @@ Automatically allow known read-only shell/git commands in the current project, s
 
 Use the current LLM to classify bash/git commands. Commands classified as `SAFE` are automatically allowed. Commands classified as `UNSAFE`, or commands the LLM cannot classify, fall back to the normal permission prompt/block behavior.
 
+## Prompt Shield integration
+
+If `prompt-shield` reports active unapproved suspicious/dangerous project or global resources, permission-policy enters a stricter path for sensitive operations. In that state it bypasses automatic/project grants and asks again for:
+
+- bash commands
+- destructive bash
+- git commands
+- web/search/fetch
+- write/edit
+- reads outside the project
+
+Prompt Shield state is read from:
+
+```text
+~/.pi/agent/prompt-shield/state.json
+```
+
 ## Storage
 
 Persistent policy files are stored outside the repo under:
