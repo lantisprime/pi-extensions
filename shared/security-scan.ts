@@ -1,3 +1,5 @@
+declare const Buffer: { from(input: string, encoding: "base64"): { toString(encoding: "utf8"): string } };
+
 export type RiskLevel = "safe" | "suspicious" | "dangerous";
 export type ScanSource = "skill" | "prompt" | "extension" | "web";
 export type ScanProvenance = "project" | "global" | "external";
@@ -46,21 +48,58 @@ const PATTERNS: Array<{ regex: RegExp; severity: number; category: string; reaso
 export function scanTextForAgentRisk(text: string, options: AgentRiskScanOptions = {}): AgentRiskScanResult {
 	const maxMatches = options.maxMatchesPerPattern ?? 5;
 	const findings: Finding[] = [];
-	for (const pattern of PATTERNS) {
-		pattern.regex.lastIndex = 0;
-		for (const match of [...text.matchAll(pattern.regex)].slice(0, maxMatches)) {
-			findings.push({
-				severity: pattern.severity,
-				category: pattern.category,
-				match: (match[0] || "").slice(0, 160),
-				reason: pattern.reason,
-			});
+	for (const input of buildScanInputs(text)) {
+		for (const pattern of PATTERNS) {
+			pattern.regex.lastIndex = 0;
+			for (const match of [...input.text.matchAll(pattern.regex)].slice(0, maxMatches)) {
+				findings.push({
+					severity: input.label === "raw" ? pattern.severity : Math.max(pattern.severity, 4),
+					category: input.label === "raw" ? pattern.category : `${pattern.category}:${input.label}`,
+					match: (match[0] || "").slice(0, 160),
+					reason: input.label === "raw" ? pattern.reason : `${pattern.reason} in ${input.label} decoded text`,
+				});
+			}
 		}
 	}
-	let score = findings.reduce((sum, finding) => sum + finding.severity, 0);
+	const deduped = dedupeFindings(findings);
+	let score = deduped.reduce((sum, finding) => sum + finding.severity, 0);
 	if (options.provenance === "project" && score > 0) score += 1;
 	if (options.provenance === "external" && score > 0) score += 1;
-	return { risk: riskFromScore(score), score, findings };
+	return { risk: riskFromScore(score), score, findings: deduped };
+}
+
+function buildScanInputs(text: string): Array<{ label: string; text: string }> {
+	const inputs = [{ label: "raw", text }];
+	for (const decoded of decodePercentEncoded(text)) inputs.push({ label: "url", text: decoded });
+	for (const decoded of decodeBase64Blobs(text)) inputs.push({ label: "base64", text: decoded });
+	return inputs;
+}
+
+function decodePercentEncoded(text: string): string[] {
+	const matches = text.match(/(?:[A-Za-z0-9._~!$&'()*+,;=:@/-]|%[0-9a-f]{2})*%[0-9a-f]{2}(?:[A-Za-z0-9._~!$&'()*+,;=:@/-]|%[0-9a-f]{2})*/gi) || [];
+	return [...new Set(matches.slice(0, 20).map((match) => {
+		try { return decodeURIComponent(match); } catch { return ""; }
+	}).filter((value) => value.length >= 8 && value !== text))];
+}
+
+function decodeBase64Blobs(text: string): string[] {
+	const matches = text.match(/[A-Za-z0-9+/]{24,}={0,2}/g) || [];
+	return [...new Set(matches.slice(0, 20).map((match) => {
+		try {
+			const decoded = Buffer.from(match, "base64").toString("utf8");
+			return /[\x09\x0A\x0D\x20-\x7E]{8,}/.test(decoded) ? decoded : "";
+		} catch { return ""; }
+	}).filter(Boolean))];
+}
+
+function dedupeFindings(findings: Finding[]) {
+	const seen = new Set<string>();
+	return findings.filter((finding) => {
+		const key = `${finding.category}\0${finding.match}`;
+		if (seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	});
 }
 
 export function riskFromScore(score: number): RiskLevel {
