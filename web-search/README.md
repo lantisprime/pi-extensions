@@ -92,6 +92,21 @@ Then run:
 /reload
 ```
 
+## Tests
+
+Redirect/fetch and DuckDuckGo provider unit tests cover DuckDuckGo's canonical `html.duckduckgo.com` endpoint, saved DuckDuckGo HTML parser fixtures, the legacy `duckduckgo.com` to `html.duckduckgo.com` redirect, relative HTTPS redirects, non-HTTPS redirect blocking, missing `Location` headers, redirect limits, unsupported content types, and response-size caps.
+
+```bash
+web-search/test-fixtures/run-redirect-fetch-tests.sh
+```
+
+Shared scanner impact checks:
+
+```bash
+scripts/verify-shared-sync.sh
+scripts/test-security-scan.mjs
+```
+
 ## Security notes
 
 No web search extension can fully prove a website is safe. This extension is defensive by default: it scans user questions for prompt-injection before generating search plans (dangerous questions skip LLM planning), rejects non-HTTPS URLs and non-HTTPS redirects, validates each redirect hop before fetching a preview, caps response bodies, rejects hosts that fail secure DNS consistency checks, rejects hosts blocked by malware-filtering DNS providers, rejects DNSBL-listed IPv4 addresses, and blocks private/reserved IP targets (can opt out with `blockPrivateIps: false`). Raw IP HTTPS URLs, including private/local IPs when explicitly allowed, go through DNSBL checks where applicable and TLS certificate validation. DNSBL lists and malware-filtering DNS are useful signals but not complete malicious-site detectors; transient provider failures are reported as `unchecked`. Fetched web content is untrusted prompt input, so suspicious/dangerous previews are omitted by default. Use `blockDangerous: true` to omit dangerous results entirely.

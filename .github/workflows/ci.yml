@@ -28,5 +28,8 @@ jobs:
       - name: Run shared scanner smoke tests
         run: scripts/test-security-scan.mjs
 
+      - name: Run web-search redirect/fetch unit tests
+        run: web-search/test-fixtures/run-redirect-fetch-tests.sh
+
       - name: Run permission-policy classification unit tests
         run: npx --yes tsx permission-policy/test-fixtures/test-classification.ts
