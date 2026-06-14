@@ -33,6 +33,44 @@ function looksDestructive(command: string): boolean {
 	return destructiveCommand || overwriteRedirect || inPlaceEdit;
 }
 
+function isYoloHardDenied(command: string, projectPath: string, cwd: string): string | undefined {
+	const normalized = command.replace(/\\n|[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
+	if (!normalized) return undefined;
+	if (/(^|[;&|()\s])rm\s+[^;&|()]*?(?:--force\b|-[A-Za-z]*f[A-Za-z]*\b)/i.test(normalized)) return "rm -f/rm -rf commands are blocked even in YOLO mode";
+	if (/(^|[;&|()\s])rm\s+[^;&|()]*\s(?:\.git|\.git\/|\.\/\.git|\.\/\.git\/)(?:\s|$)/i.test(normalized)) return "commands that delete the repository metadata are blocked even in YOLO mode";
+	if (/(?:\.git\b.{0,120}\brm\b|\brm\b.{0,120}\.git\b)/i.test(normalized)) return "commands that delete the repository metadata are blocked even in YOLO mode";
+	if (/\bgit\s+worktree\s+remove\b/i.test(normalized) && /(?:^|\s)(?:--force|-f)(?:\s|$)/i.test(normalized)) return "forced repository worktree deletion is blocked even in YOLO mode";
+
+	const rmTargets = extractRmLikeTargets(normalized);
+	for (const target of rmTargets) {
+		if (target === ".git" || target.startsWith(`.git${path.sep}`)) return "commands that delete the repository metadata are blocked even in YOLO mode";
+		const absolute = path.resolve(cwd, target);
+		if (absolute === projectPath || projectPath.startsWith(`${absolute}${path.sep}`)) {
+			return "commands that delete the project repository are blocked even in YOLO mode";
+		}
+	}
+	return undefined;
+}
+
+function isYoloHardDeniedBool(command: string, projectPath: string, cwd: string): boolean {
+	return !!isYoloHardDenied(command, projectPath, cwd);
+}
+
+function extractRmLikeTargets(command: string): string[] {
+	const targets: string[] = [];
+	for (const segment of command.split(/\s*(?:&&|\|\||;|\|)\s*/)) {
+		const tokens = segment.match(/(?:"[^"]+"|'[^']+'|\S+)/g) || [];
+		const commandIndex = tokens.findIndex((token) => /^(rm|rmdir|unlink)$/.test(token));
+		if (commandIndex < 0) continue;
+		for (const raw of tokens.slice(commandIndex + 1)) {
+			const token = raw.replace(/^['"]|['"]$/g, "");
+			if (!token || token === "--" || token.startsWith("-")) continue;
+			targets.push(token);
+		}
+	}
+	return targets;
+}
+
 function isReadOnlyShellCommand(command: string): boolean {
 	if (/[;&]\s*(rm|mv|cp|chmod|chown|install|truncate|touch|mkdir|rmdir)\b/i.test(command)) return false;
 	const normalized = command.replace(/\s+/g, " ").trim();
@@ -224,6 +262,30 @@ check("search_web -> web", classifyToolCall("search_web", {}, projectPath, cwd),
 check("browser -> web", classifyToolCall("browser", {}, projectPath, cwd), ["web"]);
 check("bash -> classifyBashCommand", classifyToolCall("bash", { command: "ls" }, projectPath, cwd), ["bashCommands"]);
 check("unknown tool -> none", classifyToolCall("grep", {}, projectPath, cwd), []);
+
+// YOLO hard-deny behavior: auto-allow everything except rm -f/rm -rf style commands and repo deletion.
+check("YOLO allows ordinary bash", isYoloHardDeniedBool("npm test", projectPath, cwd), false);
+check("YOLO allows write-like non-rm command", isYoloHardDeniedBool("touch file && echo ok > file", projectPath, cwd), false);
+check("YOLO allows git clean by policy exception scope", isYoloHardDeniedBool("git clean -fdx", projectPath, cwd), false);
+check("YOLO allows rm without -f for ordinary file", isYoloHardDeniedBool("rm file.txt", projectPath, cwd), false);
+check("YOLO allows rm -r for ordinary directory", isYoloHardDeniedBool("rm -r build", projectPath, cwd), false);
+check("YOLO allows rm -i because it is not force", isYoloHardDeniedBool("rm -i file.txt", projectPath, cwd), false);
+check("YOLO blocks rm -f", isYoloHardDeniedBool("rm -f file.txt", projectPath, cwd), true);
+check("YOLO blocks rm -rf", isYoloHardDeniedBool("rm -rf build", projectPath, cwd), true);
+check("YOLO blocks rm -fr", isYoloHardDeniedBool("rm -fr build", projectPath, cwd), true);
+check("YOLO blocks rm -r -f", isYoloHardDeniedBool("rm -r -f build", projectPath, cwd), true);
+check("YOLO blocks rm --force", isYoloHardDeniedBool("rm --force file.txt", projectPath, cwd), true);
+check("YOLO blocks chained rm -f", isYoloHardDeniedBool("echo ok && rm -f file.txt", projectPath, cwd), true);
+check("YOLO blocks rm -rf with newline", isYoloHardDeniedBool("echo ok\\nrm -rf build", projectPath, cwd), true);
+check("YOLO blocks rm .git", isYoloHardDeniedBool("rm -r .git", projectPath, cwd), true);
+check("YOLO blocks rm ./.git", isYoloHardDeniedBool("rm -r ./.git", projectPath, cwd), true);
+check("YOLO blocks adversarial find .git rm", isYoloHardDeniedBool("find . -name .git -exec rm -r {} +", projectPath, cwd), true);
+check("YOLO blocks unlink .git", isYoloHardDeniedBool("unlink .git", projectPath, cwd), true);
+check("YOLO blocks repo deletion via parent from subdir", isYoloHardDeniedBool("rm -r ..", projectPath, cwd), true);
+check("YOLO blocks repo deletion at project root", isYoloHardDeniedBool("rm -r .", projectPath, projectPath), true);
+check("YOLO blocks rmdir project root from subdir", isYoloHardDeniedBool("rmdir ..", projectPath, cwd), true);
+check("YOLO blocks forced git worktree removal", isYoloHardDeniedBool("git worktree remove --force ../project", projectPath, cwd), true);
+check("YOLO allows non-forced git worktree removal by hard-deny scope", isYoloHardDeniedBool("git worktree remove ../project", projectPath, cwd), false);
 
 console.log(`\n${passed} passed, ${failed} failed out of ${scenario} scenarios`);
 if (failed > 0) process.exit(1);

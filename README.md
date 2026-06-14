@@ -81,6 +81,7 @@ Commands:
 /permissions mode ask
 /permissions mode read-only
 /permissions mode auto
+/permissions mode yolo
 ```
 
 Status line:
@@ -89,6 +90,7 @@ Status line:
 │ permission: ask
 │ permission: read-only
 │ permission: auto
+│ permission: yolo
 ```
 
 Shortcut:
@@ -100,8 +102,10 @@ ctrl+shift+m
 Cycles permission mode:
 
 ```text
-ask -> read-only -> auto -> ask
+ask -> read-only -> auto -> yolo -> ask
 ```
+
+YOLO mode auto-allows by default and is dangerous; it shows a warning/confirmation when enabled and still hard-blocks `rm -f`/`rm -rf` style commands and apparent repository deletion.
 
 See [`permission-policy/README.md`](permission-policy/README.md) for details.
 

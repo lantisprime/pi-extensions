@@ -46,6 +46,14 @@ Automatically allow known read-only shell/git commands in the current project, s
 
 Use the current LLM to classify bash/git commands. Commands classified as `SAFE` are automatically allowed. Commands classified as `UNSAFE`, or commands the LLM cannot classify, fall back to the normal permission prompt/block behavior.
 
+```text
+/permissions mode yolo
+```
+
+Dangerous YOLO mode. Automatically allows permission requests by default, including bash/git/web/write/outside-read categories, without prompting. The extension still hard-blocks `rm -f`/`rm -rf` style commands and commands that appear to delete the repository or its `.git` metadata.
+
+When enabling YOLO mode, Pi shows an explicit warning and confirmation prompt. Use YOLO only in disposable or fully trusted workspaces.
+
 ## Prompt Shield integration
 
 If `prompt-shield` reports active unapproved suspicious/dangerous project or global resources, permission-policy enters a stricter path for sensitive operations. In that state it bypasses automatic/project grants and asks again for:
@@ -92,6 +100,7 @@ The extension shows the current mode in Pi's status/footer line:
 │ permission: ask
 │ permission: read-only
 │ permission: auto
+│ permission: yolo
 ```
 
 It also registers this shortcut:
@@ -103,7 +112,7 @@ ctrl+shift+m
 Pressing `ctrl+shift+m` cycles modes in this order:
 
 ```text
-ask -> read-only -> auto -> ask
+ask -> read-only -> auto -> yolo -> ask
 ```
 
 Pi's default `shift+tab` binding remains available for thinking level cycling.
@@ -123,10 +132,10 @@ Shows the mode plus persistent and current-session permissions for the current p
 Clears persistent and current-session permissions for the current project.
 
 ```text
-/permissions mode ask|read-only|auto
+/permissions mode ask|read-only|auto|yolo
 ```
 
-Sets the current project's permission mode and updates the status line.
+Sets the current project's permission mode and updates the status line. Setting `yolo` requires confirmation and shows a danger warning.
 
 ## Tests
 
@@ -136,7 +145,7 @@ Classification unit tests:
 permission-policy/test-fixtures/run-all-tests.sh
 ```
 
-Runs 85 classification unit tests covering destructive detection, git detection, read-only command classification, outside-project detection, tool classification, and read-only auto allowance logic.
+Runs 107 classification unit tests covering destructive detection, git detection, read-only command classification, outside-project detection, tool classification, read-only auto allowance logic, and YOLO hard-deny negative/adversarial scenarios.
 
 End-to-end scenarios verified against a live Pi instance:
 
