@@ -276,7 +276,7 @@ Global install location:
 ~/.pi/agent/extensions/tool-context-loader/index.ts
 ```
 
-P1a status: discovery + diagnostics only. It scans configured runbook/episode roots, parses lightweight frontmatter metadata, respects project trust for project-local roots, and exposes diagnostics without injecting model context or modifying tool results.
+P1b status: discovery + diagnostics plus preload index only. It scans configured runbook/episode roots, parses lightweight frontmatter metadata, respects project trust for project-local roots, exposes diagnostics, and appends compact metadata-only preload indexes for active tools with matching `injection: preload` records. It still does not inject Markdown bodies or modify tool results.
 
 Default project roots, scanned only when trusted:
 
