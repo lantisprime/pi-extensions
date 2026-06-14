@@ -5,7 +5,7 @@ Adds a `secure_web_search` tool for web research.
 ## Features
 
 - Uses the current Pi LLM to suggest relevant search queries and reputable websites.
-- Searches DuckDuckGo HTML results.
+- Searches a configured self-hosted SearXNG instance when enabled, otherwise falls back to DuckDuckGo HTML results.
 - Allows only HTTPS result URLs and re-checks every redirect target before fetching previews.
 - Relies on Node/fetch TLS validation for SSL certificate and hostname checks.
 - Performs secure DNS-over-HTTPS consistency checks against providers including Cloudflare and Google.
@@ -20,6 +20,7 @@ Adds a `secure_web_search` tool for web research.
 - Block private/reserved IP targets by default in explicit URLs (`blockPrivateIps`, default true).
 - Truncates questions to 2000 characters before sending to the search-planning LLM.
 - Sanitizes LLM-generated sites to reject IP addresses and URL paths, preventing the model from injecting raw IP targets.
+- Requires explicit SearXNG configuration; it does not use random public SearXNG instances by default.
 
 ## Tool
 
@@ -38,6 +39,26 @@ Parameters:
 - `includeSavedIpUrls`: include globally saved IP URLs from `/web-search-ip`, default false
 - `blockDangerous`: entirely omit results whose content scan is dangerous (not just previews), default false
 - `blockPrivateIps`: reject explicit URL targets that resolve to private/reserved IP ranges, default true
+
+## Provider Config
+
+By default `secure_web_search` uses DuckDuckGo HTML. To use SearXNG, configure your own HTTPS SearXNG instance explicitly:
+
+```text
+/web-search-config searxng https://search.example.com/search
+/web-search-config list
+/web-search-config provider auto
+/web-search-config provider duckduckgo-html
+/web-search-config reset-provider
+```
+
+Provider behavior:
+
+- `auto`: uses configured SearXNG when `searxngUrl` exists, otherwise DuckDuckGo HTML; falls back to DuckDuckGo if SearXNG fails.
+- `searxng`: requires `searxngUrl` and does not silently fall back.
+- `duckduckgo-html`: forces the DuckDuckGo HTML provider.
+
+SearXNG must support JSON output (`format=json`). Prefer a self-hosted/private instance. The extension ships with no public SearXNG default and sends only search query text to the provider.
 
 ## Saved IP URLs
 
@@ -69,7 +90,10 @@ Example file:
 
 ```json
 {
+  "version": 1,
   "updatedAt": "2026-06-13T00:00:00.000Z",
+  "provider": "auto",
+  "searxngUrl": "https://search.example.com/search",
   "ipUrls": ["https://192.168.1.1/", "https://203.0.113.10/status"]
 }
 ```
@@ -94,7 +118,7 @@ Then run:
 
 ## Tests
 
-Redirect/fetch and DuckDuckGo provider unit tests cover DuckDuckGo's canonical `html.duckduckgo.com` endpoint, saved DuckDuckGo HTML parser fixtures, the legacy `duckduckgo.com` to `html.duckduckgo.com` redirect, relative HTTPS redirects, non-HTTPS redirect blocking, missing `Location` headers, redirect limits, unsupported content types, and response-size caps.
+Redirect/fetch, DuckDuckGo provider, and SearXNG provider unit tests cover DuckDuckGo's canonical `html.duckduckgo.com` endpoint, saved DuckDuckGo HTML parser fixtures, DuckDuckGo ad redirect filtering, SearXNG URL normalization and JSON parsing, the legacy `duckduckgo.com` to `html.duckduckgo.com` redirect, relative HTTPS redirects, non-HTTPS redirect blocking, missing `Location` headers, redirect limits, unsupported content types, JSON content, and response-size caps.
 
 ```bash
 web-search/test-fixtures/run-redirect-fetch-tests.sh
@@ -109,7 +133,7 @@ scripts/test-security-scan.mjs
 
 ## Security notes
 
-No web search extension can fully prove a website is safe. This extension is defensive by default: it scans user questions for prompt-injection before generating search plans (dangerous questions skip LLM planning), rejects non-HTTPS URLs and non-HTTPS redirects, validates each redirect hop before fetching a preview, caps response bodies, rejects hosts that fail secure DNS consistency checks, rejects hosts blocked by malware-filtering DNS providers, rejects DNSBL-listed IPv4 addresses, and blocks private/reserved IP targets (can opt out with `blockPrivateIps: false`). Raw IP HTTPS URLs, including private/local IPs when explicitly allowed, go through DNSBL checks where applicable and TLS certificate validation. DNSBL lists and malware-filtering DNS are useful signals but not complete malicious-site detectors; transient provider failures are reported as `unchecked`. Fetched web content is untrusted prompt input, so suspicious/dangerous previews are omitted by default. Use `blockDangerous: true` to omit dangerous results entirely.
+No web search extension can fully prove a website is safe. This extension is defensive by default: it scans user questions for prompt-injection before generating search plans (dangerous questions skip LLM planning), rejects non-HTTPS URLs and non-HTTPS redirects, validates each redirect hop before fetching a preview, caps response bodies, rejects hosts that fail secure DNS consistency checks, rejects hosts blocked by malware-filtering DNS providers, rejects DNSBL-listed IPv4 addresses, and blocks private/reserved IP targets (can opt out with `blockPrivateIps: false`). Raw IP HTTPS URLs, including private/local IPs when explicitly allowed, go through DNSBL checks where applicable and TLS certificate validation. DNSBL lists and malware-filtering DNS are useful signals but not complete malicious-site detectors; transient provider failures are reported as `unchecked`. Fetched web content is untrusted prompt input, so suspicious/dangerous previews are omitted by default. Use `blockDangerous: true` to omit dangerous results entirely. SearXNG is a provider privacy boundary, not anonymity: the configured SearXNG server still sees search queries, and upstream engines configured on that server may also see them.
 
 Secure DNS providers currently used:
 

@@ -67,12 +67,25 @@ export function parseDuckDuckGoResults(html: string): SearchCandidate[] {
 export function decodeDuckDuckGoUrl(raw: string) {
 	try {
 		const parsed = new URL(raw, "https://duckduckgo.com");
+		if (isKnownAdOrTrackingUrl(parsed)) return undefined;
 		const uddg = parsed.searchParams.get("uddg");
-		const url = uddg || parsed.toString();
-		return new URL(url).toString();
+		const candidate = new URL(uddg || parsed.toString());
+		if (isKnownAdOrTrackingUrl(candidate)) return undefined;
+		return candidate.toString();
 	} catch {
 		return undefined;
 	}
+}
+
+function isKnownAdOrTrackingUrl(url: URL) {
+	const hostname = url.hostname.toLowerCase().replace(/^www\./, "");
+	const pathname = url.pathname.toLowerCase();
+	if (hostname === "duckduckgo.com" && pathname === "/y.js") return true;
+	if ((hostname === "bing.com" || hostname.endsWith(".bing.com")) && pathname === "/aclick") return true;
+	if (url.searchParams.has("ad_domain") || url.searchParams.has("ad_provider") || url.searchParams.has("ad_type")) {
+		return true;
+	}
+	return false;
 }
 
 function stripHtml(html: string) {

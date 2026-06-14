@@ -176,6 +176,8 @@ type SearchProvider = {
 
 ### Phase W2 — Config and provider selection
 
+Status: implemented for `auto`, `duckduckgo-html`, and explicit `searxng` config.
+
 Scope:
 
 - Add config loading for provider selection.
@@ -192,6 +194,8 @@ Example config path:
 Extend existing config rather than introduce another file.
 
 ### Phase W3 — Self-hosted SearXNG provider
+
+Status: implemented for HTTPS self-hosted SearXNG JSON output with explicit config and DuckDuckGo fallback only in `auto` mode.
 
 Scope:
 

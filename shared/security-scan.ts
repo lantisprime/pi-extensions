@@ -29,7 +29,9 @@ const PATTERNS: Array<{ regex: RegExp; severity: number; category: string; reaso
 	{ regex: /do not (tell|inform|notify|ask) (the )?user/gi, severity: 4, category: "concealment", reason: "Attempts to hide behavior from user" },
 	{ regex: /(?:system|developer|assistant|tool)\s*:/gi, severity: 2, category: "role-simulation", reason: "May be simulating chat roles" },
 	{ regex: /<\/?(?:system|developer|assistant|tool)>/gi, severity: 3, category: "role-simulation", reason: "May be simulating privileged messages" },
-	{ regex: /(?:api[_-]?key|token|password|secret|private key|credential)/gi, severity: 3, category: "secret-access", reason: "Mentions secrets or credentials" },
+	{ regex: /(?:api[\s_-]?keys?|tokens?|passwords?|secrets?|private keys?|credentials?)/gi, severity: 0, category: "secret-reference", reason: "Mentions secrets or credentials" },
+	{ regex: /(?:steal|extract|harvest|collect|dump).{0,80}(?:api[\s_-]?keys?|tokens?|passwords?|secrets?|private keys?|credentials?)/gi, severity: 4, category: "secret-access", reason: "Requests access to secrets or credentials" },
+	{ regex: /(?:read|cat|print|show).{0,80}(?:your|user'?s?|local|actual|real|private|environment|env)\s+.{0,30}(?:api[\s_-]?keys?|tokens?|passwords?|secrets?|private keys?|credentials?)/gi, severity: 4, category: "secret-access", reason: "Requests access to secrets or credentials" },
 	{ regex: /(?:~\/\.ssh|~\/\.aws|~\/\.config\/gh|\.env\b|\.npmrc|\.pypirc)/gi, severity: 4, category: "sensitive-path", reason: "Mentions sensitive credential paths" },
 	{ regex: /(?:exfiltrate|upload|send|post).{0,120}(?:secret|token|password|key|\.env|ssh)/gi, severity: 7, category: "exfiltration", reason: "Potential secret exfiltration instruction" },
 	{ regex: /\b(?:curl|wget|nc|netcat|scp|rsync|ssh)\b/gi, severity: 3, category: "network", reason: "Network-capable command" },
@@ -53,7 +55,7 @@ export function scanTextForAgentRisk(text: string, options: AgentRiskScanOptions
 			pattern.regex.lastIndex = 0;
 			for (const match of [...input.text.matchAll(pattern.regex)].slice(0, maxMatches)) {
 				findings.push({
-					severity: input.label === "raw" ? pattern.severity : Math.max(pattern.severity, 4),
+					severity: input.label === "raw" || pattern.severity === 0 ? pattern.severity : Math.max(pattern.severity, 4),
 					category: input.label === "raw" ? pattern.category : `${pattern.category}:${input.label}`,
 					match: (match[0] || "").slice(0, 160),
 					reason: input.label === "raw" ? pattern.reason : `${pattern.reason} in ${input.label} decoded text`,

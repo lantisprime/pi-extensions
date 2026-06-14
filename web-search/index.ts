@@ -2,6 +2,7 @@ import { complete, type UserMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { searchDuckDuckGoHtml, type SearchCandidate } from "./lib/duckduckgo";
 import { fetchTextFollowingHttpsRedirects, REDIRECT_STATUSES } from "./lib/redirect-fetch";
+import { normalizeSearxngUrl, searchSearxng } from "./lib/searxng";
 import { scanTextForAgentRisk, type AgentRiskScanResult } from "./lib/security-scan";
 import { Type } from "typebox";
 import dns from "node:dns/promises";
@@ -24,11 +25,17 @@ const FETCH_TIMEOUT_MS = 12_000;
 const MAX_FETCH_BYTES = 2_000_000;
 const MAX_REDIRECTS = 5;
 const MAX_QUESTION_LENGTH = 2_000;
+const MAX_REJECTED_URL_DISPLAY_LENGTH = 240;
 const CONFIG_PATH = path.join(os.homedir(), ".pi", "agent", "web-search", "config.json");
 
+type SearchProviderName = "auto" | "duckduckgo-html" | "searxng";
+
 type WebSearchConfig = {
+	version?: 1;
 	updatedAt: string;
 	ipUrls: string[];
+	provider: SearchProviderName;
+	searxngUrl?: string;
 };
 
 type SearchPlan = {
@@ -62,6 +69,7 @@ type SecurityReport = {
 
 type HostSecurity = Omit<SecurityReport, "finalUrl" | "redirects" | "ssl">;
 type DnsConsistency = { addresses: string[]; secureDns: "ok" | "unchecked"; malwareDns: "not-blocked" | "unchecked" };
+type SearchProviderOutput = { candidates: SearchCandidate[]; provider: SearchProviderName; providerErrors: string[] };
 
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("web-search-ip", {
@@ -78,7 +86,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (action === "reset" || action === "clear") {
-				await saveConfig({ updatedAt: new Date().toISOString(), ipUrls: [] });
+				await saveConfig({ ...config, updatedAt: new Date().toISOString(), ipUrls: [] });
 				ctx.ui.notify("Cleared saved web-search IP URLs", "info");
 				return;
 			}
@@ -113,12 +121,57 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("web-search-config", {
+		description: "Manage secure_web_search provider config: list, provider <auto|duckduckgo-html|searxng>, searxng <https://host/search>, reset-provider",
+		handler: async (args, ctx) => {
+			const [rawAction = "list", ...rest] = args.trim().split(/\s+/).filter(Boolean);
+			const action = rawAction.toLowerCase();
+			const value = rest.join(" ");
+			const config = await loadConfig();
+
+			if (action === "list" || action === "status") {
+				ctx.ui.notify(formatWebSearchConfig(config), "info");
+				return;
+			}
+
+			if (action === "provider") {
+				if (!isSearchProviderName(value)) {
+					ctx.ui.notify("Usage: /web-search-config provider <auto|duckduckgo-html|searxng>", "warning");
+					return;
+				}
+				await saveConfig({ ...config, provider: value, updatedAt: new Date().toISOString() });
+				ctx.ui.notify(`Set web-search provider: ${value}`, "info");
+				return;
+			}
+
+			if (action === "searxng") {
+				const normalized = normalizeSearxngUrl(value);
+				if (!normalized) {
+					ctx.ui.notify("Usage: /web-search-config searxng <https://your-searxng.example/search>", "warning");
+					return;
+				}
+				await saveConfig({ ...config, provider: "auto", searxngUrl: normalized, updatedAt: new Date().toISOString() });
+				ctx.ui.notify(`Configured SearXNG URL for auto mode: ${normalized}. Use /web-search-config provider searxng for strict no-fallback mode.`, "info");
+				return;
+			}
+
+			if (action === "reset-provider" || action === "reset") {
+				const { searxngUrl: _searxngUrl, ...restConfig } = config;
+				await saveConfig({ ...restConfig, provider: "auto", updatedAt: new Date().toISOString() });
+				ctx.ui.notify("Reset web-search provider config to auto", "info");
+				return;
+			}
+
+			ctx.ui.notify("Usage: /web-search-config list|provider|searxng|reset-provider", "warning");
+		},
+	});
+
 	pi.registerTool({
 		name: TOOL_NAME,
 		label: "Secure Web Search",
 		description:
-			"Search the web with security checks. Uses the current LLM to suggest relevant sites/queries, validates HTTPS/TLS, checks DNS consistency with secure DNS providers, checks malware-filtering DNS, and rejects DNSBL-listed hosts. Scans the question before search planning. Supports blockDangerous to omit dangerous results and blockPrivateIps (default true) to reject private/reserved IPs.",
-		promptSnippet: "Search the web with HTTPS, secure DNS, malware DNS, DNSBL security checks, and content scanning",
+			"Search the web with security checks. Uses the current LLM to suggest relevant sites/queries, searches configured provider (self-hosted SearXNG when configured, otherwise DuckDuckGo HTML), validates HTTPS/TLS, checks DNS consistency with secure DNS providers, checks malware-filtering DNS, and rejects DNSBL-listed hosts. Scans the question before search planning. Supports blockDangerous to omit dangerous results and blockPrivateIps (default true) to reject private/reserved IPs.",
+		promptSnippet: "Search the web via configured provider with HTTPS, secure DNS, malware DNS, DNSBL security checks, and content scanning",
 		promptGuidelines: [
 			"Use secure_web_search when the user asks for current external information or web research.",
 			"secure_web_search returns URLs and previews; cite URLs when using its results.",
@@ -168,7 +221,8 @@ export default function (pi: ExtensionAPI) {
 				snippet: "Explicit URL supplied by the user or saved config for security checking and fetching.",
 				provider: "explicit-url",
 			}));
-			const rawResults = [...explicitResults, ...(await searchDuckDuckGo(plan, maxResults, signal))];
+			const providerOutput = await searchWithConfiguredProvider(config, plan, maxResults, signal);
+			const rawResults = [...explicitResults, ...providerOutput.candidates];
 			const results: SearchResult[] = [];
 			const rejected: Array<{ url: string; reason: string }> = [];
 
@@ -205,10 +259,10 @@ export default function (pi: ExtensionAPI) {
 				content: [
 					{
 						type: "text",
-						text: formatResults(params.question, plan, results, rejected, questionScan),
+						text: formatResults(params.question, plan, results, rejected, providerOutput, questionScan),
 					},
 				],
-				details: { question: params.question, plan, savedIpUrls: params.includeSavedIpUrls === true ? config.ipUrls : [], results, rejected },
+				details: { question: params.question, plan, provider: providerOutput.provider, providerErrors: providerOutput.providerErrors, savedIpUrls: params.includeSavedIpUrls === true ? config.ipUrls : [], results, rejected },
 			};
 		},
 	});
@@ -218,12 +272,17 @@ async function loadConfig(): Promise<WebSearchConfig> {
 	try {
 		const text = await fs.readFile(CONFIG_PATH, "utf8");
 		const parsed = JSON.parse(text) as Partial<WebSearchConfig>;
+		const provider = isSearchProviderName(parsed.provider) ? parsed.provider : "auto";
+		const searxngUrl = typeof parsed.searxngUrl === "string" ? normalizeSearxngUrl(parsed.searxngUrl) : undefined;
 		return {
+			version: 1,
 			updatedAt: parsed.updatedAt || new Date().toISOString(),
 			ipUrls: Array.isArray(parsed.ipUrls) ? (parsed.ipUrls.map(normalizeIpUrl).filter(Boolean) as string[]) : [],
+			provider,
+			...(searxngUrl ? { searxngUrl } : {}),
 		};
 	} catch {
-		return { updatedAt: new Date().toISOString(), ipUrls: [] };
+		return { version: 1, updatedAt: new Date().toISOString(), ipUrls: [], provider: "auto" };
 	}
 }
 
@@ -241,6 +300,22 @@ function formatSavedIpUrls(config: WebSearchConfig) {
 		"",
 		"Use /web-search-ip add <ip|https://ip/> to add one.",
 	].join("\n");
+}
+
+function formatWebSearchConfig(config: WebSearchConfig) {
+	return [
+		`secure_web_search config (${CONFIG_PATH}):`,
+		`- provider: ${config.provider}`,
+		`- searxngUrl: ${config.searxngUrl || "not configured"}`,
+		`- saved IP URLs: ${config.ipUrls.length}`,
+		"",
+		"Use /web-search-config searxng <https://your-searxng.example/search> to enable self-hosted SearXNG.",
+		"Use /web-search-config provider duckduckgo-html to force DuckDuckGo fallback.",
+	].join("\n");
+}
+
+function isSearchProviderName(value: unknown): value is SearchProviderName {
+	return value === "auto" || value === "duckduckgo-html" || value === "searxng";
 }
 
 function normalizeIpUrl(value: string): string | undefined {
@@ -319,8 +394,56 @@ async function createSearchPlan(
 	}
 }
 
-async function searchDuckDuckGo(plan: SearchPlan, maxResults: number, signal?: AbortSignal): Promise<SearchCandidate[]> {
-	return searchDuckDuckGoHtml(plan, maxResults, fetchText, signal);
+async function searchWithConfiguredProvider(
+	config: WebSearchConfig,
+	plan: SearchPlan,
+	maxResults: number,
+	signal?: AbortSignal,
+): Promise<SearchProviderOutput> {
+	const requestedProvider = config.provider || "auto";
+	const providerErrors: string[] = [];
+
+	if (requestedProvider === "searxng") {
+		if (!config.searxngUrl) {
+			return { candidates: [], provider: "searxng", providerErrors: ["SearXNG provider selected but searxngUrl is not configured"] };
+		}
+		try {
+			return {
+				candidates: await searchSearxng(config.searxngUrl, plan, maxResults, fetchText, signal),
+				provider: "searxng",
+				providerErrors,
+			};
+		} catch (error) {
+			return { candidates: [], provider: "searxng", providerErrors: [formatProviderError("searxng", error)] };
+		}
+	}
+
+	if (requestedProvider === "auto" && config.searxngUrl) {
+		try {
+			return {
+				candidates: await searchSearxng(config.searxngUrl, plan, maxResults, fetchText, signal),
+				provider: "searxng",
+				providerErrors,
+			};
+		} catch (error) {
+			providerErrors.push(formatProviderError("searxng", error));
+		}
+	}
+
+	try {
+		return {
+			candidates: await searchDuckDuckGoHtml(plan, maxResults, fetchText, signal),
+			provider: "duckduckgo-html",
+			providerErrors,
+		};
+	} catch (error) {
+		providerErrors.push(formatProviderError("duckduckgo-html", error));
+		return { candidates: [], provider: "duckduckgo-html", providerErrors };
+	}
+}
+
+function formatProviderError(provider: string, error: unknown) {
+	return `${provider}: ${error instanceof Error ? error.message : String(error)}`;
 }
 
 async function securityCheckUrl(rawUrl: string, signal?: AbortSignal): Promise<SecurityReport> {
@@ -488,7 +611,14 @@ async function fetchWithTimeout(url: string, init: RequestInit = {}) {
 	}
 }
 
-function formatResults(question: string, plan: SearchPlan, results: SearchResult[], rejected: Array<{ url: string; reason: string }>, questionScan?: AgentRiskScanResult) {
+function formatResults(
+	question: string,
+	plan: SearchPlan,
+	results: SearchResult[],
+	rejected: Array<{ url: string; reason: string }>,
+	providerOutput: SearchProviderOutput,
+	questionScan?: AgentRiskScanResult,
+) {
 	const lines = [`Secure web search for: ${question}`, ""];
 	if (questionScan && questionScan.risk !== "safe") {
 		lines.push(`Question security scan: ${questionScan.risk} (score ${questionScan.score})`);
@@ -496,6 +626,11 @@ function formatResults(question: string, plan: SearchPlan, results: SearchResult
 			lines.push(`- ${finding.category}: ${finding.reason} (${finding.match})`);
 		}
 		lines.push("");
+	}
+	lines.push(`Provider: ${providerOutput.provider}`);
+	if (providerOutput.providerErrors.length) {
+		lines.push("Provider warnings:");
+		for (const error of providerOutput.providerErrors.slice(0, 5)) lines.push(`- ${error}`);
 	}
 	lines.push(`Queries: ${plan.queries.join(" | ")}`);
 	if (plan.sites.length) lines.push(`Preferred sites: ${plan.sites.join(", ")}`);
@@ -516,6 +651,7 @@ function formatResults(question: string, plan: SearchPlan, results: SearchResult
 		lines.push(
 			`\n${index + 1}. ${result.title}`,
 			`URL: ${result.security.finalUrl}${result.security.finalUrl === result.url ? "" : ` (from ${result.url})`}`,
+			`Provider: ${result.provider || providerOutput.provider}`,
 			`Security: HTTPS validated, ${dnsText}, content scan: ${result.contentScan.risk}`,
 			`Snippet: ${result.snippet}`,
 		);
@@ -530,9 +666,18 @@ function formatResults(question: string, plan: SearchPlan, results: SearchResult
 	}
 	if (rejected.length) {
 		lines.push("", "Rejected by security checks:");
-		for (const item of rejected.slice(0, 10)) lines.push(`- ${item.url}: ${item.reason}`);
+		for (const item of rejected.slice(0, 10)) lines.push(`- ${truncateMiddle(item.url, MAX_REJECTED_URL_DISPLAY_LENGTH)}: ${item.reason}`);
 	}
 	return lines.join("\n");
+}
+
+function truncateMiddle(value: string, maxLength: number) {
+	if (value.length <= maxLength) return value;
+	const omitted = "...";
+	const keep = maxLength - omitted.length;
+	const head = Math.ceil(keep / 2);
+	const tail = Math.floor(keep / 2);
+	return `${value.slice(0, head)}${omitted}${value.slice(value.length - tail)}`;
 }
 
 function stripHtml(html: string) {

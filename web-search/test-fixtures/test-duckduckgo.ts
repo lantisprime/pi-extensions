@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
 	buildDuckDuckGoHtmlSearchUrl,
 	buildDuckDuckGoQueries,
+	decodeDuckDuckGoUrl,
 	DUCKDUCKGO_HTML_PROVIDER,
 	parseDuckDuckGoResults,
 	searchDuckDuckGoHtml,
@@ -45,6 +46,22 @@ function testParserFixtureCompatibility() {
 	});
 }
 
+function testDuckDuckGoAdRedirectsAreIgnored() {
+	const adUrl = "https://duckduckgo.com/y.js?ad_domain=udemy.com&ad_provider=bingv7aa&u3=https%3A%2F%2Fwww.bing.com%2Faclick%3Fu%3Dhttps%253A%252F%252Fwww.udemy.com%252Fcourse%252Ftypescript";
+	assert.equal(decodeDuckDuckGoUrl(adUrl), undefined);
+	assert.equal(decodeDuckDuckGoUrl("https://www.bing.com/aclick?u=https%3A%2F%2Fwww.udemy.com%2Fcourse%2Ftypescript"), undefined);
+
+	const html = `
+		<a class="result__a" href="${adUrl.replace(/&/g, "&amp;")}">Ad result</a>
+		<a class="result__snippet">Sponsored result</a>
+		<a class="result__a" href="https://example.com/organic">Organic result</a>
+		<a class="result__snippet">Organic snippet.</a>
+	`;
+	const results = parseDuckDuckGoResults(html);
+	assert.equal(results.length, 1);
+	assert.equal(results[0]?.url, "https://example.com/organic");
+}
+
 async function testSearchProviderDedupesAndUsesCanonicalUrls() {
 	const html = readFileSync(join(fixtureDir, "duckduckgo-results.html"), "utf8");
 	const fetchedUrls: string[] = [];
@@ -68,6 +85,7 @@ async function main() {
 	testCanonicalSearchUrl();
 	testBuildQueriesWithSites();
 	testParserFixtureCompatibility();
+	testDuckDuckGoAdRedirectsAreIgnored();
 	await testSearchProviderDedupesAndUsesCanonicalUrls();
 	console.log("web-search duckduckgo provider tests passed");
 }
