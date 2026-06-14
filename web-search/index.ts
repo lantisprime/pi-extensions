@@ -1,5 +1,6 @@
 import { complete, type UserMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { chooseDnsConsistencyAddresses } from "./lib/dns-consistency";
 import { searchDuckDuckGoHtml, type SearchCandidate } from "./lib/duckduckgo";
 import { fetchTextFollowingHttpsRedirects, REDIRECT_STATUSES } from "./lib/redirect-fetch";
 import { normalizeSearxngUrl, searchSearxng } from "./lib/searxng";
@@ -512,11 +513,15 @@ async function resolveWithConsistencyCheck(hostname: string): Promise<DnsConsist
 
 	const trusted = providerResults.filter((result) => !result.provider.blocksMalware);
 	const checkedTrustedAddresses = trusted.filter((result) => result.result.state !== "unchecked").flatMap((result) => result.result.addresses);
-	const overlap = system.filter((address) => checkedTrustedAddresses.includes(address));
-	if (overlap.length === 0) {
-		if (trusted.every((result) => result.result.state === "unchecked")) throw new Error(`secure DNS unchecked for ${hostname}`);
-		throw new Error(`secure DNS consistency check failed for ${hostname}`);
+	if (checkedTrustedAddresses.length === 0) {
+		throw new Error(`secure DNS unchecked for ${hostname}`);
 	}
+
+	// CDNs and geo-balanced hosts can legitimately return different edge IPs
+	// between the system resolver and public DoH resolvers. Treat successful
+	// secure-DNS resolution as the security signal and prefer exact overlap only
+	// when it exists, instead of rejecting primary-source docs as false positives.
+	const resolvedAddresses = chooseDnsConsistencyAddresses(system, checkedTrustedAddresses);
 
 	const malwareResults = providerResults.filter((result) => result.provider.blocksMalware);
 	const malwareBlocks = malwareResults.filter((result) => result.result.state === "blocked");
@@ -527,7 +532,7 @@ async function resolveWithConsistencyCheck(hostname: string): Promise<DnsConsist
 	}
 	const malwareDns = malwareResults.some((result) => result.result.state === "unchecked") ? "unchecked" : "not-blocked";
 
-	return { addresses: overlap, secureDns: "ok", malwareDns };
+	return { addresses: resolvedAddresses, secureDns: "ok", malwareDns };
 }
 
 async function resolveHost(hostname: string): Promise<string[]> {
