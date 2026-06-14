@@ -632,7 +632,7 @@ export default function toolContextLoader(pi: ExtensionAPI) {
 		await rescan(ctx.cwd, ctx.isProjectTrusted());
 		if (ctx.hasUI) {
 			const eligible = discoveryState.records.filter((record) => record.status === "eligible").length;
-			ctx.ui.setStatus("tool-context-loader", `runbooks:${eligible}`);
+			ctx.ui.setStatus("tool-context-loader", `│ runbooks: ${eligible}`);
 		}
 	});
 
