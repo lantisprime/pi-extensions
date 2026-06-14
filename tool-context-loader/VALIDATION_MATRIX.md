@@ -14,7 +14,7 @@ Maps `tool-context-loader/DESIGN.md` validation contracts to P1a coverage and la
 | VC-008 path trigger | Automated in P1c | `test-jit.ts`: `edit.path` matching `.github/workflows/`; P1c path support limited to read/write/edit direct path fields. |
 | VC-009 budget enforcement | Automated in P1b/P1c | `test-preload.ts`: preload budget; `test-jit.ts`: body excerpt, aggregate, and per-turn remaining budget behavior. |
 | VC-010 priority ordering | Automated in P1c | `test-jit.ts`: body injection ordering follows priority/source/path/id ordering. |
-| VC-011 per-turn dedupe | Partially automated in P1c | `test-jit.ts`: ordinary sequential dedupe helper coverage; parallel race-safety deferred to P1d. |
+| VC-011 per-turn dedupe | Automated in P1c/P1d | `test-jit.ts`: ordinary sequential dedupe helper coverage; `test-p1d-hardening.ts`: claim-before-await duplicate suppression and next-turn reset. |
 | VC-012 tool result preservation | Automated in P1c | `test-jit.ts` and `test-jit-e2e.ts`: original text/image content stays first, details are preserved/extended only for plain objects, `isError` is not patched. |
 | VC-013 no argument mutation | Automated in P1c | `test-jit.ts`: matching leaves input deep-equal to original. |
 | VC-014 path escape rejection | Automated in P1a | `test-discovery.ts`: symlink escape skipped. |
@@ -22,8 +22,8 @@ Maps `tool-context-loader/DESIGN.md` validation contracts to P1a coverage and la
 | VC-016 command diagnostics | Automated in P1a | `test-discovery.ts`: diagnostics include counts/metadata and omit bodies. Live command smoke remains manual. |
 | VC-017 lazy body loading | Automated in P1a/P1c | `test-discovery.ts`: records do not retain body text; `test-jit.ts`: body is read lazily by helper and not stored on records. |
 | VC-018 preload token budget | Automated in P1b | `test-preload.ts`: preload index stays under `maxPreloadBytesPerTurn`-style byte limits and reports omitted records when possible. |
-| VC-019 dedupe resets on next turn | Deferred to P1d | Requires turn lifecycle. |
-| VC-020 parallel result race safety | Deferred to P1d | Requires concurrent `tool_result` claim tests. |
+| VC-019 dedupe resets on next turn | Automated in P1d | `test-p1d-hardening.ts`: claim/dedupe and budget state reset across turns. |
+| VC-020 parallel result race safety | Automated in P1d | `test-p1d-hardening.ts`: same-runbook concurrent result handlers inject once; different-runbook parallel handlers respect reserved per-turn budget. |
 | VC-021 advisory wrapper present | Automated in P1c | `test-jit.ts` and `test-jit-e2e.ts`: injected body output contains `[tool-context-loader]` and advisory higher-priority instruction notice. |
 | VC-022 unmapped episodes skipped | Automated in P1a | `test-discovery.ts`: unmapped episodes are status `unmapped`, not `eligible`. |
 | VC-023 body not retained with lazy loading | Automated in P1a | `test-discovery.ts`: records have no `body` property; diagnostics omit body text. |
@@ -88,3 +88,23 @@ Maps `tool-context-loader/DESIGN.md` validation contracts to P1a coverage and la
 | P1C-014 P1a/P1b regression | Automated | `run-p1a-tests.sh` |
 | P1C-E2E-001 matching bash end-to-end injection | Automated | `test-jit-e2e.ts` |
 | P1C-E2E-002 negative end-to-end nonmatch/default-inherited/untrusted/deleted-body no patch | Automated | `test-jit-e2e.ts` |
+
+## P1d-Specific Contracts
+
+| Contract | Status | Coverage |
+| --- | --- | --- |
+| P1D-001 claim-before-await same runbook | Automated | `test-p1d-hardening.ts` |
+| P1D-002 parallel same-runbook e2e | Automated | `test-p1d-hardening.ts` |
+| P1D-003 parallel budget reservation | Automated | `test-p1d-hardening.ts` |
+| P1D-004 dedupe reset on next turn | Automated | `test-p1d-hardening.ts` |
+| P1D-005 budget reset on next turn | Automated | `test-p1d-hardening.ts` |
+| P1D-006 pending cleanup on reset | Automated | `test-p1d-hardening.ts` |
+| P1D-007 config disabled no JIT | Automated | `test-p1d-hardening.ts` |
+| P1D-008 off-toggle no stale injection | Automated | `test-p1d-hardening.ts` |
+| P1D-009 dedupe disabled helper behavior | Automated | `test-p1d-hardening.ts` |
+| P1D-010 rescan suspension disables stale state | Automated | `test-p1d-hardening.ts` |
+| P1D-011 negative tiny budget no patch/no reservation leak | Automated | `test-p1d-hardening.ts` |
+| P1D-012 negative body read failure no patch/claim held | Automated | `test-p1d-hardening.ts` |
+| P1D-013 e2e discovered parallel same-runbook injects once | Automated | `test-p1d-hardening.ts` |
+| P1D-014 e2e suspend between call and result no patch | Automated | `test-p1d-hardening.ts` |
+| P1D-015 P1a/P1b/P1c regression | Automated | `run-p1a-tests.sh` |

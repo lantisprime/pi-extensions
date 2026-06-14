@@ -2,9 +2,9 @@
 
 Dynamic local runbook/episode discovery for Pi tools.
 
-## P1c Status
+## P1d Status
 
-This extension currently implements **P1a discovery/diagnostics**, **P1b preload index only**, and **P1c JIT tool-result injection**.
+This extension currently implements **P1a discovery/diagnostics**, **P1b preload index only**, **P1c JIT tool-result injection**, and **P1d hardening**.
 
 It does:
 
@@ -17,10 +17,12 @@ It does:
 - append a compact metadata-only preload index during `before_agent_start` for active tools with matching `injection: preload` records
 - match actual tool calls using metadata only
 - lazily append bounded, advisory-wrapped runbook body excerpts after matching tool results for explicit `injection: tool_result` records
+- claim JIT runbooks before async body reads so parallel tool results do not duplicate per-turn injections
+- reserve per-turn injection budget before async body reads so concurrent results cannot exceed the configured per-turn byte budget
+- clear pending JIT matches on turn/session reset, rescan, and on/off toggles
 
 It does **not** yet:
 
-- perform parallel claim-before-await race-safety hardening
 - inject broad bash tool-only runbooks without `match.commandIncludes`
 - body-inject records that only inherit the default `tool_result` mode without explicit frontmatter
 - integrate directly with Prompt Shield risk state for body suppression
@@ -64,12 +66,12 @@ maxBytes: 5000
 
 # Body
 
-P1b preloads metadata indexes only. P1c injects this body only after a matching tool result.
+P1b preloads metadata indexes only. P1c/P1d inject this body only after a matching tool result.
 ```
 
 For P1b preload, set `injection: preload`. The `preload` field is still treated as index-only, including `preload: body`.
 
-For P1c JIT body injection, set explicit frontmatter `injection: tool_result`. Records that only inherit the default injection mode are not body-injected in P1c.
+For P1c/P1d JIT body injection, set explicit frontmatter `injection: tool_result`. Records that only inherit the default injection mode are not body-injected.
 
 ## Preload Index
 
@@ -91,14 +93,14 @@ During `tool_call`, the extension matches eligible explicit `injection: tool_res
 
 During the matching `tool_result`, it lazily reads the runbook body, applies byte/line budgets, wraps the excerpt in an advisory notice, and appends it after the original tool result content.
 
-P1c matching rules:
+P1c/P1d matching rules:
 
 - `bash` requires `match.commandIncludes`; no implicit broad bash fallback.
 - `read`, `write`, and `edit` support direct `path` matching via `match.pathIncludes`.
 - `read`, `write`, and `edit` may use tool-only fallback when no command/path matcher is declared.
 - Project-local bodies are only available when project-local discovery was allowed by project trust.
 
-P1c preserves original tool behavior:
+P1c/P1d preserves original tool behavior:
 
 - original content remains first
 - `isError` is not changed

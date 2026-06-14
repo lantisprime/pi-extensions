@@ -110,6 +110,24 @@ export type ToolResultPatch = {
 	details?: unknown;
 };
 
+export type ToolContextRuntimeState = {
+	pendingToolCallMatches: Map<string, ToolCallMatch[]>;
+	claimedThisTurn: Set<string>;
+	injectedThisTurn: Set<string>;
+	injectedBytesThisTurn: number;
+	reservedBytesThisTurn: number;
+};
+
+export type ClaimedToolCallMatch = ToolCallMatch & {
+	key: string;
+	reservedBytes: number;
+};
+
+export type ClaimMatchesResult = {
+	claimed: ClaimedToolCallMatch[];
+	omitted: BodyInjectionResult["omitted"];
+};
+
 export type DiscoverOptions = {
 	cwd: string;
 	projectTrusted: boolean;
@@ -136,11 +154,7 @@ export const DEFAULT_CONFIG: LoaderConfig = {
 let config: LoaderConfig = DEFAULT_CONFIG;
 let discoveryState: DiscoveryState = emptyDiscoveryState(true, true);
 let enabledOverride: boolean | undefined;
-let pendingToolCallMatches = new Map<string, ToolCallMatch[]>();
-// P1c implements ordinary per-turn dedupe and byte accounting. Parallel
-// claim-before-await race safety is intentionally deferred to P1d.
-let injectedThisTurn = new Set<string>();
-let injectedBytesThisTurn = 0;
+let runtimeState = createRuntimeState();
 
 export function emptyDiscoveryState(enabled: boolean, projectTrusted: boolean): DiscoveryState {
 	return {
@@ -606,6 +620,89 @@ export function filterAlreadyInjected(matches: ToolCallMatch[], injectedKeys: Se
 	return matches.filter((match) => !injectedKeys.has(toolContextClaimKey(match.record)));
 }
 
+export function createRuntimeState(): ToolContextRuntimeState {
+	return {
+		pendingToolCallMatches: new Map(),
+		claimedThisTurn: new Set(),
+		injectedThisTurn: new Set(),
+		injectedBytesThisTurn: 0,
+		reservedBytesThisTurn: 0,
+	};
+}
+
+export function resetTurnInjectionState(state: ToolContextRuntimeState = runtimeState): void {
+	state.pendingToolCallMatches.clear();
+	state.claimedThisTurn.clear();
+	state.injectedThisTurn.clear();
+	state.injectedBytesThisTurn = 0;
+	state.reservedBytesThisTurn = 0;
+}
+
+export function resetLoaderRuntimeState(state: ToolContextRuntimeState = runtimeState): void {
+	resetTurnInjectionState(state);
+}
+
+export function suspendRuntimeForRescan(projectTrusted: boolean, state: ToolContextRuntimeState = runtimeState): DiscoveryState {
+	resetLoaderRuntimeState(state);
+	return emptyDiscoveryState(false, projectTrusted);
+}
+
+export function remainingInjectionBudget(state: ToolContextRuntimeState, loaderConfig: LoaderConfig): number {
+	return Math.max(0, loaderConfig.maxInjectedBytesPerTurn - state.injectedBytesThisTurn - state.reservedBytesThisTurn);
+}
+
+export function estimateBodyInjectionReservation(match: ToolCallMatch, loaderConfig: LoaderConfig): number {
+	const excerptBudget = Math.max(1, Math.min(match.record.bodyBytes, match.record.maxBytes, loaderConfig.maxRunbookBytes));
+	const worstCaseExcerpt = `${"x".repeat(excerptBudget)}\n\n[tool-context-loader: excerpt truncated by byte/line budget]`;
+	return byteLength(formatBodyInjectionBlock({ ...match, body: "" }, worstCaseExcerpt));
+}
+
+export function claimMatchesForTurn(matches: ToolCallMatch[], state: ToolContextRuntimeState, loaderConfig: LoaderConfig): ClaimMatchesResult {
+	const claimed: ClaimedToolCallMatch[] = [];
+	const omitted: BodyInjectionResult["omitted"] = [];
+	const sorted = [...matches].sort((a, b) => compareRecordsForInjection(a.record, b.record));
+
+	for (const match of sorted) {
+		const key = toolContextClaimKey(match.record);
+		if (loaderConfig.dedupePerTurn && state.claimedThisTurn.has(key)) {
+			omitted.push({ id: match.record.id, source: match.record.displayPath, reason: "already claimed this turn" });
+			continue;
+		}
+
+		let remaining = remainingInjectionBudget(state, loaderConfig);
+		if (remaining <= 0) {
+			omitted.push({ id: match.record.id, source: match.record.displayPath, reason: "per-turn budget exhausted" });
+			continue;
+		}
+
+		let reservedBytes = estimateBodyInjectionReservation(match, loaderConfig);
+		if (reservedBytes > remaining) {
+			if (!canFitMinimalBodyInjection(match, remaining)) {
+				omitted.push({ id: match.record.id, source: match.record.displayPath, reason: "injection budget exhausted" });
+				continue;
+			}
+			reservedBytes = remaining;
+		}
+
+		if (loaderConfig.dedupePerTurn) state.claimedThisTurn.add(key);
+		state.reservedBytesThisTurn += reservedBytes;
+		claimed.push({ ...match, key, reservedBytes });
+	}
+
+	return { claimed, omitted };
+}
+
+export function finalizeClaimedInjection(state: ToolContextRuntimeState, claimed: ClaimedToolCallMatch[], injection: BodyInjectionResult): void {
+	releaseClaimedInjection(state, claimed);
+	for (const injected of injection.injected) state.injectedThisTurn.add(`${injected.id}:tool_result`);
+	state.injectedBytesThisTurn += injection.byteLength;
+}
+
+export function releaseClaimedInjection(state: ToolContextRuntimeState, claimed: ClaimedToolCallMatch[]): void {
+	const reserved = claimed.reduce((total, match) => total + match.reservedBytes, 0);
+	state.reservedBytesThisTurn = Math.max(0, state.reservedBytesThisTurn - reserved);
+}
+
 export function buildToolResultInjection(items: BodyInjectionItem[], loaderConfig: LoaderConfig, remainingBytes = loaderConfig.maxInjectedBytesPerTurn): BodyInjectionResult {
 	const sorted = [...items].sort((a, b) => compareRecordsForInjection(a.record, b.record));
 	const injected: BodyInjectionResult["injected"] = [];
@@ -616,13 +713,12 @@ export function buildToolResultInjection(items: BodyInjectionItem[], loaderConfi
 	if (remainingBytes <= 0) return emptyBodyInjectionResult(sorted, "per-turn budget exhausted");
 
 	for (const item of sorted) {
-		const excerpt = boundedBodyExcerpt(item.body, Math.min(item.record.maxBytes, loaderConfig.maxRunbookBytes), loaderConfig.maxInjectedLinesPerRunbook);
-		const block = formatBodyInjectionBlock(item, excerpt.text);
-		const blockBytes = byteLength(block);
-		if (usedBytes + blockBytes <= remainingBytes) {
-			blocks.push(block);
-			usedBytes += blockBytes;
-			injected.push({ id: item.record.id, source: item.record.displayPath, reason: item.reason, bytes: blockBytes });
+		const remainingForBlock = remainingBytes - usedBytes;
+		const fitted = fitBodyInjectionBlock(item, loaderConfig, remainingForBlock);
+		if (fitted) {
+			blocks.push(fitted.block);
+			usedBytes += fitted.byteLength;
+			injected.push({ id: item.record.id, source: item.record.displayPath, reason: item.reason, bytes: fitted.byteLength });
 			continue;
 		}
 		omitted.push({ id: item.record.id, source: item.record.displayPath, reason: "injection budget exhausted" });
@@ -636,6 +732,41 @@ export function buildToolResultInjection(items: BodyInjectionItem[], loaderConfi
 		if (byteLength(text + omission) <= remainingBytes) text += omission;
 	}
 	return { text, injected, omitted, byteLength: byteLength(text) };
+}
+
+export async function buildToolResultPatchForMatches(
+	matches: ToolCallMatch[],
+	content: Array<Record<string, unknown>>,
+	details: unknown,
+	loaderConfig: LoaderConfig,
+	state: ToolContextRuntimeState,
+	readBody: (record: RunbookRecord) => Promise<string | undefined> = readRunbookBody,
+): Promise<ToolResultPatch | undefined> {
+	const claim = claimMatchesForTurn(matches, state, loaderConfig);
+	if (claim.claimed.length === 0) return undefined;
+
+	try {
+		const bodyItems: BodyInjectionItem[] = [];
+		for (const match of claim.claimed) {
+			const body = await readBody(match.record);
+			if (!body) continue;
+			bodyItems.push({ record: match.record, reason: match.reason, body });
+		}
+
+		if (bodyItems.length === 0) {
+			finalizeClaimedInjection(state, claim.claimed, { text: "", injected: [], omitted: claim.omitted, byteLength: 0 });
+			return undefined;
+		}
+
+		const reservedBudget = claim.claimed.reduce((total, match) => total + match.reservedBytes, 0);
+		const injection = buildToolResultInjection(bodyItems, loaderConfig, reservedBudget);
+		const withClaimOmissions = claim.omitted.length > 0 ? { ...injection, omitted: [...claim.omitted, ...injection.omitted] } : injection;
+		finalizeClaimedInjection(state, claim.claimed, withClaimOmissions);
+		return patchToolResultContent(content, details, withClaimOmissions);
+	} catch (error) {
+		releaseClaimedInjection(state, claim.claimed);
+		throw error;
+	}
 }
 
 export async function readRunbookBody(record: RunbookRecord): Promise<string | undefined> {
@@ -854,6 +985,41 @@ function formatBodyInjectionBlock(item: BodyInjectionItem, excerpt: string): str
 	].join("\n");
 }
 
+function canFitMinimalBodyInjection(match: ToolCallMatch, maxBytes: number): boolean {
+	const minimalBlock = formatBodyInjectionBlock({ ...match, body: "" }, "x");
+	return byteLength(minimalBlock) <= maxBytes;
+}
+
+function fitBodyInjectionBlock(
+	item: BodyInjectionItem,
+	loaderConfig: LoaderConfig,
+	remainingBytes: number,
+): { block: string; byteLength: number } | undefined {
+	if (remainingBytes <= 0) return undefined;
+	const maxExcerptBytes = Math.max(1, Math.min(item.record.maxBytes, loaderConfig.maxRunbookBytes));
+	const fullExcerpt = boundedBodyExcerpt(item.body, maxExcerptBytes, loaderConfig.maxInjectedLinesPerRunbook);
+	const fullBlock = formatBodyInjectionBlock(item, fullExcerpt.text);
+	const fullBytes = byteLength(fullBlock);
+	if (fullBytes <= remainingBytes) return { block: fullBlock, byteLength: fullBytes };
+
+	let low = 1;
+	let high = Math.min(maxExcerptBytes, byteLength(item.body));
+	let best: { block: string; byteLength: number } | undefined;
+	while (low <= high) {
+		const mid = Math.floor((low + high) / 2);
+		const excerpt = boundedBodyExcerpt(item.body, mid, loaderConfig.maxInjectedLinesPerRunbook);
+		const block = formatBodyInjectionBlock(item, excerpt.text);
+		const blockBytes = byteLength(block);
+		if (blockBytes <= remainingBytes) {
+			best = { block, byteLength: blockBytes };
+			low = mid + 1;
+		} else {
+			high = mid - 1;
+		}
+	}
+	return best;
+}
+
 function boundedBodyExcerpt(body: string, maxBytes: number, maxLines: number): { text: string; truncated: boolean } {
 	let text = body;
 	let truncated = false;
@@ -963,20 +1129,14 @@ function isPreloadMode(value: unknown): value is PreloadMode {
 }
 
 async function rescan(cwd: string, projectTrusted: boolean) {
+	discoveryState = suspendRuntimeForRescan(projectTrusted);
 	config = mergeConfig(await loadProjectConfig(cwd, projectTrusted));
 	const effectiveConfig = enabledOverride === undefined ? config : { ...config, enabled: enabledOverride };
 	discoveryState = await discover({ cwd, projectTrusted, config: effectiveConfig });
 }
 
-function resetTurnInjectionState() {
-	pendingToolCallMatches.clear();
-	injectedThisTurn.clear();
-	injectedBytesThisTurn = 0;
-}
-
 export default function toolContextLoader(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
-		resetTurnInjectionState();
 		await rescan(ctx.cwd, ctx.isProjectTrusted());
 		if (ctx.hasUI) {
 			const eligible = discoveryState.records.filter((record) => record.status === "eligible").length;
@@ -1003,30 +1163,14 @@ export default function toolContextLoader(pi: ExtensionAPI) {
 	pi.on("tool_call", async (event) => {
 		if (!discoveryState.enabled) return;
 		const matches = matchRunbooksForToolCall(discoveryState.records, event.toolName, event.input as ToolCallInput);
-		if (matches.length > 0) pendingToolCallMatches.set(event.toolCallId, matches);
+		if (matches.length > 0) runtimeState.pendingToolCallMatches.set(event.toolCallId, matches);
 	});
 
 	pi.on("tool_result", async (event) => {
-		const matches = pendingToolCallMatches.get(event.toolCallId) ?? [];
-		pendingToolCallMatches.delete(event.toolCallId);
+		const matches = runtimeState.pendingToolCallMatches.get(event.toolCallId) ?? [];
+		runtimeState.pendingToolCallMatches.delete(event.toolCallId);
 		if (!discoveryState.enabled || matches.length === 0) return;
-
-		const remainingBytes = config.maxInjectedBytesPerTurn - injectedBytesThisTurn;
-		if (remainingBytes <= 0) return;
-
-		const bodyItems: BodyInjectionItem[] = [];
-		for (const match of filterAlreadyInjected(matches, injectedThisTurn, config.dedupePerTurn)) {
-			const body = await readRunbookBody(match.record);
-			if (!body) continue;
-			bodyItems.push({ ...match, body });
-		}
-		if (bodyItems.length === 0) return;
-
-		const injection = buildToolResultInjection(bodyItems, config, remainingBytes);
-		if (!injection.text) return;
-		for (const injected of injection.injected) injectedThisTurn.add(`${injected.id}:tool_result`);
-		injectedBytesThisTurn += injection.byteLength;
-		return patchToolResultContent(event.content as Array<Record<string, unknown>>, event.details, injection);
+		return buildToolResultPatchForMatches(matches, event.content as Array<Record<string, unknown>>, event.details, config, runtimeState);
 	});
 
 	pi.registerCommand("tool-context-loader", {

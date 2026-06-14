@@ -295,7 +295,7 @@ Global install location:
 ~/.pi/agent/extensions/tool-context-loader/index.ts
 ```
 
-P1c status: discovery + diagnostics, preload index only, and JIT tool-result injection. It scans configured runbook/episode roots, parses lightweight frontmatter metadata, respects project trust for project-local roots, exposes diagnostics, appends compact metadata-only preload indexes for active tools with matching `injection: preload` records, and appends bounded advisory-wrapped body excerpts after matching tool results for explicit `injection: tool_result` records. Parallel race-safety hardening remains deferred to P1d.
+P1d status: discovery + diagnostics, preload index only, JIT tool-result injection, and parallel/lifecycle hardening. It scans configured runbook/episode roots, parses lightweight frontmatter metadata, respects project trust for project-local roots, exposes diagnostics, appends compact metadata-only preload indexes for active tools with matching `injection: preload` records, and appends bounded advisory-wrapped body excerpts after matching tool results for explicit `injection: tool_result` records. JIT runbooks and per-turn budget are claimed before async body reads so parallel tool results do not duplicate injections or exceed the configured per-turn byte budget.
 
 Default project roots, scanned only when trusted:
 
