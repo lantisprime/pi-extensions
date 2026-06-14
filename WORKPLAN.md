@@ -7,7 +7,7 @@ This is the canonical planning document for this repo. Use it to decide what to 
 ## TL;DR Current Plan
 
 - **Current priority:** continue `tool-context-loader` in staged milestones.
-- **Completed milestone:** P1a discovery + diagnostics only is merged and globally deployed.
+- **Completed milestone:** P1a discovery + diagnostics, including quiet default status and verbose diagnostics, is merged and globally deployed.
 - **Next milestone:** P1b preload index only; inject compact metadata indexes for active tools, not bodies.
 - **Next 3 tasks:**
   1. Plan/review P1b against `tool-context-loader/DESIGN.md`, `P1A_PLAN_REVIEW.md`, and `VALIDATION_MATRIX.md`.
@@ -133,6 +133,7 @@ Delivered:
 - Episode eligibility rules.
 - Source precedence and duplicate identity.
 - `/tool-context-loader` diagnostics command.
+- Quiet default `/tool-context-loader status` that lists eligible runbooks only, plus `/tool-context-loader verbose` for unmapped/skipped/warning details.
 - Config `enabled: false` and session-only `/tool-context-loader off` safety controls.
 - Validation matrix and deterministic positive/negative tests.
 - No context injection.
@@ -185,9 +186,11 @@ Validation source:
 ## Completed Milestones
 
 - **P1a — Tool Context Loader discovery + diagnostics**
-  - Merged: PR #7, commit `76fc095`.
+  - Initial discovery/diagnostics merged: PR #7, commit `76fc095`.
+  - Quiet status diagnostics follow-up merged: PR #9, commit `853f5ce`.
   - Deployed globally: `~/.pi/agent/extensions/tool-context-loader/index.ts`.
   - Validation: P1a discovery tests `11/11`, deployed extension load exit `0`, global auto-discovery load exit `0`.
+  - Final P1a UX: `/tool-context-loader status` is compact by default; `/tool-context-loader verbose` exposes unmapped/skipped/warning details for debugging.
 
 ### P2 — Minimal agent/subagent scaffold
 
