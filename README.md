@@ -199,7 +199,7 @@ Adds a `secure_web_search` tool for web research.
 Features:
 
 - Uses the current Pi LLM to suggest relevant search queries and reputable websites
-- Searches DuckDuckGo HTML results
+- Searches configured self-hosted SearXNG when enabled, otherwise DuckDuckGo HTML results
 - Requires HTTPS URLs
 - Uses Node/fetch TLS certificate and hostname validation
 - Performs secure DNS-over-HTTPS consistency checks
@@ -208,6 +208,7 @@ Features:
 - Scans user questions before search planning to block LLM prompt-injection
 - Supports explicit public or private/local IP HTTPS URLs
 - Supports saved IP URLs via commands
+- Supports provider config via `/web-search-config`
 - Blocks private/reserved IP targets by default (can opt out with `blockPrivateIps`)
 - Optionally blocks dangerous results entirely (`blockDangerous`)
 - Scans fetched web content with the shared agent-risk scanner and omits suspicious/dangerous previews by default

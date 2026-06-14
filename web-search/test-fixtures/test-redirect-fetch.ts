@@ -136,6 +136,16 @@ async function testUnsupportedContentTypeIsRejected() {
 	);
 }
 
+async function testJsonContentTypeIsAccepted() {
+	const url = "https://example.com/search?q=pi&format=json";
+	const { fetchWithTimeout } = makeFetch({
+		[url]: { status: 200, body: '{"results":[]}', headers: { "content-type": "application/json" } },
+	});
+
+	const text = await fetchTextFollowingHttpsRedirects(url, { fetchWithTimeout, maxRedirects: 5, maxBytes: 1024 });
+	assert.equal(text, '{"results":[]}');
+}
+
 async function testContentLengthLimitIsEnforcedBeforeBuffering() {
 	const url = "https://example.com/large";
 	const { fetchWithTimeout } = makeFetch({
@@ -170,6 +180,7 @@ async function main() {
 		testMissingRedirectLocationIsRejected,
 		testTooManyRedirectsIsRejected,
 		testUnsupportedContentTypeIsRejected,
+		testJsonContentTypeIsAccepted,
 		testContentLengthLimitIsEnforcedBeforeBuffering,
 		testStreamingLimitIsEnforcedWithoutContentLength,
 	]) {

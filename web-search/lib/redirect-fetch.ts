@@ -34,7 +34,7 @@ export async function fetchTextFollowingHttpsRedirects(url: string, options: Red
 		}
 
 		const contentType = response.headers.get("content-type") || "";
-		if (!contentType.includes("text/html") && !contentType.includes("text/plain")) {
+		if (!contentType.includes("text/html") && !contentType.includes("text/plain") && !contentType.includes("application/json")) {
 			throw new Error(`unsupported content-type: ${contentType || "unknown"}`);
 		}
 		return readResponseTextWithLimit(response, options.maxBytes);
