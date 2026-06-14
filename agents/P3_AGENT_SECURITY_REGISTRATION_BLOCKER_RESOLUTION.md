@@ -73,8 +73,9 @@ Resolution:
 
 Resolution:
 
-- Plan now requires an independent deterministic scanner vendored/local to `agents/`, e.g. `agents/lib/security-scan.ts`.
+- Plan now requires the repo shared deterministic scanner to be vendored into `agents/`, specifically `shared/security-scan.ts -> agents/lib/security-scan.ts`.
 - Prompt Shield can be additive later but is not required for registration scanning.
+- When the vendored agents scanner is added, shared scanner sync/verify tooling must include it to catch drift.
 
 ### R-002: Non-TUI approval path must fail closed
 

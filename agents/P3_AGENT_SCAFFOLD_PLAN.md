@@ -652,7 +652,7 @@ Use that file as the implementation sequencing guide. The high-level milestone l
 Implement in slices:
 
 - P3b-1: core spec model and built-ins
-- P3b-2: Markdown parser and deterministic scanner
+- P3b-2: Markdown parser and deterministic scanner, using vendored shared scanner `shared/security-scan.ts -> agents/lib/security-scan.ts`
 - P3b-3: registry and shared `canRunAgent` runtime gate
 - P3b-4: diagnostics commands and proactive guidance
 - P3b-5: registration flows

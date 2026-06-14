@@ -315,7 +315,15 @@ Ephemeral prompts do not require eval fixtures. Once saved as a reusable user-le
 
 ## Prompt Shield and Permission Policy Integration
 
-P3 should at minimum perform its own deterministic scan of agent specs before registration. The agents extension must remain independently installable: vendor the deterministic scanner into `agents/lib/security-scan.ts` or keep a local scanner. Do not require Prompt Shield to be installed for registration scanning.
+P3 must scan agent Markdown specs before registration using the repo shared deterministic security scanner. To preserve independent installability, vendor the shared scanner source into the agents extension:
+
+```text
+shared/security-scan.ts -> agents/lib/security-scan.ts
+```
+
+Registration scanning must not require Prompt Shield to be installed. Prompt Shield can be additive later, but the agents extension must have its own vendored scanner copy and use it for `/agents register`, `/agents register-project`, `/agents save-temp`, `/agents verify`, and `/agents doctor` risk reporting.
+
+When `agents/lib/security-scan.ts` is added, update shared scanner sync/verify tooling so scanner drift is caught alongside the existing `prompt-shield` and `web-search` vendored copies.
 
 A later integration can extend Prompt Shield to scan:
 

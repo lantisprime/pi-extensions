@@ -23,7 +23,7 @@ Implementation should proceed in small PRs where each slice has a narrow objecti
 |---|---|---|---|---|---|
 | P3b-0 | Planning docs only | `agents/*.md` | Plan, spec, security model, registration guide, reviews, blocker resolution | `git diff --check` | No runtime code |
 | P3b-1 | Core spec model and built-ins | `agents/index.ts` or `agents/lib/specs.ts`, `agents/test-fixtures/test-specs.mjs` | `AgentSpec` types/constants; built-in `scout`, `planner`, `reviewer`; name/tool/model/thinking validation; output contracts | Pure helper tests for built-ins and validators | No Markdown discovery, registry, child process, or broad TUI |
-| P3b-2 | Markdown parser and deterministic scanner | `agents/lib/agent-markdown.ts`, `agents/lib/security-scan.ts`, parser tests | Bounded frontmatter/body parser; raw-file-byte SHA-256; safe/suspicious/dangerous scanner; reserved-name shadow detection | Parser cap tests; invalid fields; raw hash changes; dangerous scanner blocks eligibility | No registry writes or child execution |
+| P3b-2 | Markdown parser and deterministic scanner | `agents/lib/agent-markdown.ts`, `agents/lib/security-scan.ts`, parser tests, shared sync scripts | Bounded frontmatter/body parser; raw-file-byte SHA-256; vendored shared scanner from `shared/security-scan.ts`; safe/suspicious/dangerous classification; reserved-name shadow detection | Parser cap tests; invalid fields; raw hash changes; dangerous scanner blocks eligibility; shared scanner sync/verify passes | No registry writes or child execution |
 | P3b-3 | Registry and runtime gate | `agents/lib/registry.ts`, `agents/lib/can-run-agent.ts`, registry tests | User/project registries; project-root hash; `canRunAgent`; root mismatch detection | Unregistered/hash-mismatch/trust-inactive/project-root isolation tests | No child argv construction before gate passes |
 | P3b-4 | Diagnostics and proactive guidance | `agents/index.ts`, diagnostics helpers/tests | `/agents`, `/agents list`, `/agents config`, `/agents inspect`, `/agents registry`, `/agents verify`, `/agents doctor`; proactive recommendation dedupe | Doctor bounded/deterministic tests; next-step output tests | No registration writes unless slice stays small; no child execution |
 | P3b-5 | Registration flows | registration command handlers/tests | `/agents register`, `/agents register-project`, `/agents unregister`; TUI confirmation; non-TUI fail-closed; `--all-safe` safe-only behavior | TUI/non-TUI branch tests; suspicious per-spec confirmation; dangerous blocked | No child execution |
@@ -85,7 +85,7 @@ Implement:
 - bounded Markdown/frontmatter parser
 - accepted keys only
 - raw-file-byte SHA-256 helper
-- local/vendored deterministic scanner
+- vendored copy of the repo shared deterministic scanner: `shared/security-scan.ts -> agents/lib/security-scan.ts`
 - safe/suspicious/dangerous classification
 - reserved-name shadow detection
 
@@ -95,6 +95,7 @@ Tests:
 - invalid names/tools/thinking
 - raw bytes hash changes on any file change
 - dangerous scanner findings block registration eligibility
+- shared scanner sync/verify includes `agents/lib/security-scan.ts` once added
 
 ### P3b-3: Registry and `canRunAgent` gate
 
