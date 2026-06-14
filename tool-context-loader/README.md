@@ -82,10 +82,13 @@ Supported fields:
 ```text
 /tool-context-loader
 /tool-context-loader status
+/tool-context-loader verbose
 /tool-context-loader rescan
 /tool-context-loader on
 /tool-context-loader off
 ```
+
+`status` is compact by default: it shows root/count summaries and eligible runbooks only. Use `verbose` to inspect unmapped episodes, skipped records, and warnings.
 
 In P1a, `on` and `off` are session-only in-memory toggles. They do not edit config files.
 
