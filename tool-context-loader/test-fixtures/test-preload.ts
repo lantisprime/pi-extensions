@@ -28,6 +28,7 @@ function record(overrides: Partial<RunbookRecord> = {}): RunbookRecord {
 		tools: ["read"],
 		tags: [],
 		injection: "preload",
+		explicitInjection: true,
 		preload: "index",
 		priority: 0,
 		maxBytes: 5_000,
