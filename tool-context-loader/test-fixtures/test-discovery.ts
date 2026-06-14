@@ -191,9 +191,21 @@ async function testDiagnosticsOmitBodiesAndCapOutput() {
 		const diagnostics = formatDiagnostics(state, 2);
 		assert.ok(diagnostics.includes("Tool Context Loader: enabled"));
 		assert.ok(diagnostics.includes("Records:"));
+		assert.ok(diagnostics.includes("Eligible runbooks:"));
 		assert.ok(diagnostics.includes("more records omitted"));
+		assert.ok(diagnostics.includes("Hidden diagnostics:"));
+		assert.ok(diagnostics.includes("/tool-context-loader verbose"));
+		assert.ok(!diagnostics.includes("episode-unmapped"), "default status should not list unmapped episodes");
+		assert.ok(!diagnostics.includes("episode has no tool mapping"), "default status should not list unmapped reasons");
 		assert.ok(!diagnostics.includes("SECRET BODY SHOULD NOT APPEAR"));
 		assert.ok(!diagnostics.includes("Do not dump this body"));
+
+		const verboseDiagnostics = formatDiagnostics(state, { mode: "verbose", limit: 100 });
+		assert.ok(verboseDiagnostics.includes("Discovered metadata:"));
+		assert.ok(verboseDiagnostics.includes("episode-unmapped"), "verbose diagnostics should expose unmapped metadata");
+		assert.ok(!verboseDiagnostics.includes("SECRET BODY SHOULD NOT APPEAR"));
+		assert.ok(!verboseDiagnostics.includes("Do not dump this body"));
+
 		for (const record of state.records) {
 			assert.equal(Object.prototype.hasOwnProperty.call(record, "body"), false, "records must not retain body text");
 		}

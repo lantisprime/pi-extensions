@@ -287,6 +287,7 @@ Commands:
 ```text
 /tool-context-loader
 /tool-context-loader status
+/tool-context-loader verbose
 /tool-context-loader rescan
 /tool-context-loader on
 /tool-context-loader off

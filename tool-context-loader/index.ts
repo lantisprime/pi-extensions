@@ -474,7 +474,13 @@ export function dedupeRecords(records: RunbookRecord[]): RunbookRecord[] {
 	return [...byIdentity.values()].sort(compareRecordsForOutput);
 }
 
-export function formatDiagnostics(state: DiscoveryState, limit = DIAGNOSTICS_RECORD_LIMIT): string {
+export type DiagnosticsMode = "status" | "verbose";
+export type DiagnosticsOptions = { mode?: DiagnosticsMode; limit?: number };
+
+export function formatDiagnostics(state: DiscoveryState, options: number | DiagnosticsOptions = DIAGNOSTICS_RECORD_LIMIT): string {
+	const limit = typeof options === "number" ? options : options.limit ?? DIAGNOSTICS_RECORD_LIMIT;
+	const mode = typeof options === "number" ? "status" : options.mode ?? "status";
+	const verbose = mode === "verbose";
 	const eligible = state.records.filter((record) => record.status === "eligible");
 	const unmapped = state.records.filter((record) => record.status === "unmapped");
 	const skipped = state.records.filter((record) => record.status === "skipped");
@@ -495,27 +501,37 @@ export function formatDiagnostics(state: DiscoveryState, limit = DIAGNOSTICS_REC
 		`Records: ${eligible.length} eligible, ${unmapped.length} unmapped, ${skipped.length} skipped, ${state.warnings.length} warnings`,
 	);
 
-	const visible = state.records.slice(0, limit);
+	const recordsToShow = verbose ? state.records : eligible;
+	const visible = recordsToShow.slice(0, limit);
 	if (visible.length > 0) {
-		lines.push("", "Discovered metadata:");
-		for (const record of visible) {
-			const tools = record.tools.length > 0 ? record.tools.join(",") : "no-tools";
-			const suffix = record.warning ? ` (${record.warning})` : "";
-			lines.push(
-				`- ${record.id} [${record.status}; ${tools}; ${record.injection}/${record.preload}; p=${record.priority}] ${record.displayPath} — ${record.summary}${suffix}`,
-			);
+		lines.push("", verbose ? "Discovered metadata:" : "Eligible runbooks:");
+		for (const record of visible) lines.push(formatRecordLine(record));
+		if (recordsToShow.length > visible.length) {
+			lines.push(`... ${recordsToShow.length - visible.length} more records omitted by diagnostics cap`);
 		}
-		if (state.records.length > visible.length) {
-			lines.push(`... ${state.records.length - visible.length} more records omitted by diagnostics cap`);
-		}
+	} else if (!verbose) {
+		lines.push("", "No eligible runbooks discovered.");
 	}
 
-	if (state.warnings.length > 0) {
+	if (!verbose && (unmapped.length > 0 || skipped.length > 0 || state.warnings.length > 0)) {
+		lines.push(
+			"",
+			`Hidden diagnostics: ${unmapped.length} unmapped, ${skipped.length} skipped, ${state.warnings.length} warnings. Run /tool-context-loader verbose to inspect.`,
+		);
+	}
+
+	if (verbose && state.warnings.length > 0) {
 		lines.push("", "Warnings:");
 		for (const warning of state.warnings.slice(0, limit)) lines.push(`- ${warning}`);
 		if (state.warnings.length > limit) lines.push(`... ${state.warnings.length - limit} more warnings omitted by diagnostics cap`);
 	}
 	return lines.join("\n");
+}
+
+function formatRecordLine(record: RunbookRecord): string {
+	const tools = record.tools.length > 0 ? record.tools.join(",") : "no-tools";
+	const suffix = record.warning ? ` (${record.warning})` : "";
+	return `- ${record.id} [${record.status}; ${tools}; ${record.injection}/${record.preload}; p=${record.priority}] ${record.displayPath} — ${record.summary}${suffix}`;
 }
 
 function countByStatus(records: RunbookRecord[]) {
@@ -628,7 +644,7 @@ export default function toolContextLoader(pi: ExtensionAPI) {
 	pi.registerCommand("tool-context-loader", {
 		description: "Show or rescan tool-context-loader discovery diagnostics",
 		getArgumentCompletions: (prefix) => {
-			const options = ["status", "rescan", "on", "off"];
+			const options = ["status", "verbose", "rescan", "on", "off"];
 			const filtered = options.filter((option) => option.startsWith(prefix.trim()));
 			return filtered.length > 0 ? filtered.map((value) => ({ value, label: value })) : null;
 		},
@@ -642,11 +658,11 @@ export default function toolContextLoader(pi: ExtensionAPI) {
 				await rescan(ctx.cwd, ctx.isProjectTrusted());
 			} else if (command === "rescan") {
 				await rescan(ctx.cwd, ctx.isProjectTrusted());
-			} else if (command !== "status") {
-				ctx.ui.notify("Usage: /tool-context-loader [status|rescan|on|off]", "warning");
+			} else if (command !== "status" && command !== "verbose") {
+				ctx.ui.notify("Usage: /tool-context-loader [status|verbose|rescan|on|off]", "warning");
 				return;
 			}
-			ctx.ui.notify(formatDiagnostics(discoveryState), "info");
+			ctx.ui.notify(formatDiagnostics(discoveryState, { mode: command === "verbose" ? "verbose" : "status" }), "info");
 		},
 	});
 }

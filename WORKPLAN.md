@@ -6,13 +6,14 @@ This is the canonical planning document for this repo. Use it to decide what to 
 
 ## TL;DR Current Plan
 
-- **Current priority:** implement `tool-context-loader` in small staged milestones.
-- **Next milestone:** P1a discovery + diagnostics only; do not inject context yet.
+- **Current priority:** continue `tool-context-loader` in staged milestones.
+- **Completed milestone:** P1a discovery + diagnostics only is merged and globally deployed.
+- **Next milestone:** P1b preload index only; inject compact metadata indexes for active tools, not bodies.
 - **Next 3 tasks:**
-  1. Implement `tool-context-loader/index.ts` skeleton and `/tool-context-loader` diagnostics.
-  2. Add frontmatter/discovery fixtures and pure helper tests.
-  3. Add a validation matrix mapping `VC-001` through `VC-024` to automated, smoke, or deferred coverage.
-- **Do not start full agent workflows yet.** A minimal agent scaffold may wait until loader discovery is observable.
+  1. Plan/review P1b against `tool-context-loader/DESIGN.md`, `P1A_PLAN_REVIEW.md`, and `VALIDATION_MATRIX.md`.
+  2. Implement `before_agent_start` index-only preload for matching active tools with byte/line budgets.
+  3. Add deterministic P1b tests for active-tool preload, inactive-tool exclusion, budget caps, no body output, and no duplicated built-in tool docs.
+- **Do not start full agent workflows yet.** A minimal agent scaffold is now allowed if needed, but full workflows wait until P1d hardening.
 - **Key risk to prove:** child Pi subprocesses used by subagents actually load global extensions in `--mode json -p --no-session`.
 - **Safety default:** no body injection until discovery, diagnostics, budgets, advisory wrappers, and kill switch are working.
 - **Rollback:** `/tool-context-loader off`, config `enabled: false`, and documented uninstall path are required before broader rollout.
@@ -41,7 +42,7 @@ This is the canonical planning document for this repo. Use it to decide what to 
 
 - **Tool Context Loader**
   - Path: `tool-context-loader/`
-  - Status: Design
+  - Status: P1a complete; P1b next
   - Goal: Dynamically load local runbooks/lessons/episodes based on active/executed tools.
 
 - **Agent/Subagent Extensions**
@@ -122,7 +123,9 @@ Design docs:
 
 #### P1a — Discovery + diagnostics only
 
-Scope:
+Status: **Complete, merged, and globally deployed**.
+
+Delivered:
 
 - Metadata-only discovery.
 - Project trust gate.
@@ -130,15 +133,31 @@ Scope:
 - Episode eligibility rules.
 - Source precedence and duplicate identity.
 - `/tool-context-loader` diagnostics command.
-- No context injection yet.
+- Config `enabled: false` and session-only `/tool-context-loader off` safety controls.
+- Validation matrix and deterministic positive/negative tests.
+- No context injection.
 
 #### P1b — Preload index only
 
+Status: **Next**.
+
 Scope:
 
-- Index-only preload by default.
-- Preload byte/line budgets.
-- No runbook body injection yet.
+- Add `before_agent_start` handling.
+- Match discovered eligible records against `systemPromptOptions.selectedTools`.
+- Inject compact local guidance index entries only.
+- Enforce preload byte/line budgets deterministically.
+- Include source paths and summaries, not Markdown bodies.
+- Preserve no-body-injection guarantee.
+- Do not duplicate built-in tool descriptions.
+
+Validation:
+
+- Active-tool preload includes matching index entries.
+- Inactive-tool preload excludes nonmatching records.
+- Preload output stays under budget and lists omissions when possible.
+- Diagnostics and preload omit bodies.
+- Existing P1a discovery tests remain green.
 
 #### P1c — JIT tool-result injection
 
@@ -162,6 +181,13 @@ Scope:
 Validation source:
 
 - Every validation contract must map to automated test, live smoke test, or explicitly deferred status.
+
+## Completed Milestones
+
+- **P1a — Tool Context Loader discovery + diagnostics**
+  - Merged: PR #7, commit `76fc095`.
+  - Deployed globally: `~/.pi/agent/extensions/tool-context-loader/index.ts`.
+  - Validation: P1a discovery tests `11/11`, deployed extension load exit `0`, global auto-discovery load exit `0`.
 
 ### P2 — Minimal agent/subagent scaffold
 
