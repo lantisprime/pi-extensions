@@ -256,6 +256,44 @@ Saved IP URLs are stored globally in:
 
 See [`web-search/README.md`](web-search/README.md) for details.
 
+---
+
+### Tool Context Loader
+
+Path:
+
+```text
+tool-context-loader/index.ts
+```
+
+Global install location:
+
+```text
+~/.pi/agent/extensions/tool-context-loader/index.ts
+```
+
+P1a status: discovery + diagnostics only. It scans configured runbook/episode roots, parses lightweight frontmatter metadata, respects project trust for project-local roots, and exposes diagnostics without injecting model context or modifying tool results.
+
+Default project roots, scanned only when trusted:
+
+```text
+.pi/runbooks
+.runbooks
+.episodic-memory/episodes
+```
+
+Commands:
+
+```text
+/tool-context-loader
+/tool-context-loader status
+/tool-context-loader rescan
+/tool-context-loader on
+/tool-context-loader off
+```
+
+See [`tool-context-loader/README.md`](tool-context-loader/README.md) for details.
+
 ## Installing extensions globally
 
 From this project root:
@@ -271,6 +309,9 @@ cp -R web-search/lib ~/.pi/agent/extensions/web-search/lib
 mkdir -p ~/.pi/agent/extensions/prompt-shield
 cp prompt-shield/index.ts ~/.pi/agent/extensions/prompt-shield/index.ts
 cp -R prompt-shield/lib ~/.pi/agent/extensions/prompt-shield/lib
+
+mkdir -p ~/.pi/agent/extensions/tool-context-loader
+cp tool-context-loader/index.ts ~/.pi/agent/extensions/tool-context-loader/index.ts
 ```
 
 Then in Pi:
