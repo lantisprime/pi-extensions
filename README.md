@@ -204,7 +204,8 @@ Features:
 
 - Uses the current Pi LLM to suggest relevant search queries and reputable websites
 - Searches configured self-hosted SearXNG when enabled, otherwise DuckDuckGo HTML results
-- Requires HTTPS URLs
+- Includes an optional local SearXNG Docker Compose package at `web-search/optional-packages/searxng`
+- Requires HTTPS result URLs; SearXNG provider URLs can use HTTP only on local loopback
 - Uses Node/fetch TLS certificate and hostname validation
 - Performs secure DNS-over-HTTPS consistency checks
 - Checks malware-filtering DNS providers
@@ -257,6 +258,24 @@ Saved IP URLs are stored globally in:
 ```text
 ~/.pi/agent/web-search/config.json
 ```
+
+Optional local SearXNG quick start:
+
+```bash
+cd web-search/optional-packages/searxng
+./init.sh
+docker compose up -d
+```
+
+Then configure Pi:
+
+```text
+/web-search-config searxng http://127.0.0.1:8080/search
+/web-search-config provider auto
+/web-search-config list
+```
+
+Use `provider auto` to fall back to DuckDuckGo HTML if local SearXNG is down, or `provider searxng` for strict SearXNG-only mode.
 
 See [`web-search/README.md`](web-search/README.md) for details.
 

@@ -19,7 +19,7 @@ export function normalizeSearxngUrl(value: string): string | undefined {
 	if (!trimmed) return undefined;
 	try {
 		const url = new URL(trimmed.includes("://") ? trimmed : `https://${trimmed}`);
-		if (url.protocol !== "https:") return undefined;
+		if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname))) return undefined;
 		if (url.pathname === "/" || url.pathname === "") url.pathname = "/search";
 		url.search = "";
 		url.hash = "";
@@ -31,7 +31,7 @@ export function normalizeSearxngUrl(value: string): string | undefined {
 
 export function buildSearxngSearchUrl(baseUrl: string, query: string) {
 	const normalized = normalizeSearxngUrl(baseUrl);
-	if (!normalized) throw new Error("SearXNG URL must be HTTPS");
+	if (!normalized) throw new Error("SearXNG URL must be HTTPS, or HTTP on localhost/loopback only");
 	const url = new URL(normalized);
 	url.searchParams.set("q", query);
 	url.searchParams.set("format", "json");
@@ -94,6 +94,11 @@ export function parseSearxngResults(json: string): SearchCandidate[] {
 		});
 	}
 	return output;
+}
+
+function isLoopbackHost(hostname: string) {
+	const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+	return normalized === "localhost" || normalized === "::1" || /^127(?:\.\d{1,3}){3}$/.test(normalized);
 }
 
 function stripHtml(html: string) {

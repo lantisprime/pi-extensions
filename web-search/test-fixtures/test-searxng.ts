@@ -12,13 +12,20 @@ function testNormalizeSearxngUrl() {
 	assert.equal(normalizeSearxngUrl("search.example.com"), "https://search.example.com/search");
 	assert.equal(normalizeSearxngUrl("https://search.example.com/"), "https://search.example.com/search");
 	assert.equal(normalizeSearxngUrl("https://search.example.com/search?q=old#frag"), "https://search.example.com/search");
+	assert.equal(normalizeSearxngUrl("http://127.0.0.1:8080"), "http://127.0.0.1:8080/search");
+	assert.equal(normalizeSearxngUrl("http://localhost:8080/search?q=old#frag"), "http://localhost:8080/search");
 	assert.equal(normalizeSearxngUrl("http://search.example.com/search"), undefined);
+	assert.equal(normalizeSearxngUrl("http://192.168.1.10:8080/search"), undefined);
 }
 
 function testBuildSearxngSearchUrl() {
 	assert.equal(
 		buildSearxngSearchUrl("https://search.example.com/search", "pi extensions"),
 		"https://search.example.com/search?q=pi+extensions&format=json",
+	);
+	assert.equal(
+		buildSearxngSearchUrl("http://127.0.0.1:8080/search", "pi extensions"),
+		"http://127.0.0.1:8080/search?q=pi+extensions&format=json",
 	);
 }
 

@@ -21,6 +21,7 @@ Adds a `secure_web_search` tool for web research.
 - Truncates questions to 2000 characters before sending to the search-planning LLM.
 - Sanitizes LLM-generated sites to reject IP addresses and URL paths, preventing the model from injecting raw IP targets.
 - Requires explicit SearXNG configuration; it does not use random public SearXNG instances by default.
+- Includes an optional local SearXNG Docker Compose package for loopback-only use.
 
 ## Tool
 
@@ -42,12 +43,14 @@ Parameters:
 
 ## Provider Config
 
-By default `secure_web_search` uses DuckDuckGo HTML. To use SearXNG, configure your own HTTPS SearXNG instance explicitly:
+By default `secure_web_search` uses DuckDuckGo HTML. To use SearXNG, configure your own SearXNG instance explicitly. Public/non-loopback instances must use HTTPS; local Docker instances may use HTTP only on loopback hosts:
 
 ```text
 /web-search-config searxng https://search.example.com/search
+/web-search-config searxng http://127.0.0.1:8080/search
 /web-search-config list
 /web-search-config provider auto
+/web-search-config provider searxng
 /web-search-config provider duckduckgo-html
 /web-search-config reset-provider
 ```
@@ -58,7 +61,34 @@ Provider behavior:
 - `searxng`: requires `searxngUrl` and does not silently fall back.
 - `duckduckgo-html`: forces the DuckDuckGo HTML provider.
 
-SearXNG must support JSON output (`format=json`). Prefer a self-hosted/private instance. The extension ships with no public SearXNG default and sends only search query text to the provider.
+SearXNG must support JSON output (`format=json`). Prefer a self-hosted/private instance. The extension ships with no public SearXNG default and sends only search query text to the provider. HTTP SearXNG provider URLs are accepted only for `localhost`, `127.x.x.x`, and `::1`; all other SearXNG provider URLs must be HTTPS.
+
+## Optional local SearXNG package
+
+This repo includes a local Docker Compose package at:
+
+```text
+web-search/optional-packages/searxng
+```
+
+It follows the upstream SearXNG container docs, binds to `127.0.0.1:8080` by default, mounts persistent config/data volumes, enables JSON output, and removes Google engines by default.
+
+Quick start:
+
+```bash
+cd web-search/optional-packages/searxng
+./init.sh
+docker compose up -d
+curl 'http://127.0.0.1:8080/search?q=pi&format=json'
+```
+
+Then in Pi:
+
+```text
+/web-search-config searxng http://127.0.0.1:8080/search
+```
+
+See [`optional-packages/searxng/README.md`](optional-packages/searxng/README.md) for management commands and security notes.
 
 ## Saved IP URLs
 
