@@ -1,5 +1,7 @@
 import { complete, type UserMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { searchDuckDuckGoHtml, type SearchCandidate } from "./lib/duckduckgo";
+import { fetchTextFollowingHttpsRedirects, REDIRECT_STATUSES } from "./lib/redirect-fetch";
 import { scanTextForAgentRisk, type AgentRiskScanResult } from "./lib/security-scan";
 import { Type } from "typebox";
 import dns from "node:dns/promises";
@@ -38,6 +40,7 @@ type SearchResult = {
 	title: string;
 	url: string;
 	snippet: string;
+	provider?: string;
 	security: SecurityReport;
 	contentScan: AgentRiskScanResult;
 	contentPreview?: string;
@@ -163,6 +166,7 @@ export default function (pi: ExtensionAPI) {
 				title: `User/config supplied URL: ${url}`,
 				url,
 				snippet: "Explicit URL supplied by the user or saved config for security checking and fetching.",
+				provider: "explicit-url",
 			}));
 			const rawResults = [...explicitResults, ...(await searchDuckDuckGo(plan, maxResults, signal))];
 			const results: SearchResult[] = [];
@@ -315,40 +319,8 @@ async function createSearchPlan(
 	}
 }
 
-async function searchDuckDuckGo(plan: SearchPlan, maxResults: number, signal?: AbortSignal) {
-	const seen = new Set<string>();
-	const results: Array<{ title: string; url: string; snippet: string }> = [];
-	const queries = buildQueries(plan);
-
-	for (const query of queries) {
-		if (results.length >= maxResults * 2) break;
-		const url = `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-		const html = await fetchText(url, signal);
-		for (const result of parseDuckDuckGoResults(html)) {
-			if (seen.has(result.url)) continue;
-			seen.add(result.url);
-			results.push(result);
-			if (results.length >= maxResults * 2) break;
-		}
-	}
-	return results;
-}
-
-function buildQueries(plan: SearchPlan): string[] {
-	if (plan.sites.length === 0) return plan.queries;
-	return plan.queries.flatMap((query) => [query, ...plan.sites.map((site) => `site:${site} ${query}`)]).slice(0, 12);
-}
-
-function parseDuckDuckGoResults(html: string) {
-	const results: Array<{ title: string; url: string; snippet: string }> = [];
-	const resultRegex = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
-	let match: RegExpExecArray | null;
-	while ((match = resultRegex.exec(html))) {
-		const url = decodeDuckDuckGoUrl(decodeHtml(match[1]));
-		if (!url) continue;
-		results.push({ title: stripHtml(match[2]), url, snippet: stripHtml(match[3]) });
-	}
-	return results;
+async function searchDuckDuckGo(plan: SearchPlan, maxResults: number, signal?: AbortSignal): Promise<SearchCandidate[]> {
+	return searchDuckDuckGoHtml(plan, maxResults, fetchText, signal);
 }
 
 async function securityCheckUrl(rawUrl: string, signal?: AbortSignal): Promise<SecurityReport> {
@@ -363,7 +335,7 @@ async function securityCheckUrl(rawUrl: string, signal?: AbortSignal): Promise<S
 		// A manual HEAD request validates TLS for this exact redirect hop without
 		// silently following to an unchecked host.
 		const response = await fetchWithTimeout(current.toString(), { method: "HEAD", redirect: "manual", signal });
-		if (![301, 302, 303, 307, 308].includes(response.status)) {
+		if (!REDIRECT_STATUSES.has(response.status)) {
 			return { ...lastHostSecurity, finalUrl: current.toString(), redirects, ssl: "validated-by-node-fetch" };
 		}
 
@@ -490,44 +462,14 @@ async function fetchPagePreview(url: string, signal?: AbortSignal) {
 }
 
 async function fetchText(url: string, signal?: AbortSignal) {
-	const response = await fetchWithTimeout(url, {
-		headers: { "user-agent": USER_AGENT, accept: "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5" },
-		redirect: "manual",
+	return fetchTextFollowingHttpsRedirects(url, {
+		fetchWithTimeout,
+		checkRedirectTarget: checkHostSecurity,
 		signal,
+		headers: { "user-agent": USER_AGENT, accept: "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5" },
+		maxRedirects: MAX_REDIRECTS,
+		maxBytes: MAX_FETCH_BYTES,
 	});
-	if ([301, 302, 303, 307, 308].includes(response.status)) throw new Error(`unchecked redirect from ${url}`);
-	const contentType = response.headers.get("content-type") || "";
-	if (!contentType.includes("text/html") && !contentType.includes("text/plain")) {
-		throw new Error(`unsupported content-type: ${contentType || "unknown"}`);
-	}
-	return readResponseTextWithLimit(response, MAX_FETCH_BYTES);
-}
-
-async function readResponseTextWithLimit(response: Response, maxBytes: number) {
-	const length = Number(response.headers.get("content-length") || "0");
-	if (length > maxBytes) throw new Error(`response too large: ${length} bytes`);
-	if (!response.body) return response.text();
-	const reader = response.body.getReader();
-	const chunks: Uint8Array[] = [];
-	let total = 0;
-	while (true) {
-		const { done, value } = await reader.read();
-		if (done) break;
-		if (!value) continue;
-		total += value.byteLength;
-		if (total > maxBytes) {
-			await reader.cancel();
-			throw new Error(`response too large: >${maxBytes} bytes`);
-		}
-		chunks.push(value);
-	}
-	const bytes = new Uint8Array(total);
-	let offset = 0;
-	for (const chunk of chunks) {
-		bytes.set(chunk, offset);
-		offset += chunk.byteLength;
-	}
-	return new TextDecoder().decode(bytes);
 }
 
 async function fetchWithTimeout(url: string, init: RequestInit = {}) {
@@ -591,17 +533,6 @@ function formatResults(question: string, plan: SearchPlan, results: SearchResult
 		for (const item of rejected.slice(0, 10)) lines.push(`- ${item.url}: ${item.reason}`);
 	}
 	return lines.join("\n");
-}
-
-function decodeDuckDuckGoUrl(raw: string) {
-	try {
-		const parsed = new URL(raw, "https://duckduckgo.com");
-		const uddg = parsed.searchParams.get("uddg");
-		const url = uddg || parsed.toString();
-		return new URL(url).toString();
-	} catch {
-		return undefined;
-	}
 }
 
 function stripHtml(html: string) {
