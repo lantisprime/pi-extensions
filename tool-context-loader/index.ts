@@ -1,0 +1,652 @@
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+export const MAX_DISCOVERY_FILE_BYTES = 256_000;
+export const DIAGNOSTICS_RECORD_LIMIT = 50;
+
+export type InjectionMode = "preload" | "tool_result" | "steer";
+export type PreloadMode = "index" | "summary" | "body";
+export type SourceKind = "project-runbook" | "project-episode" | "global-runbook" | "global-episode";
+export type DiscoveryStatus = "eligible" | "unmapped" | "invalid" | "skipped";
+
+export type LoaderConfig = {
+	enabled: boolean;
+	roots: string[];
+	globalRoots: string[];
+	enableGlobalEpisodes: boolean;
+	maxInjectedBytesPerTurn: number;
+	maxPreloadBytesPerTurn: number;
+	maxRunbookBytes: number;
+	maxInjectedLinesPerRunbook: number;
+	defaultInjection: InjectionMode;
+	defaultPreload: PreloadMode;
+	lazyReadBodies: boolean;
+	dedupePerTurn: boolean;
+	dedupePerSession: boolean;
+};
+
+export type ParsedFrontmatter = {
+	metadata: Record<string, unknown>;
+	bodyStartOffset: number;
+};
+
+export type RootRecord = {
+	configuredPath: string;
+	absolutePath: string;
+	sourceKind: SourceKind;
+	sourcePrecedence: number;
+	exists: boolean;
+	scanned: boolean;
+	skippedReason?: string;
+};
+
+export type RunbookRecord = {
+	id: string;
+	identity: string;
+	absolutePath: string;
+	displayPath: string;
+	root: string;
+	sourceKind: SourceKind;
+	sourcePrecedence: number;
+	status: DiscoveryStatus;
+	summary: string;
+	tools: string[];
+	tags: string[];
+	injection: InjectionMode;
+	preload: PreloadMode;
+	priority: number;
+	maxBytes: number;
+	bodyBytes: number;
+	contentHash: string;
+	match: {
+		commandIncludes: string[];
+		pathIncludes: string[];
+	};
+	warning?: string;
+	// No body field in P1a. Body text must not be retained in records.
+};
+
+export type DiscoveryState = {
+	enabled: boolean;
+	projectTrusted: boolean;
+	scannedAt: string;
+	roots: RootRecord[];
+	records: RunbookRecord[];
+	warnings: string[];
+};
+
+export type DiscoverOptions = {
+	cwd: string;
+	projectTrusted: boolean;
+	config?: Partial<LoaderConfig>;
+	homeDir?: string;
+};
+
+export const DEFAULT_CONFIG: LoaderConfig = {
+	enabled: true,
+	roots: [".pi/runbooks", ".runbooks", ".episodic-memory/episodes"],
+	globalRoots: ["~/.pi/agent/runbooks", "~/.episodic-memory/episodes"],
+	enableGlobalEpisodes: false,
+	maxInjectedBytesPerTurn: 10_000,
+	maxPreloadBytesPerTurn: 2_000,
+	maxRunbookBytes: 5_000,
+	maxInjectedLinesPerRunbook: 160,
+	defaultInjection: "tool_result",
+	defaultPreload: "index",
+	lazyReadBodies: true,
+	dedupePerTurn: true,
+	dedupePerSession: false,
+};
+
+let config: LoaderConfig = DEFAULT_CONFIG;
+let discoveryState: DiscoveryState = emptyDiscoveryState(true, true);
+let enabledOverride: boolean | undefined;
+
+export function emptyDiscoveryState(enabled: boolean, projectTrusted: boolean): DiscoveryState {
+	return {
+		enabled,
+		projectTrusted,
+		scannedAt: new Date(0).toISOString(),
+		roots: [],
+		records: [],
+		warnings: [],
+	};
+}
+
+export function mergeConfig(overrides?: Partial<LoaderConfig>): LoaderConfig {
+	const merged = { ...DEFAULT_CONFIG, ...(overrides ?? {}) };
+	return {
+		...merged,
+		roots: Array.isArray(merged.roots) ? merged.roots.filter((r) => typeof r === "string" && r.trim()) : DEFAULT_CONFIG.roots,
+		globalRoots: Array.isArray(merged.globalRoots)
+			? merged.globalRoots.filter((r) => typeof r === "string" && r.trim())
+			: DEFAULT_CONFIG.globalRoots,
+		defaultInjection: isInjectionMode(merged.defaultInjection) ? merged.defaultInjection : DEFAULT_CONFIG.defaultInjection,
+		defaultPreload: isPreloadMode(merged.defaultPreload) ? merged.defaultPreload : DEFAULT_CONFIG.defaultPreload,
+		maxInjectedBytesPerTurn: positiveNumber(merged.maxInjectedBytesPerTurn, DEFAULT_CONFIG.maxInjectedBytesPerTurn),
+		maxPreloadBytesPerTurn: positiveNumber(merged.maxPreloadBytesPerTurn, DEFAULT_CONFIG.maxPreloadBytesPerTurn),
+		maxRunbookBytes: positiveNumber(merged.maxRunbookBytes, DEFAULT_CONFIG.maxRunbookBytes),
+		maxInjectedLinesPerRunbook: positiveNumber(
+			merged.maxInjectedLinesPerRunbook,
+			DEFAULT_CONFIG.maxInjectedLinesPerRunbook,
+		),
+	};
+}
+
+export async function loadProjectConfig(cwd: string, projectTrusted: boolean): Promise<Partial<LoaderConfig>> {
+	if (!projectTrusted) return {};
+	const configPath = path.join(cwd, ".pi", "tool-context-loader.json");
+	try {
+		const raw = await fs.readFile(configPath, "utf8");
+		const parsed = JSON.parse(raw) as Partial<LoaderConfig>;
+		return parsed && typeof parsed === "object" ? parsed : {};
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === "ENOENT") return {};
+		return {};
+	}
+}
+
+export function resolveRoot(configuredPath: string, cwd: string, homeDir = os.homedir()): string {
+	if (configuredPath === "~") return homeDir;
+	if (configuredPath.startsWith(`~${path.sep}`) || configuredPath.startsWith("~/")) {
+		return path.resolve(homeDir, configuredPath.slice(2));
+	}
+	return path.isAbsolute(configuredPath) ? path.resolve(configuredPath) : path.resolve(cwd, configuredPath);
+}
+
+export function classifySourceKind(configuredPath: string, isGlobal: boolean): SourceKind {
+	const normalized = configuredPath.replaceAll("\\", "/");
+	const isEpisode = normalized.includes(".episodic-memory/episodes");
+	if (isGlobal) return isEpisode ? "global-episode" : "global-runbook";
+	return isEpisode ? "project-episode" : "project-runbook";
+}
+
+export function sourcePrecedence(configuredPath: string, isGlobal: boolean): number {
+	const normalized = configuredPath.replaceAll("\\", "/");
+	if (!isGlobal && normalized === ".pi/runbooks") return 1;
+	if (!isGlobal && normalized === ".runbooks") return 2;
+	if (!isGlobal && normalized.includes(".episodic-memory/episodes")) return 3;
+	if (isGlobal && normalized.includes(".pi/agent/runbooks")) return 4;
+	if (isGlobal && normalized.includes(".episodic-memory/episodes")) return 5;
+	return isGlobal ? 50 : 10;
+}
+
+export async function discover(options: DiscoverOptions): Promise<DiscoveryState> {
+	const projectConfig = await loadProjectConfig(options.cwd, options.projectTrusted);
+	const mergedConfig = mergeConfig({ ...projectConfig, ...(options.config ?? {}) });
+	const enabled = mergedConfig.enabled;
+	const state: DiscoveryState = {
+		enabled,
+		projectTrusted: options.projectTrusted,
+		scannedAt: new Date().toISOString(),
+		roots: [],
+		records: [],
+		warnings: [],
+	};
+
+	if (!enabled) return state;
+
+	const rootsToScan: Array<{ configuredPath: string; isGlobal: boolean }> = [];
+	if (options.projectTrusted) {
+		rootsToScan.push(...mergedConfig.roots.map((configuredPath) => ({ configuredPath, isGlobal: false })));
+	} else {
+		for (const configuredPath of mergedConfig.roots) {
+			state.roots.push({
+				configuredPath,
+				absolutePath: resolveRoot(configuredPath, options.cwd, options.homeDir),
+				sourceKind: classifySourceKind(configuredPath, false),
+				sourcePrecedence: sourcePrecedence(configuredPath, false),
+				exists: false,
+				scanned: false,
+				skippedReason: "project is not trusted",
+			});
+		}
+	}
+	rootsToScan.push(...mergedConfig.globalRoots.map((configuredPath) => ({ configuredPath, isGlobal: true })));
+
+	for (const rootInput of rootsToScan) {
+		const absolutePath = resolveRoot(rootInput.configuredPath, options.cwd, options.homeDir);
+		const kind = classifySourceKind(rootInput.configuredPath, rootInput.isGlobal);
+		const precedence = sourcePrecedence(rootInput.configuredPath, rootInput.isGlobal);
+		const rootRecord: RootRecord = {
+			configuredPath: rootInput.configuredPath,
+			absolutePath,
+			sourceKind: kind,
+			sourcePrecedence: precedence,
+			exists: false,
+			scanned: false,
+		};
+		state.roots.push(rootRecord);
+
+		let rootRealPath: string;
+		try {
+			const stat = await fs.stat(absolutePath);
+			if (!stat.isDirectory()) {
+				rootRecord.exists = true;
+				rootRecord.skippedReason = "not a directory";
+				continue;
+			}
+			rootRealPath = await fs.realpath(absolutePath);
+			rootRecord.exists = true;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code !== "ENOENT") {
+				rootRecord.skippedReason = `root error: ${(error as Error).message}`;
+				state.warnings.push(`${rootInput.configuredPath}: ${rootRecord.skippedReason}`);
+			}
+			continue;
+		}
+
+		rootRecord.scanned = true;
+		const markdownFiles = await findMarkdownFiles(absolutePath, rootRealPath, state.warnings);
+		for (const filePath of markdownFiles) {
+			const record = await readRecord(filePath, absolutePath, rootRealPath, kind, precedence, mergedConfig, state.warnings);
+			if (!record) continue;
+			if (record.sourceKind === "global-episode" && !mergedConfig.enableGlobalEpisodes && record.status === "eligible") {
+				record.status = "unmapped";
+				record.warning = "global episodes are diagnostics-only unless enableGlobalEpisodes is true";
+			}
+			state.records.push(record);
+		}
+	}
+
+	state.records = dedupeRecords(state.records);
+	return state;
+}
+
+export async function findMarkdownFiles(root: string, rootRealPath?: string, warnings: string[] = []): Promise<string[]> {
+	const resolvedRootRealPath = rootRealPath ?? (await fs.realpath(root));
+	const files: string[] = [];
+
+	async function walk(directory: string) {
+		let entries: Array<import("node:fs").Dirent>;
+		try {
+			entries = await fs.readdir(directory, { withFileTypes: true });
+		} catch (error) {
+			warnings.push(`${directory}: cannot read directory: ${(error as Error).message}`);
+			return;
+		}
+
+		entries.sort((a, b) => a.name.localeCompare(b.name));
+		for (const entry of entries) {
+			const fullPath = path.join(directory, entry.name);
+			if (entry.isSymbolicLink()) {
+				if (!entry.name.endsWith(".md")) continue;
+				try {
+					const fileRealPath = await fs.realpath(fullPath);
+					if (!isPathInside(fileRealPath, resolvedRootRealPath)) {
+						warnings.push(`${fullPath}: symlink target escapes configured root, skipped`);
+						continue;
+					}
+					const stat = await fs.stat(fullPath);
+					if (stat.isFile()) files.push(fullPath);
+				} catch (error) {
+					warnings.push(`${fullPath}: symlink error: ${(error as Error).message}`);
+				}
+				continue;
+			}
+			if (entry.isDirectory()) {
+				await walk(fullPath);
+				continue;
+			}
+			if (entry.isFile() && entry.name.endsWith(".md")) files.push(fullPath);
+		}
+	}
+
+	await walk(root);
+	return files.sort((a, b) => a.localeCompare(b));
+}
+
+async function readRecord(
+	filePath: string,
+	rootPath: string,
+	rootRealPath: string,
+	sourceKindValue: SourceKind,
+	precedence: number,
+	loaderConfig: LoaderConfig,
+	warnings: string[],
+): Promise<RunbookRecord | undefined> {
+	let realPath: string;
+	try {
+		realPath = await fs.realpath(filePath);
+	} catch (error) {
+		warnings.push(`${filePath}: realpath failed: ${(error as Error).message}`);
+		return undefined;
+	}
+	if (!isPathInside(realPath, rootRealPath)) {
+		warnings.push(`${filePath}: path escapes configured root, skipped`);
+		return undefined;
+	}
+
+	const stat = await fs.stat(filePath);
+	if (stat.size > MAX_DISCOVERY_FILE_BYTES) {
+		warnings.push(`${filePath}: file is larger than ${MAX_DISCOVERY_FILE_BYTES} bytes, skipped`);
+		return undefined;
+	}
+
+	let text: string;
+	try {
+		text = await fs.readFile(filePath, "utf8");
+	} catch (error) {
+		warnings.push(`${filePath}: read failed: ${(error as Error).message}`);
+		return undefined;
+	}
+
+	let parsed: ParsedFrontmatter;
+	try {
+		parsed = parseFrontmatter(text);
+	} catch (error) {
+		warnings.push(`${filePath}: invalid frontmatter, skipped: ${(error as Error).message}`);
+		return undefined;
+	}
+
+	const metadata = parsed.metadata;
+	const relativePath = normalizePath(path.relative(rootPath, filePath));
+	const explicitId = stringField(metadata.id);
+	const id = explicitId || relativePath;
+	const tags = stringArrayField(metadata.tags);
+	const explicitTools = stringArrayField(metadata.tools);
+	const tools = explicitTools.length > 0 ? explicitTools : deriveToolsFromTags(tags);
+	const isEpisode = sourceKindValue === "project-episode" || sourceKindValue === "global-episode";
+	const hasToolMapping = tools.length > 0;
+	const status: DiscoveryStatus = hasToolMapping ? "eligible" : isEpisode ? "unmapped" : "skipped";
+	const warning = status === "skipped" ? "missing tools mapping" : status === "unmapped" ? "episode has no tool mapping" : undefined;
+
+	return {
+		id,
+		identity: computeIdentity(explicitId, relativePath, text),
+		absolutePath: filePath,
+		displayPath: displayPath(filePath, rootPath, sourceKindValue),
+		root: rootPath,
+		sourceKind: sourceKindValue,
+		sourcePrecedence: precedence,
+		status,
+		summary: stringField(metadata.summary) || id,
+		tools,
+		tags,
+		injection: injectionModeField(metadata.injection, loaderConfig.defaultInjection),
+		preload: preloadModeField(metadata.preload, loaderConfig.defaultPreload),
+		priority: numberField(metadata.priority, 0),
+		maxBytes: numberField(metadata.maxBytes, loaderConfig.maxRunbookBytes),
+		bodyBytes: Buffer.byteLength(text.slice(parsed.bodyStartOffset), "utf8"),
+		contentHash: sha256(text),
+		match: {
+			commandIncludes: stringArrayField(nestedField(metadata.match, "commandIncludes")),
+			pathIncludes: stringArrayField(nestedField(metadata.match, "pathIncludes")),
+		},
+		warning,
+	};
+}
+
+export function parseFrontmatter(text: string): ParsedFrontmatter {
+	if (!text.startsWith("---\n") && text.trim() !== "---") {
+		return { metadata: {}, bodyStartOffset: 0 };
+	}
+	const closeIndex = text.indexOf("\n---", 4);
+	if (closeIndex < 0) throw new Error("missing closing ---");
+	const afterClose = closeIndex + "\n---".length;
+	const nextChar = text[afterClose];
+	if (nextChar && nextChar !== "\n" && nextChar !== "\r") throw new Error("closing --- must be on its own line");
+	const frontmatter = text.slice(4, closeIndex);
+	const bodyStartOffset = text[afterClose] === "\r" && text[afterClose + 1] === "\n" ? afterClose + 2 : afterClose + 1;
+	const metadata: Record<string, unknown> = {};
+	const lines = frontmatter.split(/\r?\n/);
+	let currentMap: Record<string, unknown> | undefined;
+	let currentMapKey = "";
+
+	for (let index = 0; index < lines.length; index++) {
+		const rawLine = lines[index];
+		if (!rawLine.trim() || rawLine.trimStart().startsWith("#")) continue;
+		if (/^\s+/.test(rawLine)) {
+			if (!currentMap) throw new Error(`unexpected indented line ${index + 1}`);
+			const nestedMatch = rawLine.trim().match(/^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$/);
+			if (!nestedMatch) throw new Error(`invalid nested line ${index + 1}`);
+			currentMap[nestedMatch[1]] = parseValue(nestedMatch[2]);
+			metadata[currentMapKey] = currentMap;
+			continue;
+		}
+
+		currentMap = undefined;
+		currentMapKey = "";
+		const match = rawLine.match(/^([A-Za-z][A-Za-z0-9_-]*):\s*(.*)$/);
+		if (!match) throw new Error(`invalid line ${index + 1}`);
+		const [, key, rawValue] = match;
+		if (rawValue === "") {
+			if (key !== "match") throw new Error(`unsupported nested map '${key}' on line ${index + 1}`);
+			currentMap = {};
+			currentMapKey = key;
+			metadata[key] = currentMap;
+			continue;
+		}
+		metadata[key] = parseValue(rawValue);
+	}
+
+	return { metadata, bodyStartOffset };
+}
+
+export function parseValue(raw: string): unknown {
+	const value = raw.trim();
+	if (value === "true") return true;
+	if (value === "false") return false;
+	if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value);
+	if (value.startsWith("[") || value.endsWith("]")) return parseArray(value);
+	if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+		return value.slice(1, -1);
+	}
+	if (/[{}]/.test(value)) throw new Error(`unsupported scalar '${value}'`);
+	return value;
+}
+
+export function parseArray(raw: string): string[] {
+	const value = raw.trim();
+	if (!value.startsWith("[") || !value.endsWith("]")) throw new Error(`invalid array '${raw}'`);
+	const inner = value.slice(1, -1).trim();
+	if (!inner) return [];
+	return inner.split(",").map((part) => {
+		const trimmed = part.trim();
+		if (!trimmed) throw new Error(`empty array item in '${raw}'`);
+		return String(parseValue(trimmed));
+	});
+}
+
+export function deriveToolsFromTags(tags: string[]): string[] {
+	return [...new Set(tags.filter((tag) => tag.startsWith("tool:")).map((tag) => tag.slice("tool:".length)).filter(Boolean))].sort();
+}
+
+export function computeIdentity(id: string | undefined, relativePath: string, text: string): string {
+	if (id) return `id:${id}`;
+	if (relativePath) return `path:${normalizePath(relativePath)}`;
+	return `sha256:${sha256(text)}`;
+}
+
+export function dedupeRecords(records: RunbookRecord[]): RunbookRecord[] {
+	const byIdentity = new Map<string, RunbookRecord>();
+	for (const record of records) {
+		const existing = byIdentity.get(record.identity);
+		if (!existing || compareRecordPreference(record, existing) < 0) {
+			byIdentity.set(record.identity, record);
+		}
+	}
+	return [...byIdentity.values()].sort(compareRecordsForOutput);
+}
+
+export function formatDiagnostics(state: DiscoveryState, limit = DIAGNOSTICS_RECORD_LIMIT): string {
+	const eligible = state.records.filter((record) => record.status === "eligible");
+	const unmapped = state.records.filter((record) => record.status === "unmapped");
+	const skipped = state.records.filter((record) => record.status === "skipped");
+	const lines = [
+		`Tool Context Loader: ${state.enabled ? "enabled" : "disabled"}`,
+		`Project trusted: ${state.projectTrusted ? "yes" : "no"}`,
+		`Scanned at: ${state.scannedAt}`,
+		"",
+		"Roots:",
+	];
+	for (const root of state.roots) {
+		const counts = countByStatus(state.records.filter((record) => record.root === root.absolutePath));
+		const status = root.scanned ? formatStatusCounts(counts) || "0 records" : root.exists ? root.skippedReason || "not scanned" : root.skippedReason || "missing";
+		lines.push(`- ${root.configuredPath} (${root.sourceKind}): ${status}`);
+	}
+	lines.push(
+		"",
+		`Records: ${eligible.length} eligible, ${unmapped.length} unmapped, ${skipped.length} skipped, ${state.warnings.length} warnings`,
+	);
+
+	const visible = state.records.slice(0, limit);
+	if (visible.length > 0) {
+		lines.push("", "Discovered metadata:");
+		for (const record of visible) {
+			const tools = record.tools.length > 0 ? record.tools.join(",") : "no-tools";
+			const suffix = record.warning ? ` (${record.warning})` : "";
+			lines.push(
+				`- ${record.id} [${record.status}; ${tools}; ${record.injection}/${record.preload}; p=${record.priority}] ${record.displayPath} — ${record.summary}${suffix}`,
+			);
+		}
+		if (state.records.length > visible.length) {
+			lines.push(`... ${state.records.length - visible.length} more records omitted by diagnostics cap`);
+		}
+	}
+
+	if (state.warnings.length > 0) {
+		lines.push("", "Warnings:");
+		for (const warning of state.warnings.slice(0, limit)) lines.push(`- ${warning}`);
+		if (state.warnings.length > limit) lines.push(`... ${state.warnings.length - limit} more warnings omitted by diagnostics cap`);
+	}
+	return lines.join("\n");
+}
+
+function countByStatus(records: RunbookRecord[]) {
+	return records.reduce<Record<string, number>>((counts, record) => {
+		counts[record.status] = (counts[record.status] ?? 0) + 1;
+		return counts;
+	}, {});
+}
+
+function formatStatusCounts(counts: Record<string, number>): string {
+	return ["eligible", "unmapped", "skipped", "invalid"]
+		.filter((status) => counts[status])
+		.map((status) => `${counts[status]} ${status}`)
+		.join(", ");
+}
+
+function compareRecordPreference(a: RunbookRecord, b: RunbookRecord): number {
+	return (
+		a.sourcePrecedence - b.sourcePrecedence ||
+		b.priority - a.priority ||
+		a.displayPath.length - b.displayPath.length ||
+		a.displayPath.localeCompare(b.displayPath)
+	);
+}
+
+function compareRecordsForOutput(a: RunbookRecord, b: RunbookRecord): number {
+	return (
+		a.sourcePrecedence - b.sourcePrecedence ||
+		b.priority - a.priority ||
+		a.displayPath.localeCompare(b.displayPath) ||
+		a.id.localeCompare(b.id)
+	);
+}
+
+function isPathInside(candidate: string, root: string): boolean {
+	const relative = path.relative(root, candidate);
+	return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function displayPath(filePath: string, rootPath: string, sourceKindValue: SourceKind): string {
+	const relative = normalizePath(path.relative(rootPath, filePath));
+	return `${sourceKindValue}:${relative}`;
+}
+
+function normalizePath(value: string): string {
+	return value.split(path.sep).join("/");
+}
+
+function sha256(text: string): string {
+	return createHash("sha256").update(text).digest("hex");
+}
+
+function stringField(value: unknown): string {
+	return typeof value === "string" ? value : "";
+}
+
+function stringArrayField(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	return value.map((item) => String(item).trim()).filter(Boolean);
+}
+
+function numberField(value: unknown, fallback: number): number {
+	return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function positiveNumber(value: unknown, fallback: number): number {
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function nestedField(value: unknown, key: string): unknown {
+	return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>)[key] : undefined;
+}
+
+function injectionModeField(value: unknown, fallback: InjectionMode): InjectionMode {
+	return isInjectionMode(value) ? value : fallback;
+}
+
+function preloadModeField(value: unknown, fallback: PreloadMode): PreloadMode {
+	return isPreloadMode(value) ? value : fallback;
+}
+
+function isInjectionMode(value: unknown): value is InjectionMode {
+	return value === "preload" || value === "tool_result" || value === "steer";
+}
+
+function isPreloadMode(value: unknown): value is PreloadMode {
+	return value === "index" || value === "summary" || value === "body";
+}
+
+async function rescan(cwd: string, projectTrusted: boolean) {
+	config = mergeConfig(await loadProjectConfig(cwd, projectTrusted));
+	const effectiveConfig = enabledOverride === undefined ? config : { ...config, enabled: enabledOverride };
+	discoveryState = await discover({ cwd, projectTrusted, config: effectiveConfig });
+}
+
+export default function toolContextLoader(pi: ExtensionAPI) {
+	pi.on("session_start", async (_event, ctx) => {
+		await rescan(ctx.cwd, ctx.isProjectTrusted());
+		if (ctx.hasUI) {
+			const eligible = discoveryState.records.filter((record) => record.status === "eligible").length;
+			ctx.ui.setStatus("tool-context-loader", `runbooks:${eligible}`);
+		}
+	});
+
+	pi.on("resources_discover", async (event, ctx) => {
+		if (event.reason === "reload") await rescan(ctx.cwd, ctx.isProjectTrusted());
+		return {};
+	});
+
+	pi.registerCommand("tool-context-loader", {
+		description: "Show or rescan tool-context-loader discovery diagnostics",
+		getArgumentCompletions: (prefix) => {
+			const options = ["status", "rescan", "on", "off"];
+			const filtered = options.filter((option) => option.startsWith(prefix.trim()));
+			return filtered.length > 0 ? filtered.map((value) => ({ value, label: value })) : null;
+		},
+		handler: async (args, ctx) => {
+			const command = args.trim() || "status";
+			if (command === "on") {
+				enabledOverride = true;
+				await rescan(ctx.cwd, ctx.isProjectTrusted());
+			} else if (command === "off") {
+				enabledOverride = false;
+				await rescan(ctx.cwd, ctx.isProjectTrusted());
+			} else if (command === "rescan") {
+				await rescan(ctx.cwd, ctx.isProjectTrusted());
+			} else if (command !== "status") {
+				ctx.ui.notify("Usage: /tool-context-loader [status|rescan|on|off]", "warning");
+				return;
+			}
+			ctx.ui.notify(formatDiagnostics(discoveryState), "info");
+		},
+	});
+}
