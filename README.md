@@ -271,7 +271,11 @@ Then configure Pi:
 
 ```text
 /web-search-config searxng http://127.0.0.1:8080/search
+/web-search-config provider auto
+/web-search-config list
 ```
+
+Use `provider auto` to fall back to DuckDuckGo HTML if local SearXNG is down, or `provider searxng` for strict SearXNG-only mode.
 
 See [`web-search/README.md`](web-search/README.md) for details.
 
