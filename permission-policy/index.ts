@@ -14,7 +14,7 @@ type PermissionKey =
 	| "writeFiles";
 
 type Decision = "allow" | "deny";
-type PermissionMode = "ask" | "readOnlyAuto" | "llmAuto";
+type PermissionMode = "ask" | "readOnlyAuto" | "llmAuto" | "yolo";
 
 type PolicyFile = {
 	projectPath: string;
@@ -34,11 +34,17 @@ const POLICY_DIR = path.join(os.homedir(), ".pi", "agent", "permission-policy", 
 const PROMPT_SHIELD_STATE_PATH = path.join(os.homedir(), ".pi", "agent", "prompt-shield", "state.json");
 const WEB_TOOL_NAMES = new Set(["web_search", "search_web", "web", "browser", "fetch", "http_get"]);
 const SESSION_PERMISSIONS = new Map<string, Partial<Record<PermissionKey, Decision>>>();
+const YOLO_WARNING = [
+	"YOLO permission mode is dangerous.",
+	"It auto-allows permission requests without prompting and should only be used in disposable/trusted workspaces.",
+	"permission-policy will still block rm -f/rm -rf style commands and commands that appear to delete the repository.",
+].join("\n");
 
 const MODE_LABELS: Record<PermissionMode, string> = {
 	ask: "Ask when no project/session permission is recorded",
 	readOnlyAuto: "Auto-allow read-only commands in the current project",
 	llmAuto: "Use the current LLM to auto-allow commands judged non-destructive",
+	yolo: "YOLO: auto-allow by default except rm -f/rm -rf and repo deletion",
 };
 
 const PERMISSION_LABELS: Record<PermissionKey, string> = {
@@ -53,6 +59,9 @@ const PERMISSION_LABELS: Record<PermissionKey, string> = {
 export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		await updatePermissionStatus(ctx);
+		const projectPath = await getProjectPath(ctx.cwd);
+		const policy = await loadPolicy(projectPath);
+		if (policy.mode === "yolo" && ctx.hasUI) ctx.ui.notify(YOLO_WARNING, "warning");
 	});
 
 	pi.registerShortcut("ctrl+shift+m", {
@@ -60,11 +69,13 @@ export default function (pi: ExtensionAPI) {
 		handler: async (ctx) => {
 			const projectPath = await getProjectPath(ctx.cwd);
 			const policy = await loadPolicy(projectPath);
-			policy.mode = nextMode(policy.mode);
+			const next = nextMode(policy.mode);
+			if (next === "yolo" && !(await confirmYoloMode(ctx))) return;
+			policy.mode = next;
 			policy.updatedAt = new Date().toISOString();
 			await savePolicy(projectPath, policy);
 			await updatePermissionStatus(ctx);
-			ctx.ui.notify(`Permission mode: ${policy.mode} - ${MODE_LABELS[policy.mode]}`, "info");
+			ctx.ui.notify(`Permission mode: ${policy.mode} - ${MODE_LABELS[policy.mode]}`, policy.mode === "yolo" ? "warning" : "info");
 		},
 	});
 
@@ -104,7 +115,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("permissions", {
-		description: "Show/reset permission-policy settings, or set mode: /permissions mode ask|read-only|auto",
+		description: "Show/reset permission-policy settings, or set mode: /permissions mode ask|read-only|auto|yolo",
 		handler: async (args, ctx) => {
 			const projectPath = await getProjectPath(ctx.cwd);
 			const normalizedArgs = args.trim().toLowerCase();
@@ -122,14 +133,15 @@ export default function (pi: ExtensionAPI) {
 				const modeArg = normalizedArgs.replace(/^mode\s*/, "");
 				const mode = parseMode(modeArg);
 				if (!mode) {
-					ctx.ui.notify("Usage: /permissions mode ask|read-only|auto", "warning");
+					ctx.ui.notify("Usage: /permissions mode ask|read-only|auto|yolo", "warning");
 					return;
 				}
+				if (mode === "yolo" && policy.mode !== "yolo" && !(await confirmYoloMode(ctx))) return;
 				policy.mode = mode;
 				policy.updatedAt = new Date().toISOString();
 				await savePolicy(projectPath, policy);
 				await updatePermissionStatus(ctx);
-				ctx.ui.notify(`Permission mode set to ${mode}: ${MODE_LABELS[mode]}`, "info");
+				ctx.ui.notify(`Permission mode set to ${mode}: ${MODE_LABELS[mode]}`, mode === "yolo" ? "warning" : "info");
 				return;
 			}
 
@@ -145,7 +157,7 @@ export default function (pi: ExtensionAPI) {
 				"Current-session permissions:",
 				...formatPermissions(session),
 				"",
-				"Use /permissions mode ask|read-only|auto to change mode.",
+				"Use /permissions mode ask|read-only|auto|yolo to change mode.",
 				"Use /permissions reset to clear both for this project.",
 			];
 
@@ -247,6 +259,40 @@ function looksDestructive(command: string): boolean {
 	const overwriteRedirect = /(^|\s)(\d?>|&>|tee\s+)(?!>)/i.test(command);
 	const inPlaceEdit = /(^|[;&|()\s])(sed|perl|python|node|ruby)\s+.*\s(-i|--in-place)\b/i.test(command);
 	return destructiveCommand || overwriteRedirect || inPlaceEdit;
+}
+
+function isYoloHardDenied(command: string, projectPath: string, cwd: string): string | undefined {
+	const normalized = command.replace(/\\n|[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
+	if (!normalized) return undefined;
+	if (/(^|[;&|()\s])rm\s+[^;&|()]*?(?:--force\b|-[A-Za-z]*f[A-Za-z]*\b)/i.test(normalized)) return "rm -f/rm -rf commands are blocked even in YOLO mode";
+	if (/(^|[;&|()\s])rm\s+[^;&|()]*\s(?:\.git|\.git\/|\.\/\.git|\.\/\.git\/)(?:\s|$)/i.test(normalized)) return "commands that delete the repository metadata are blocked even in YOLO mode";
+	if (/(?:\.git\b.{0,120}\brm\b|\brm\b.{0,120}\.git\b)/i.test(normalized)) return "commands that delete the repository metadata are blocked even in YOLO mode";
+	if (/\bgit\s+worktree\s+remove\b/i.test(normalized) && /(?:^|\s)(?:--force|-f)(?:\s|$)/i.test(normalized)) return "forced repository worktree deletion is blocked even in YOLO mode";
+
+	const rmTargets = extractRmLikeTargets(normalized);
+	for (const target of rmTargets) {
+		if (target === ".git" || target.startsWith(`.git${path.sep}`)) return "commands that delete the repository metadata are blocked even in YOLO mode";
+		const absolute = path.resolve(cwd, target);
+		if (absolute === projectPath || projectPath.startsWith(`${absolute}${path.sep}`)) {
+			return "commands that delete the project repository are blocked even in YOLO mode";
+		}
+	}
+	return undefined;
+}
+
+function extractRmLikeTargets(command: string): string[] {
+	const targets: string[] = [];
+	for (const segment of command.split(/\s*(?:&&|\|\||;|\|)\s*/)) {
+		const tokens = segment.match(/(?:"[^"]+"|'[^']+'|\S+)/g) || [];
+		const commandIndex = tokens.findIndex((token) => /^(rm|rmdir|unlink)$/.test(token));
+		if (commandIndex < 0) continue;
+		for (const raw of tokens.slice(commandIndex + 1)) {
+			const token = raw.replace(/^['"]|['"]$/g, "");
+			if (!token || token === "--" || token.startsWith("-")) continue;
+			targets.push(token);
+		}
+	}
+	return targets;
 }
 
 function isReadOnlyAutoAllowed(request: PermissionRequest, projectPath: string, cwd: string): boolean {
@@ -365,6 +411,18 @@ async function evaluateCommandWithLlm(
 }
 
 async function ensurePermission(ctx: ExtensionContext, projectPath: string, request: PermissionRequest): Promise<boolean> {
+	const policy = await loadPolicy(projectPath);
+	if (policy.mode === "yolo") {
+		if (request.command) {
+			const hardDenyReason = isYoloHardDenied(request.command, projectPath, ctx.cwd);
+			if (hardDenyReason) {
+				if (ctx.hasUI) ctx.ui.notify(hardDenyReason, "warning");
+				return false;
+			}
+		}
+		return true;
+	}
+
 	const promptShieldStrict = await isPromptShieldStrict();
 	const sensitiveUnderShield = promptShieldStrict && isSensitiveWhenPromptShieldRiskActive(request.key);
 
@@ -373,7 +431,6 @@ async function ensurePermission(ctx: ExtensionContext, projectPath: string, requ
 		if (sessionDecision) return sessionDecision === "allow";
 	}
 
-	const policy = await loadPolicy(projectPath);
 	if (!sensitiveUnderShield) {
 		const projectDecision = policy.permissions[request.key];
 		if (projectDecision) return projectDecision === "allow";
@@ -457,15 +514,22 @@ async function updatePermissionStatus(ctx: ExtensionContext) {
 	ctx.ui.setStatus("permission-policy", `│ permission: ${modeShortLabel(policy.mode)}`);
 }
 
+async function confirmYoloMode(ctx: ExtensionContext): Promise<boolean> {
+	if (!ctx.hasUI) return false;
+	return ctx.ui.confirm("Enable YOLO permission mode?", `${YOLO_WARNING}\n\nContinue?`);
+}
+
 function modeShortLabel(mode: PermissionMode): string {
 	if (mode === "readOnlyAuto") return "read-only";
 	if (mode === "llmAuto") return "auto";
+	if (mode === "yolo") return "yolo";
 	return "ask";
 }
 
 function nextMode(mode: PermissionMode): PermissionMode {
 	if (mode === "ask") return "readOnlyAuto";
 	if (mode === "readOnlyAuto") return "llmAuto";
+	if (mode === "llmAuto") return "yolo";
 	return "ask";
 }
 
@@ -473,6 +537,7 @@ function parseMode(mode: string): PermissionMode | undefined {
 	if (mode === "ask" || mode === "manual") return "ask";
 	if (mode === "read-only" || mode === "readonly" || mode === "readOnlyAuto".toLowerCase()) return "readOnlyAuto";
 	if (mode === "auto" || mode === "llm" || mode === "llm-auto" || mode === "automatic") return "llmAuto";
+	if (mode === "yolo" || mode === "unsafe" || mode === "dangerous") return "yolo";
 	return undefined;
 }
 
