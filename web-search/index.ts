@@ -2,7 +2,7 @@ import { complete, type UserMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { chooseDnsConsistencyAddresses } from "./lib/dns-consistency";
 import { searchDuckDuckGoHtml, type SearchCandidate } from "./lib/duckduckgo";
-import { fetchTextFollowingHttpsRedirects, REDIRECT_STATUSES } from "./lib/redirect-fetch";
+import { fetchTextFollowingHttpsRedirects, readResponseTextWithLimit, REDIRECT_STATUSES } from "./lib/redirect-fetch";
 import { normalizeSearxngUrl, searchSearxng } from "./lib/searxng";
 import { scanTextForAgentRisk, type AgentRiskScanResult } from "./lib/security-scan";
 import { Type } from "typebox";
@@ -123,7 +123,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("web-search-config", {
-		description: "Manage secure_web_search provider config: list, provider <auto|duckduckgo-html|searxng>, searxng <https://host/search>, reset-provider",
+		description: "Manage secure_web_search provider config: list, provider <auto|duckduckgo-html|searxng>, searxng <https://host/search|http://127.0.0.1:8080/search>, reset-provider",
 		handler: async (args, ctx) => {
 			const [rawAction = "list", ...rest] = args.trim().split(/\s+/).filter(Boolean);
 			const action = rawAction.toLowerCase();
@@ -148,7 +148,7 @@ export default function (pi: ExtensionAPI) {
 			if (action === "searxng") {
 				const normalized = normalizeSearxngUrl(value);
 				if (!normalized) {
-					ctx.ui.notify("Usage: /web-search-config searxng <https://your-searxng.example/search>", "warning");
+					ctx.ui.notify("Usage: /web-search-config searxng <https://your-searxng.example/search|http://127.0.0.1:8080/search>", "warning");
 					return;
 				}
 				await saveConfig({ ...config, provider: "auto", searxngUrl: normalized, updatedAt: new Date().toISOString() });
@@ -310,7 +310,7 @@ function formatWebSearchConfig(config: WebSearchConfig) {
 		`- searxngUrl: ${config.searxngUrl || "not configured"}`,
 		`- saved IP URLs: ${config.ipUrls.length}`,
 		"",
-		"Use /web-search-config searxng <https://your-searxng.example/search> to enable self-hosted SearXNG.",
+		"Use /web-search-config searxng <https://your-searxng.example/search> to enable self-hosted SearXNG, or http://127.0.0.1:8080/search for local loopback Docker.",
 		"Use /web-search-config provider duckduckgo-html to force DuckDuckGo fallback.",
 	].join("\n");
 }
@@ -410,7 +410,7 @@ async function searchWithConfiguredProvider(
 		}
 		try {
 			return {
-				candidates: await searchSearxng(config.searxngUrl, plan, maxResults, fetchText, signal),
+				candidates: await searchSearxng(config.searxngUrl, plan, maxResults, fetchSearxngText, signal),
 				provider: "searxng",
 				providerErrors,
 			};
@@ -422,7 +422,7 @@ async function searchWithConfiguredProvider(
 	if (requestedProvider === "auto" && config.searxngUrl) {
 		try {
 			return {
-				candidates: await searchSearxng(config.searxngUrl, plan, maxResults, fetchText, signal),
+				candidates: await searchSearxng(config.searxngUrl, plan, maxResults, fetchSearxngText, signal),
 				provider: "searxng",
 				providerErrors,
 			};
@@ -589,6 +589,38 @@ async function fetchPagePreview(url: string, signal?: AbortSignal) {
 	return stripHtml(html).replace(/\s+/g, " ").slice(0, 2000);
 }
 
+async function fetchSearxngText(url: string, signal?: AbortSignal) {
+	const parsed = new URL(url);
+	if (parsed.protocol === "http:" && isLoopbackHost(parsed.hostname)) return fetchLoopbackHttpText(parsed, signal);
+	return fetchText(url, signal);
+}
+
+async function fetchLoopbackHttpText(url: URL, signal?: AbortSignal) {
+	let current = url;
+	for (let depth = 0; depth <= MAX_REDIRECTS; depth += 1) {
+		if (current.protocol !== "http:" || !isLoopbackHost(current.hostname)) {
+			throw new Error(`blocked non-loopback SearXNG redirect: ${current.toString()}`);
+		}
+		const response = await fetchWithTimeout(current.toString(), {
+			headers: { "user-agent": USER_AGENT, accept: "application/json,text/plain;q=0.9,*/*;q=0.5" },
+			redirect: "manual",
+			signal,
+		});
+		if (REDIRECT_STATUSES.has(response.status)) {
+			const location = response.headers.get("location");
+			if (!location) throw new Error(`redirect without Location from ${current.hostname}`);
+			current = new URL(location, current);
+			continue;
+		}
+		const contentType = response.headers.get("content-type") || "";
+		if (!contentType.includes("application/json") && !contentType.includes("text/plain") && !contentType.includes("text/html")) {
+			throw new Error(`unsupported content-type: ${contentType || "unknown"}`);
+		}
+		return readResponseTextWithLimit(response, MAX_FETCH_BYTES);
+	}
+	throw new Error(`too many redirects (>${MAX_REDIRECTS}) from ${url.toString()}`);
+}
+
 async function fetchText(url: string, signal?: AbortSignal) {
 	return fetchTextFollowingHttpsRedirects(url, {
 		fetchWithTimeout,
@@ -727,6 +759,11 @@ const PRIVATE_IP_RANGES = [
 	/^192\.0\.2\./, /^198\.51\.100\./, /^203\.0\.113\./,
 	/^0\./, /^fc00:/i, /^fd00:/i, /^fe80:/i, /^::1$/, /^::$/, /^::/,
 ];
+
+function isLoopbackHost(hostname: string) {
+	const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+	return normalized === "localhost" || normalized === "::1" || /^127(?:\.\d{1,3}){3}$/.test(normalized);
+}
 
 function isPrivateIpHostname(urlOrHostname: string): boolean {
 	try {

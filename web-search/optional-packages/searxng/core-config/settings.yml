@@ -1,0 +1,24 @@
+# Minimal local settings for Pi secure_web_search.
+# Keep default SearXNG settings, enable JSON output for API use, and remove
+# Google engines by default to avoid direct Google scraping via SearXNG.
+
+use_default_settings:
+  engines:
+    remove:
+      - google
+      - google images
+      - google news
+      - google videos
+      - google scholar
+      - google play apps
+      - google play movies
+
+search:
+  formats:
+    - html
+    - json
+
+server:
+  limiter: false
+  public_instance: false
+  image_proxy: false
