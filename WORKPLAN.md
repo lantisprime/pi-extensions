@@ -8,11 +8,11 @@ This is the canonical planning document for this repo. Use it to decide what to 
 
 - **Current priority:** continue `tool-context-loader` in staged milestones.
 - **Completed milestone:** P1a discovery + diagnostics, including quiet default status and verbose diagnostics, is merged and globally deployed.
-- **Next milestone:** P1b preload index only; inject compact metadata indexes for active tools, not bodies.
+- **Current milestone:** P1b preload index only; compact metadata indexes for active tools are implemented and reviewed locally; deployment/merge pending.
 - **Next 3 tasks:**
-  1. Plan/review P1b against `tool-context-loader/DESIGN.md`, `P1A_PLAN_REVIEW.md`, and `VALIDATION_MATRIX.md`.
-  2. Implement `before_agent_start` index-only preload for matching active tools with byte/line budgets.
-  3. Add deterministic P1b tests for active-tool preload, inactive-tool exclusion, budget caps, no body output, and no duplicated built-in tool docs.
+  1. Deploy updated `tool-context-loader/index.ts` globally after final approval.
+  2. Open/merge the P1b change set.
+  3. Start P1c planning for JIT tool-result injection only after P1b is merged/deployed.
 - **Do not start full agent workflows yet.** A minimal agent scaffold is now allowed if needed, but full workflows wait until P1d hardening.
 - **Key risk to prove:** child Pi subprocesses used by subagents actually load global extensions in `--mode json -p --no-session`.
 - **Safety default:** no body injection until discovery, diagnostics, budgets, advisory wrappers, and kill switch are working.
@@ -140,7 +140,7 @@ Delivered:
 
 #### P1b — Preload index only
 
-Status: **Next**.
+Status: **Implemented and reviewed locally; deployment pending**.
 
 Scope:
 
@@ -159,6 +159,13 @@ Validation:
 - Preload output stays under budget and lists omissions when possible.
 - Diagnostics and preload omit bodies.
 - Existing P1a discovery tests remain green.
+
+Delivered locally:
+
+- `before_agent_start` preload hook.
+- Active-tool metadata matching via `systemPromptOptions.selectedTools`.
+- Deterministic metadata-only preload block with byte budget.
+- P1b helper tests for active/inactive tools, budget caps, ordering, body omission, disabled config, and no duplicated tool docs.
 
 #### P1c — JIT tool-result injection
 
