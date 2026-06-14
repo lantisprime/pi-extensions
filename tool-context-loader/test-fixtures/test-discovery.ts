@@ -66,10 +66,12 @@ async function testDiscoveryHappyPath() {
 		assert.deepEqual(byId.get("bash-kubectl")?.tools, ["bash"]);
 		assert.deepEqual(byId.get("bash-kubectl")?.match.commandIncludes, ["kubectl", "helm"]);
 		assert.equal(byId.get("bash-kubectl")?.displayPath, "project-runbook:bash-kubectl.md");
+		assert.equal(byId.get("bash-kubectl")?.explicitInjection, true);
 		assert.equal(byId.get("github-actions-edit")?.status, "eligible");
 		assert.deepEqual(byId.get("github-actions-edit")?.match.pathIncludes, [".github/workflows/"]);
 		assert.equal(byId.get("no-id.md")?.status, "eligible");
 		assert.equal(byId.get("no-id.md")?.identity, "path:no-id.md");
+		assert.equal(byId.get("no-id.md")?.explicitInjection, false);
 		assert.equal(byId.get("episode-tool-mapped")?.status, "eligible");
 		assert.deepEqual(byId.get("episode-tool-mapped")?.tools, ["bash"]);
 		assert.equal(byId.get("episode-unmapped")?.status, "unmapped");
@@ -229,6 +231,7 @@ async function testDedupePreference() {
 		tools: ["bash"],
 		tags: [],
 		injection: "tool_result" as const,
+		explicitInjection: true,
 		preload: "index" as const,
 		priority: 1,
 		maxBytes: 100,

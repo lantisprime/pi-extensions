@@ -2,9 +2,9 @@
 
 Dynamic local runbook/episode discovery for Pi tools.
 
-## P1b Status
+## P1c Status
 
-This extension currently implements **P1a discovery/diagnostics** and **P1b preload index only**.
+This extension currently implements **P1a discovery/diagnostics**, **P1b preload index only**, and **P1c JIT tool-result injection**.
 
 It does:
 
@@ -15,13 +15,15 @@ It does:
 - dedupe records deterministically
 - expose `/tool-context-loader` diagnostics
 - append a compact metadata-only preload index during `before_agent_start` for active tools with matching `injection: preload` records
+- match actual tool calls using metadata only
+- lazily append bounded, advisory-wrapped runbook body excerpts after matching tool results for explicit `injection: tool_result` records
 
 It does **not** yet:
 
-- inject Markdown bodies into model context
-- modify tool results
-- match actual tool calls/results
-- load runbook bodies just-in-time
+- perform parallel claim-before-await race-safety hardening
+- inject broad bash tool-only runbooks without `match.commandIncludes`
+- body-inject records that only inherit the default `tool_result` mode without explicit frontmatter
+- integrate directly with Prompt Shield risk state for body suppression
 
 ## Default roots
 
@@ -62,10 +64,12 @@ maxBytes: 5000
 
 # Body
 
-P1b preloads metadata indexes only. Bodies are not injected.
+P1b preloads metadata indexes only. P1c injects this body only after a matching tool result.
 ```
 
-For P1b preload, set `injection: preload`. The `preload` field is still treated as index-only in P1b, including `preload: body`; body injection remains deferred to a later milestone.
+For P1b preload, set `injection: preload`. The `preload` field is still treated as index-only, including `preload: body`.
+
+For P1c JIT body injection, set explicit frontmatter `injection: tool_result`. Records that only inherit the default injection mode are not body-injected in P1c.
 
 ## Preload Index
 
@@ -80,6 +84,26 @@ The preload block includes only:
 - priority
 
 It does not read or inject Markdown bodies, and it does not duplicate Pi's built-in tool descriptions.
+
+## JIT Tool-Result Injection
+
+During `tool_call`, the extension matches eligible explicit `injection: tool_result` records using metadata only. It does not mutate tool arguments.
+
+During the matching `tool_result`, it lazily reads the runbook body, applies byte/line budgets, wraps the excerpt in an advisory notice, and appends it after the original tool result content.
+
+P1c matching rules:
+
+- `bash` requires `match.commandIncludes`; no implicit broad bash fallback.
+- `read`, `write`, and `edit` support direct `path` matching via `match.pathIncludes`.
+- `read`, `write`, and `edit` may use tool-only fallback when no command/path matcher is declared.
+- Project-local bodies are only available when project-local discovery was allowed by project trust.
+
+P1c preserves original tool behavior:
+
+- original content remains first
+- `isError` is not changed
+- details are preserved/extended only when existing details are a plain object
+- body text is never retained on discovery records
 
 Supported fields:
 
@@ -124,7 +148,11 @@ Example:
   "enabled": true,
   "roots": [".pi/runbooks", ".runbooks", ".episodic-memory/episodes"],
   "globalRoots": ["~/.pi/agent/runbooks", "~/.episodic-memory/episodes"],
-  "maxPreloadBytesPerTurn": 2000
+  "maxPreloadBytesPerTurn": 2000,
+  "maxInjectedBytesPerTurn": 10000,
+  "maxRunbookBytes": 5000,
+  "maxInjectedLinesPerRunbook": 160,
+  "dedupePerTurn": true
 }
 ```
 
