@@ -8,6 +8,22 @@ The current P3 scope includes specs, scanner, registry, TUI guidance, doctor dia
 
 Implementation should proceed in small PRs where each slice has a narrow objective, focused tests, and a clear stop point.
 
+## Current Status
+
+Completed and merged:
+
+- P3b-1: core spec model and built-ins, PR #18, commit `9f213f7`
+- P3b-2: Markdown parser and deterministic scanner, PR #19, commit `c5bb433`
+- P3b-3: registry and runtime gate, PR #20, commit `44e2b43`
+- P3b-4: diagnostics commands and proactive guidance, PR #21, commit `21a8ed0`
+- P3b-5: registration flows, PR #22, commit `691f001`
+
+Next slice:
+
+- P3c-1: JSONL monitor/parser and child argv builder.
+
+Current hard stop: P3c-1 must use fake JSONL fixtures only and must not add live child Pi execution, actual subprocess spawning, `run_subagent`, chain mode, or command execution.
+
 ## Slice Rules
 
 - One primary concern per slice.
@@ -146,6 +162,8 @@ Do not implement:
 
 ### P3b-5: Registration flows
 
+Status: completed and merged in PR #22 at commit `691f001`.
+
 Goal: get user/project specs from discovered to runnable.
 
 Implement commands:
@@ -170,6 +188,8 @@ Tests:
 - dangerous blocked
 
 ### P3c-1: JSONL monitor/parser and child argv builder
+
+Status: next implementation slice.
 
 Goal: prepare child execution without executing Pi.
 
