@@ -1135,17 +1135,30 @@ async function rescan(cwd: string, projectTrusted: boolean) {
 	discoveryState = await discover({ cwd, projectTrusted, config: effectiveConfig });
 }
 
+export function eligibleRunbookCount(state: DiscoveryState): number {
+	return state.records.filter((record) => record.status === "eligible").length;
+}
+
+export function formatStatusText(state: DiscoveryState): string {
+	return `│ runbooks: ${eligibleRunbookCount(state)}`;
+}
+
+function updateStatusLine(ctx: { hasUI?: boolean; ui?: { setStatus?: (key: string, value: string) => void } }) {
+	if (ctx.hasUI === false) return;
+	ctx.ui?.setStatus?.("tool-context-loader", formatStatusText(discoveryState));
+}
+
 export default function toolContextLoader(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		await rescan(ctx.cwd, ctx.isProjectTrusted());
-		if (ctx.hasUI) {
-			const eligible = discoveryState.records.filter((record) => record.status === "eligible").length;
-			ctx.ui.setStatus("tool-context-loader", `│ runbooks: ${eligible}`);
-		}
+		updateStatusLine(ctx);
 	});
 
 	pi.on("resources_discover", async (event, ctx) => {
-		if (event.reason === "reload") await rescan(ctx.cwd, ctx.isProjectTrusted());
+		if (event.reason === "reload") {
+			await rescan(ctx.cwd, ctx.isProjectTrusted());
+			updateStatusLine(ctx);
+		}
 		return {};
 	});
 
@@ -1194,6 +1207,7 @@ export default function toolContextLoader(pi: ExtensionAPI) {
 				ctx.ui.notify("Usage: /tool-context-loader [status|verbose|rescan|on|off]", "warning");
 				return;
 			}
+			updateStatusLine(ctx);
 			ctx.ui.notify(formatDiagnostics(discoveryState, { mode: command === "verbose" ? "verbose" : "status" }), "info");
 		},
 	});
