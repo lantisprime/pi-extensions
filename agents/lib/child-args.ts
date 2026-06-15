@@ -8,6 +8,7 @@ export type ChildPiArgsOptions = {
 	tempPromptPath?: string;
 	explicitToolContextLoaderPath?: string;
 	disableContextFiles?: boolean;
+	disableResourceDiscovery?: boolean;
 };
 
 export type ChildPromptTransport =
@@ -29,6 +30,7 @@ export function buildChildPiArgs(spec: AgentSpec, task: string, options: ChildPi
 	const promptText = buildChildPromptText(spec, task);
 	const command = options.piCommand ?? DEFAULT_PI_COMMAND;
 	const argv = ["--mode", "json", "--no-session"];
+	if (options.disableResourceDiscovery !== false) argv.push("--no-approve", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes");
 	if (options.disableContextFiles) argv.push("--no-context-files");
 	if (spec.model) argv.push("--model", spec.model);
 	if (spec.thinking) argv.push("--thinking", spec.thinking);

@@ -14,6 +14,11 @@ function testChildArgsDefaultStdinTransport() {
 	const invocation = buildChildPiArgs(scout, secretTask);
 	assert.equal(invocation.command, "pi");
 	assert.deepEqual(invocation.argv.slice(0, 3), ["--mode", "json", "--no-session"]);
+	assert.equal(invocation.argv.includes("--no-approve"), true);
+	assert.equal(invocation.argv.includes("--no-extensions"), true);
+	assert.equal(invocation.argv.includes("--no-skills"), true);
+	assert.equal(invocation.argv.includes("--no-prompt-templates"), true);
+	assert.equal(invocation.argv.includes("--no-themes"), true);
 	assert.equal(invocation.argv.includes("--tools"), true);
 	assert.equal(invocation.argv[invocation.argv.indexOf("--tools") + 1], "read,grep,find,ls");
 	assert.equal(invocation.argv.includes("-p"), true);
@@ -43,6 +48,7 @@ function testChildArgsPrivateTempTransportAndPreview() {
 	assert.deepEqual(redactChildPiArgv(invocation.argv).filter((arg) => arg.startsWith("@")), ["@<prompt-file>"]);
 	assert.equal(invocation.argv.filter((arg) => arg === "-e").length, 1);
 	assert.equal(invocation.argv.includes("--no-context-files"), true);
+	assert.equal(buildChildPiArgs(scout, secretTask, { disableResourceDiscovery: false }).argv.includes("--no-extensions"), false);
 }
 
 function testChildArgsRejectsUnsafeInputs() {
