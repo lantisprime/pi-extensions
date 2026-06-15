@@ -17,12 +17,13 @@ Completed and merged:
 - P3b-3: registry and runtime gate, PR #20, commit `44e2b43`
 - P3b-4: diagnostics commands and proactive guidance, PR #21, commit `21a8ed0`
 - P3b-5: registration flows, PR #22, commit `691f001`
+- P3c-1: JSONL monitor/parser and child argv builder, PR #26, commit `dddb726`
 
-Next slice:
+Current slice:
 
-- P3c-1: JSONL monitor/parser and child argv builder.
+- P3c-2: command-only built-in child execution.
 
-Current hard stop: P3c-1 must use fake JSONL fixtures only and must not add live child Pi execution, actual subprocess spawning, `run_subagent`, chain mode, or command execution.
+Current hard stop: P3c-2 is limited to `/agents run scout|planner|reviewer <task>` with timeout/output caps and compact result rendering. It must not add user/project spec execution, ephemeral agents, `run_subagent`, chain mode, parallel execution, or broad workflow behavior.
 
 ## Slice Rules
 
@@ -189,7 +190,7 @@ Tests:
 
 ### P3c-1: JSONL monitor/parser and child argv builder
 
-Status: next implementation slice.
+Status: completed and merged in PR #26 at commit `dddb726`.
 
 Goal: prepare child execution without executing Pi.
 
@@ -206,6 +207,8 @@ Implement:
 Tests use fake JSONL only.
 
 ### P3c-2: Command-only built-in child execution
+
+Status: current implementation slice.
 
 Goal: first live child Pi runner for built-ins only.
 

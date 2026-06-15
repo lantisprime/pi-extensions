@@ -24,6 +24,8 @@ async function makeHarness() {
 	const ctx = {
 		cwd: path.join(root, "project"),
 		agentsHomeDir: path.join(root, "home"),
+		agentsPiCommand: "pi-test",
+		agentsChildRunner: undefined,
 		hasUI: true,
 		isProjectTrusted: () => false,
 		ui: {
@@ -59,7 +61,7 @@ async function testCommandRegistrationAndListPath() {
 		await invoke(harness.commands.get("agents"), "", harness.ctx);
 		assert.equal(harness.notifications.length, 1);
 		assert.equal(harness.notifications[0].level, "info");
-		assert.match(harness.notifications[0].message, /child execution is not implemented yet/);
+		assert.match(harness.notifications[0].message, /built-in child execution is available/);
 		assert.match(harness.notifications[0].message, /scout \[built-in\] runnable/);
 		assert.match(harness.notifications[0].message, /planner \[built-in\] runnable/);
 		assert.match(harness.notifications[0].message, /reviewer \[built-in\] runnable/);
@@ -100,14 +102,49 @@ async function testVerifyPath() {
 	}
 }
 
-async function testNegativeUnsupportedRunDoesNotExecute() {
+async function testRunRejectsNonBuiltInWithoutRunner() {
 	const harness = await makeHarness();
 	try {
 		agentsExtension(harness.pi);
-		await invoke(harness.commands.get("agents"), "run scout inspect the repo", harness.ctx);
+		await invoke(harness.commands.get("agents"), "run user-helper inspect the repo", harness.ctx);
 		assert.equal(harness.notifications.length, 1);
 		assert.equal(harness.notifications[0].level, "warning");
-		assert.match(harness.notifications[0].message, /Agents do not run until later P3 slices/);
+		assert.match(harness.notifications[0].message, /only supports built-in agents/);
+	} finally {
+		await cleanup(harness);
+	}
+}
+
+async function testRunBuiltInUsesInjectedRunner() {
+	const harness = await makeHarness();
+	try {
+		const calls = [];
+		harness.ctx.agentsChildRunner = async (name, task, options) => {
+			calls.push({ name, task, options });
+			return {
+				agentName: name,
+				status: "completed",
+				exitCode: 0,
+				signal: null,
+				durationMs: 12,
+				stdoutBytes: 100,
+				stderrPreview: "",
+				invocation: { command: "pi-test", argv: ["--mode", "json", "--no-session", "--tools", "read,grep,find,ls", "-p"], argvPreview: ["--mode", "json", "--no-session", "--tools", "read,grep,find,ls", "-p"], promptTransport: { kind: "stdin", stdinText: "redacted in display" } },
+				summary: { eventsSeen: 1, malformedLines: 0, toolCalls: [], summaryText: "Concise findings\nDone", truncation: { stdoutBytesTruncated: false, jsonLineBytesTruncated: false, summaryCharsTruncated: false, toolArgsCharsTruncated: false, toolResultCharsTruncated: false, toolCallsTruncated: false }, errors: [] },
+				timedOut: false,
+				outputLimitExceeded: false,
+			};
+		};
+		agentsExtension(harness.pi);
+		await invoke(harness.commands.get("agents"), "run scout inspect the repo", harness.ctx);
+		assert.equal(calls.length, 1);
+		assert.deepEqual(calls[0], { name: "scout", task: "inspect the repo", options: { cwd: harness.ctx.cwd, piCommand: "pi-test" } });
+		assert.equal(harness.notifications.length, 2);
+		assert.equal(harness.notifications[0].level, "info");
+		assert.match(harness.notifications[0].message, /Running built-in agent 'scout'/);
+		assert.equal(harness.notifications[1].level, "info");
+		assert.match(harness.notifications[1].message, /Agent run: scout/);
+		assert.match(harness.notifications[1].message, /Concise findings/);
 	} finally {
 		await cleanup(harness);
 	}
@@ -178,7 +215,8 @@ async function main() {
 	await testCommandRegistrationAndListPath();
 	await testDiagnosticsCommands();
 	await testVerifyPath();
-	await testNegativeUnsupportedRunDoesNotExecute();
+	await testRunRejectsNonBuiltInWithoutRunner();
+	await testRunBuiltInUsesInjectedRunner();
 	await testRegistrationCommands();
 	await testRegistrationNonTuiFailsClosedFromCommand();
 	await testProactiveProjectRecommendationDedupe();
