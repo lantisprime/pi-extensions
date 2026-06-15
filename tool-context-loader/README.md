@@ -2,6 +2,17 @@
 
 Dynamic local runbook/episode discovery for Pi tools.
 
+## Why runbooks instead of always-on memory?
+
+Runbooks provide just-in-time operational guidance without permanently bloating the model context. The extension discovers runbook metadata up front, but it does **not** read or inject runbook bodies unless the configured injection mode and tool match require it.
+
+- `injection: tool_result` is the recommended mode for procedural guidance. The runbook body is read lazily only after a matching tool call produces a result, then appended as bounded advisory context.
+- `injection: preload` adds only a compact metadata index to the system prompt for active tools. It does not preload Markdown bodies.
+- For `bash`, runbooks must declare `match.commandIncludes`; broad bash runbooks do not inject. This keeps guidance tied to specific commands such as `kubectl`, `em-store.mjs`, or `git status`.
+- Per-turn byte and line budgets cap injected context, and per-turn dedupe prevents repeated injection of the same runbook.
+
+Runbooks are therefore best for local, repeatable, command-specific behavior. Episodic memory remains better for durable decisions and lessons; permission-policy remains necessary for hard safety gates.
+
 ## P1d Status
 
 This extension currently implements **P1a discovery/diagnostics**, **P1b preload index only**, **P1c JIT tool-result injection**, and **P1d hardening**.
@@ -44,7 +55,20 @@ Global roots:
 ~/.episodic-memory/episodes
 ```
 
-Global episodes are diagnostics-only unless explicitly enabled in future configuration and tool-mapped.
+Global episodes are diagnostics-only unless explicitly enabled in configuration and tool-mapped.
+
+Project-local runbooks under `.pi/runbooks` or `.runbooks` are project/environment-specific by design. They are useful for local workflows, but installable Pi extensions should not depend on shipping those files outside the extension itself.
+
+## Context cost model
+
+The extension uses a metadata-first pipeline:
+
+1. Discovery reads bounded frontmatter and records metadata such as `id`, `summary`, `tools`, `match`, `priority`, and byte counts.
+2. Matching uses metadata only during `tool_call`; tool arguments are not mutated.
+3. For `injection: tool_result`, the Markdown body is read only after a matching `tool_result`, then wrapped as advisory context after the original tool result.
+4. Body text is never retained in discovery records.
+
+This means a large runbook collection should not automatically become a large prompt. Context cost is paid only for explicit preload indexes or matched JIT body excerpts, both of which are bounded by configuration.
 
 ## Frontmatter
 
@@ -75,7 +99,7 @@ For P1c/P1d JIT body injection, set explicit frontmatter `injection: tool_result
 
 ## Preload Index
 
-During `before_agent_start`, the extension reads Pi's active tool list from `systemPromptOptions.selectedTools`. If an eligible record has `injection: preload` and one of its `tools` is active, the extension appends a bounded index block to the system prompt.
+During `before_agent_start`, the extension reads Pi's active tool list from `systemPromptOptions.selectedTools`. If an eligible record has `injection: preload` and one of its `tools` is active, the extension appends a bounded index block to the system prompt. Use this mode sparingly for discovery hints; use `injection: tool_result` for most operational runbooks.
 
 The preload block includes only:
 
@@ -91,7 +115,7 @@ It does not read or inject Markdown bodies, and it does not duplicate Pi's built
 
 During `tool_call`, the extension matches eligible explicit `injection: tool_result` records using metadata only. It does not mutate tool arguments.
 
-During the matching `tool_result`, it lazily reads the runbook body, applies byte/line budgets, wraps the excerpt in an advisory notice, and appends it after the original tool result content.
+During the matching `tool_result`, it lazily reads the runbook body, applies byte/line budgets, wraps the excerpt in an advisory notice, and appends it after the original tool result content. This is the low-bloat path: the body is absent from initial model context and appears only when the tool call proves it relevant.
 
 P1c/P1d matching rules:
 

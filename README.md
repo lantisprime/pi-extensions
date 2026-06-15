@@ -297,6 +297,8 @@ Global install location:
 
 P1d status: discovery + diagnostics, preload index only, JIT tool-result injection, and parallel/lifecycle hardening. It scans configured runbook/episode roots, parses lightweight frontmatter metadata, respects project trust for project-local roots, exposes diagnostics, appends compact metadata-only preload indexes for active tools with matching `injection: preload` records, and appends bounded advisory-wrapped body excerpts after matching tool results for explicit `injection: tool_result` records. JIT runbooks and per-turn budget are claimed before async body reads so parallel tool results do not duplicate injections or exceed the configured per-turn byte budget.
 
+Context cost model: runbook bodies are not loaded into the initial prompt for normal `injection: tool_result` runbooks. Discovery and matching are metadata-first; bodies are read lazily only after a matching tool result, then appended as bounded advisory context. `injection: preload` adds only a compact metadata index, not bodies. Project-local `.pi/runbooks` are useful local workflow files, but installable extensions should not depend on shipping project/environment-specific runbooks outside the extension.
+
 Default project roots, scanned only when trusted:
 
 ```text
