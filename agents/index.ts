@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export * from "./lib/specs.ts";
+export * from "./lib/agent-markdown.ts";
 
 import { formatBuiltInAgentList, validateBuiltInAgentSpecs } from "./lib/specs.ts";
 
