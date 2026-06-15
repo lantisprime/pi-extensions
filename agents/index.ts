@@ -4,7 +4,9 @@ export * from "./lib/specs.ts";
 export * from "./lib/agent-markdown.ts";
 export * from "./lib/registry.ts";
 export * from "./lib/can-run-agent.ts";
+export * from "./lib/child-args.ts";
 export * from "./lib/diagnostics.ts";
+export * from "./lib/jsonl-monitor.ts";
 export * from "./lib/registration.ts";
 
 import {
