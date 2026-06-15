@@ -11,6 +11,8 @@ async function makeHarness() {
 	const commands = new Map();
 	const events = new Map();
 	const notifications = [];
+	const confirmations = [];
+	const confirmCalls = [];
 	const pi = {
 		registerCommand(name, definition) {
 			commands.set(name, definition);
@@ -28,10 +30,14 @@ async function makeHarness() {
 			notify(message, level) {
 				notifications.push({ message, level });
 			},
+			async confirm(title, message) {
+				confirmCalls.push({ title, message });
+				return confirmations.shift() ?? false;
+			},
 		},
 	};
 	await fs.mkdir(ctx.cwd, { recursive: true });
-	return { commands, events, notifications, pi, ctx, root };
+	return { commands, events, notifications, confirmations, confirmCalls, pi, ctx, root };
 }
 
 async function cleanup(harness) {
@@ -107,6 +113,46 @@ async function testNegativeUnsupportedRunDoesNotExecute() {
 	}
 }
 
+async function testRegistrationCommands() {
+	const harness = await makeHarness();
+	try {
+		agentsExtension(harness.pi);
+		const userDir = path.join(harness.ctx.agentsHomeDir, ".pi", "agent", "agents");
+		await fs.mkdir(userDir, { recursive: true });
+		await fs.writeFile(path.join(userDir, "helper.md"), "---\nname: user-helper\ndescription: helper\ntools: [read, grep, find, ls]\n---\nRead files.\n");
+		harness.confirmations.push(true);
+		await invoke(harness.commands.get("agents"), "register user-helper", harness.ctx);
+		assert.equal(harness.notifications.at(-1).level, "info");
+		assert.match(harness.notifications.at(-1).message, /Registered user-helper/);
+		assert.equal(harness.confirmCalls.length, 1);
+		assert.match(harness.confirmCalls[0].message, /Registration approves this exact agent spec hash only/);
+
+		harness.confirmations.push(true);
+		await invoke(harness.commands.get("agents"), "unregister user-helper", harness.ctx);
+		assert.equal(harness.notifications.at(-1).level, "info");
+		assert.match(harness.notifications.at(-1).message, /Unregistered 1 entry/);
+	} finally {
+		await cleanup(harness);
+	}
+}
+
+async function testRegistrationNonTuiFailsClosedFromCommand() {
+	const harness = await makeHarness();
+	try {
+		harness.ctx.hasUI = false;
+		agentsExtension(harness.pi);
+		const userDir = path.join(harness.ctx.agentsHomeDir, ".pi", "agent", "agents");
+		await fs.mkdir(userDir, { recursive: true });
+		await fs.writeFile(path.join(userDir, "helper.md"), "---\nname: user-helper\ndescription: helper\ntools: [read, grep, find, ls]\n---\nRead files.\n");
+		await invoke(harness.commands.get("agents"), "register user-helper", harness.ctx);
+		assert.equal(harness.notifications.at(-1).level, "warning");
+		assert.match(harness.notifications.at(-1).message, /interactive confirmation/);
+		assert.equal(harness.confirmCalls.length, 0);
+	} finally {
+		await cleanup(harness);
+	}
+}
+
 async function testProactiveProjectRecommendationDedupe() {
 	const harness = await makeHarness();
 	try {
@@ -133,6 +179,8 @@ async function main() {
 	await testDiagnosticsCommands();
 	await testVerifyPath();
 	await testNegativeUnsupportedRunDoesNotExecute();
+	await testRegistrationCommands();
+	await testRegistrationNonTuiFailsClosedFromCommand();
 	await testProactiveProjectRecommendationDedupe();
 	console.log("agents extension scaffold e2e tests passed");
 }

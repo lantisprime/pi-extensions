@@ -5,6 +5,7 @@ export * from "./lib/agent-markdown.ts";
 export * from "./lib/registry.ts";
 export * from "./lib/can-run-agent.ts";
 export * from "./lib/diagnostics.ts";
+export * from "./lib/registration.ts";
 
 import {
 	buildProjectAgentRecommendation,
@@ -16,6 +17,7 @@ import {
 	formatAgentsRegistry,
 	formatAgentsVerify,
 } from "./lib/diagnostics.ts";
+import { registerAgent, registerProjectAgents, unregisterAgent } from "./lib/registration.ts";
 import { validateBuiltInAgentSpecs } from "./lib/specs.ts";
 
 const shownProjectRecommendationKeys = new Set<string>();
@@ -25,7 +27,10 @@ type AgentsContext = {
 	hasUI?: boolean;
 	agentsHomeDir?: string;
 	isProjectTrusted?: () => boolean;
-	ui: { notify(message: string, level?: "info" | "warning" | "error" | string): void };
+	ui: {
+		notify(message: string, level?: "info" | "warning" | "error" | string): void;
+		confirm?(title: string, message: string): Promise<boolean> | boolean;
+	};
 };
 
 export default function agentsExtension(pi: ExtensionAPI) {
@@ -38,7 +43,7 @@ export default function agentsExtension(pi: ExtensionAPI) {
 	pi.registerCommand("agents", {
 		description: "Show P3 agent diagnostics (no child execution yet)",
 		getArgumentCompletions: (prefix: string) => {
-			const options = ["list", "built-ins", "config", "inspect", "registry", "verify", "doctor"];
+			const options = ["list", "built-ins", "config", "inspect", "registry", "verify", "doctor", "register", "register-project", "unregister"];
 			const trimmed = prefix.trim();
 			const filtered = options.filter((option) => option.startsWith(trimmed));
 			return filtered.length > 0 ? filtered.map((value) => ({ value, label: value })) : null;
@@ -77,7 +82,22 @@ export default function agentsExtension(pi: ExtensionAPI) {
 				ctx.ui.notify(formatAgentInspect(diagnostics, parsed.rest), "info");
 				return;
 			}
-			ctx.ui.notify("Usage: /agents [list|built-ins|config|inspect <name>|registry|verify|doctor]. Agents do not run until later P3 slices.", "warning");
+			if (parsed.action === "register") {
+				const result = await registerAgent(parsed.rest, registrationOptions(ctx, diagnostics));
+				ctx.ui.notify(result.message, result.status === "registered" ? "info" : "warning");
+				return;
+			}
+			if (parsed.action === "register-project") {
+				const result = await registerProjectAgents({ ...registrationOptions(ctx, diagnostics), allSafe: parseFlags(parsed.rest).has("--all-safe") });
+				ctx.ui.notify(result.message, result.status === "registered" ? "info" : "warning");
+				return;
+			}
+			if (parsed.action === "unregister") {
+				const result = await unregisterAgent(parsed.rest, registrationOptions(ctx, diagnostics));
+				ctx.ui.notify(result.message, result.status === "unregistered" ? "info" : "warning");
+				return;
+			}
+			ctx.ui.notify("Usage: /agents [list|built-ins|config|inspect <name>|registry|verify|doctor|register <path-or-name>|register-project [--all-safe]|unregister <name>]. Agents do not run until later P3 slices.", "warning");
 		},
 	});
 }
@@ -95,6 +115,21 @@ function resolveProjectTrusted(ctx: AgentsContext): boolean {
 	} catch {
 		return false;
 	}
+}
+
+function registrationOptions(ctx: AgentsContext, diagnostics: Awaited<ReturnType<typeof collectAgentDiagnostics>>) {
+	return {
+		cwd: ctx.cwd,
+		homeDir: ctx.agentsHomeDir,
+		projectTrusted: diagnostics.projectTrusted,
+		hasUI: Boolean(ctx.hasUI),
+		ui: ctx.ui,
+		diagnostics,
+	};
+}
+
+function parseFlags(input: string): Set<string> {
+	return new Set(input.split(/\s+/).filter((part) => part.startsWith("--")));
 }
 
 async function maybeNotifyProjectRecommendation(ctx: AgentsContext, force: boolean, diagnostics = undefined as Awaited<ReturnType<typeof collectAgentDiagnostics>> | undefined): Promise<void> {
