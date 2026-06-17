@@ -19,12 +19,14 @@ Completed and merged:
 - P3b-5: registration flows, PR #22, commit `691f001`
 - P3c-1: JSONL monitor/parser and child argv builder, PR #26, commit `dddb726`
 - P3c-2: command-only built-in child execution, PR #27, commit `6c7d885`
+- P3c-3: registered user/project execution, PR #28, commit `b72d531`
 
-Current slice:
+Current slices:
 
-- P3c-3: registered user/project execution.
+- P3c-4: ephemeral one-shot agents (canonical next)
+- P3f-1: model profiles pure helpers (can start in parallel, zero dependencies on P3c-4)
 
-Current hard stop: P3c-3 is limited to `/agents run <registered-user-agent> <task>` and `/agents run <registered-project-agent> <task>` after the shared `canRunAgent` runtime gate passes. It must not add unregistered spec execution, ephemeral agents, `run_subagent`, chain mode, parallel execution, or broad workflow behavior.
+Hard stops: P3c-4 is limited to run-temp and save-temp flows under explicit user request only, with read-only base roles, prompt scanning, no persistence on run, save does not register, and no `run_subagent` prompt override. P3f-1 is new files only (`agents/lib/profiles.ts`), zero changes to existing files, and does NOT add `AgentSpec.profile` (deferred to P3f-2).
 
 ## Slice Rules
 
@@ -49,6 +51,9 @@ Current hard stop: P3c-3 is limited to `/agents run <registered-user-agent> <tas
 | P3c-2 | Command-only built-in child execution | child runner + command handler | `/agents run scout|planner|reviewer <task>`; timeout/output caps; compact result rendering | Extension load smoke; optional live built-in smoke | Built-ins only; no user/project specs, ephemeral, `run_subagent`, or chain |
 | P3c-3 | Registered user/project execution | run command + registry integration tests | `/agents run <registered-user-agent>` and `<registered-project-agent>` through `canRunAgent` | Runtime hash recheck; project trust check; registered spec smoke where possible | No unregistered specs; no chain/tool exposure expansion |
 | P3c-4 | Ephemeral one-shot agents | temp-agent handlers/tests | `/agents run-temp`; `/agents save-temp`; scan prompt; save does not register | Dangerous/suspicious prompt tests; no persistence on run; saved spec blocked until registered | No `run_subagent` prompt override |
+| P3f-1 | Model profiles — pure helpers | `agents/lib/profiles.ts`, `agents/test-fixtures/test-profiles.mjs` | `ModelProfile` type, `resolveSpecProfile` (profile-as-authority), `validateProfile` (11 checks + 4 forbidden-field), `validateProfileLibrary`, built-in capability profiles | 37 pure helper tests (full contract coverage); `git diff --stat` on 10 existing files = empty | No wiring, no `AgentSpec.profile` field, no file discovery, no override-map tests |
+| P3f-2 | Model profiles — wiring | `agents/index.ts`, `specs.ts`, `agent-markdown.ts`, `child-runner.ts`, `diagnostics.ts`, `registration.ts`, `registry.ts` | `AgentSpec.profile` field; `profile` in accepted keys; resolution wired into `runChildAgent`; `/agents profiles` with hashes; effective vs declared in inspect; doctor checks; observability metadata | Wiring tests; profile hash visibility; doctor flags unresolved refs + hash drift; no runtime trust enforcement | No user/project profile file discovery; no profile hash registration; trust gap accepted until P3f-3 |
+| P3f-3 | Model profiles — file discovery + hash-registration | profile file parser/discovery, registry, diagnostics | User/project profile file discovery; project trust gating; hash-register project profiles in registry; profile-change re-registration flow | File parsing caps; hash-registration prevents unregistered profile changes; re-registration tests | None — closes the trust gap |
 | P3d-1 | `run_subagent` single-run tool | tool registration/tests | Model-callable single read-only run; same gate; child excludes `run_subagent`; no prompt override | Tool schema tests; recursion exclusion tests | No chain/parallel/write/bash |
 | P3d-2 | Command-only chain mode | chain handler/tests | `/agents chain`; max length 3; preflight all agents; bounded prior-summary handoff | Chain preflight failure tests; handoff bounds tests | No chain via `run_subagent` |
 | P3e | Docs, local eval command, smoke | `agents/README.md`, eval docs/tests | README; local eval command docs; smoke commands; validation notes | `pi --no-extensions -e ./agents/index.ts --list-models`; local eval command | No new runtime capabilities |
@@ -298,6 +303,78 @@ Implement:
 - local eval command docs
 - final smoke commands
 - validation matrix update if needed
+
+### P3f-1: Model profiles — pure helpers
+
+Status: planned (agents/P3F_MODEL_PROFILES.md). Three adversarial reviews, unanimous conditional-go. Can start in parallel with P3c-4.
+
+Goal: define profile model, validation, and resolution as pure helpers in a new file.
+
+Files:
+
+- `agents/lib/profiles.ts`
+- `agents/test-fixtures/test-profiles.mjs`
+- `agents/test-fixtures/run-p3f-1-tests.sh`
+
+Implement:
+
+- `ModelProfile`, `ModelProfileLibrary`, `ResolvedProfile`, `ProfileResolutionResult` types
+- `resolveSpecProfile` — profile-as-authority, spec-falls-back, 5-state resolution
+- `validateProfile` — 11 checks including 4 forbidden-field rejection (tools/safety/limits/forbiddenTools)
+- `validateProfileLibrary` — duplicate name detection
+- Built-in capability profiles: `fast-local`, `reasoning-deep`, `adversarial-review`
+- 37 tests with full contract coverage
+
+Do not implement:
+
+- `AgentSpec.profile` field (deferred to P3f-2)
+- Any changes to existing files
+- Wiring, commands, or file discovery
+
+### P3f-2: Model profiles — wiring
+
+Goal: wire profile resolution into the agent execution path.
+
+Depends on: P3f-1 + P3c-3 (runChildAgent seam at child-runner.ts L65).
+
+Files:
+
+- `agents/lib/specs.ts` — `AgentSpec.profile?: string`
+- `agents/lib/agent-markdown.ts` — `profile` in accepted keys + buildSpecFromMetadata
+- `agents/lib/child-runner.ts` — `profiles` parameter on runChildAgent (L65) + runBuiltInChildAgent (L58)
+- `agents/lib/diagnostics.ts` — model/thinking/profile in inspect + list; doctor checks
+- `agents/lib/registration.ts` — Profile line in review output
+- `agents/lib/registry.ts` — `profile?` on RegisteredAgent
+- `agents/index.ts` — `/agents profiles` command; profileLibrary forwarded through executeChildRun (L161)
+
+Implement:
+
+- Profile resolution wired before buildChildPiArgs in runChildAgent
+- `/agents profiles` list with SHA-256 hashes
+- Effective vs declared model/thinking display in `/agents inspect`
+- Doctor checks for unresolved profile references + hash-change warnings
+- Run metadata records resolved profile name
+- Profile hash visibility but NO runtime trust enforcement (gap accepted until P3f-3)
+
+Do not implement:
+
+- User/project profile file discovery
+- Profile hash registration
+
+### P3f-3: Model profiles — file discovery + hash-registration
+
+Goal: close the trust gap by hash-registering project profiles.
+
+Depends on: P3f-2 + registry infrastructure (P3b-3).
+
+Implement:
+
+- User-level profile file discovery (`~/.pi/agent/profiles/*.md`)
+- Project-level profile file discovery (`.pi/profiles/*` behind project trust)
+- Frontmatter-only parsing reusing bounded parser from agent-markdown.ts
+- Hash-register project profiles in project registry (same model as agent specs)
+- Profile-change re-registration flow
+- Diagnostics for registered profiles
 
 ## Recommended Cut Order
 
