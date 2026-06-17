@@ -7,6 +7,7 @@ export * from "./lib/can-run-agent.ts";
 export * from "./lib/child-args.ts";
 export * from "./lib/child-runner.ts";
 export * from "./lib/diagnostics.ts";
+export * from "./lib/ephemeral.ts";
 export * from "./lib/jsonl-monitor.ts";
 export * from "./lib/registration.ts";
 
@@ -25,6 +26,7 @@ import {
 	type AgentDiagnostics,
 } from "./lib/diagnostics.ts";
 import { formatChildAgentRunResult, runBuiltInChildAgent, runChildAgent, type ChildAgentRunner } from "./lib/child-runner.ts";
+import { runEphemeralCommand, saveTempCommand, type EphemeralRunHandlerContext } from "./lib/ephemeral.ts";
 import { registerAgent, registerProjectAgents, unregisterAgent } from "./lib/registration.ts";
 import { isReservedBuiltInAgentName, validateBuiltInAgentSpecs } from "./lib/specs.ts";
 
@@ -36,6 +38,7 @@ type AgentsContext = {
 	agentsHomeDir?: string;
 	agentsPiCommand?: string;
 	agentsChildRunner?: ChildAgentRunner;
+	agentsLastEphemeralSpec?: { spec: import("./lib/specs.ts").AgentSpec; task: string };
 	isProjectTrusted?: () => boolean;
 	ui: {
 		notify(message: string, level?: "info" | "warning" | "error" | string): void;
@@ -53,7 +56,7 @@ export default function agentsExtension(pi: ExtensionAPI) {
 	pi.registerCommand("agents", {
 		description: "Show P3 agent diagnostics and run built-in or registered agents",
 		getArgumentCompletions: (prefix: string) => {
-			const options = ["list", "built-ins", "config", "inspect", "registry", "verify", "doctor", "register", "register-project", "unregister", "run"];
+			const options = ["list", "built-ins", "config", "inspect", "registry", "verify", "doctor", "register", "register-project", "unregister", "run", "run-temp", "save-temp"];
 			const trimmed = prefix.trim();
 			const filtered = options.filter((option) => option.startsWith(trimmed));
 			return filtered.length > 0 ? filtered.map((value) => ({ value, label: value })) : null;
@@ -111,7 +114,19 @@ export default function agentsExtension(pi: ExtensionAPI) {
 				await runAgentCommand(parsed.rest, ctx, diagnostics);
 				return;
 			}
-			ctx.ui.notify("Usage: /agents [list|built-ins|config|inspect <name>|registry|verify|doctor|register <path-or-name>|register-project [--all-safe]|unregister <name>|run <agent> <task>].", "warning");
+			if (parsed.action === "run-temp") {
+				const ephCtx: EphemeralRunHandlerContext = { cwd: ctx.cwd, hasUI: ctx.hasUI, agentsPiCommand: ctx.agentsPiCommand, agentsChildRunner: ctx.agentsChildRunner, agentsLastEphemeralSpec: ctx.agentsLastEphemeralSpec, ui: ctx.ui };
+				const stashed = await runEphemeralCommand(parsed.rest, ephCtx);
+				if (stashed) ctx.agentsLastEphemeralSpec = stashed;
+				return;
+			}
+			if (parsed.action === "save-temp") {
+				const userAgentsDir = diagnostics.userAgentsDir;
+				const ephCtx: EphemeralRunHandlerContext = { cwd: ctx.cwd, hasUI: ctx.hasUI, agentsPiCommand: ctx.agentsPiCommand, agentsChildRunner: ctx.agentsChildRunner, agentsLastEphemeralSpec: ctx.agentsLastEphemeralSpec, ui: ctx.ui };
+				await saveTempCommand(parsed.rest, ephCtx, { projectTrusted: diagnostics.projectTrusted, userAgentsDir });
+				return;
+			}
+			ctx.ui.notify("Usage: /agents [list|built-ins|config|inspect <name>|registry|verify|doctor|register <path-or-name>|register-project [--all-safe]|unregister <name>|run <agent> <task>|run-temp <scout|planner|reviewer> <task>|save-temp <name>].", "warning");
 		},
 	});
 }
