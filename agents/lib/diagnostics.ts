@@ -149,8 +149,8 @@ export function formatAgentsConfig(diagnostics: AgentDiagnostics): string {
 		`userRegistry: ${diagnostics.userRegistryPath}`,
 		`projectRegistry: ${diagnostics.projectRegistryPath}`,
 		`projectRegistryRoot: ${diagnostics.projectRegistryRootOk ? "ok" : `mismatch (${diagnostics.projectRegistryRootIssues.join(", ")})`}`,
-		"Built-in child execution: /agents run scout|planner|reviewer <task>",
-		"Registered user/project agent execution remains disabled until a later P3 slice.",
+		"Child execution: /agents run scout|planner|reviewer <task> or /agents run <registered-user-or-project-agent> <task>",
+		"Registered user/project execution requires exact-hash registration and the runtime canRunAgent gate.",
 	]);
 }
 
@@ -180,8 +180,8 @@ export function formatAgentsDoctor(diagnostics: AgentDiagnostics): string {
 	if (!diagnostics.projectRegistryRootOk) lines.push(`1. Project registry root mismatch: ${diagnostics.projectRegistryRootIssues.join(", ")}. Recreate the project registry after confirming the project root.`);
 	let index = lines.filter((line) => /^\d+\./.test(line)).length + 1;
 	for (const issue of diagnosticIssues(diagnostics)) lines.push(`${index++}. ${issue}`);
-	if (index === 1) lines.push("No remediation needed before registered-agent execution slices.");
-	lines.push("Built-in child execution is available via /agents run; registered user/project execution remains disabled.");
+	if (index === 1) lines.push("No remediation needed before registered-agent execution.");
+	lines.push("Built-in and registered user/project child execution is available via /agents run.");
 	return boundLines(lines);
 }
 

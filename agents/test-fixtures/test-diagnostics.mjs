@@ -97,8 +97,8 @@ async function testNegativeDiagnostics() {
 		assert.match(verify, /changed-user \[user\] hash changed/);
 		assert.match(verify, /dangerous-user \[user\] invalid\/dangerous/);
 		assert.match(verify, /scout \[user\] shadows a built-in/);
-		assert.match(formatAgentsDoctor(diagnostics), /Built-in child execution is available/);
-		assert.match(formatAgentsDoctor(diagnostics), /registered user\/project execution remains disabled/);
+		assert.match(formatAgentsDoctor(diagnostics), /Built-in and registered user\/project child execution is available/);
+		assert.match(formatAgentsDoctor(diagnostics), /registered user\/project child execution is available/);
 	});
 }
 

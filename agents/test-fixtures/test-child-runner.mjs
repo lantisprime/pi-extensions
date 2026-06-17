@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { Buffer } from "node:buffer";
-import { formatChildAgentRunResult, runBuiltInChildAgent } from "../lib/child-runner.ts";
+import { formatChildAgentRunResult, runBuiltInChildAgent, runChildAgent } from "../lib/child-runner.ts";
 
 function jsonLine(value) {
 	return `${JSON.stringify(value)}\n`;
@@ -90,6 +90,67 @@ async function testRejectsNonBuiltInAgentsBeforeSpawn() {
 	assert.equal(spawned, false);
 }
 
+function registeredSpec(overrides = {}) {
+	return {
+		name: "user-helper",
+		description: "helper",
+		source: "user",
+		tools: ["read", "grep"],
+		prompt: "Read only helper prompt.",
+		inputContract: { kind: "task-string", maxTaskChars: 100, emptyTask: "reject" },
+		outputContract: { requiredSections: ["Summary"], maxSummaryChars: 500 },
+		evals: [],
+		limits: { timeoutMs: 1000, maxStdoutBytes: 1000, maxStderrChars: 200, maxResultChars: 500, maxJsonLineBytes: 500, maxTaskChars: 100, maxChildProcesses: 1, maxChainLength: 3 },
+		observability: { retainInMemoryRuns: 20, persistByDefault: false, includeToolTrajectory: true, storeFullPrompt: false, storeFullTask: false, storeFullToolResults: false, storeThinkingText: false },
+		safety: { approveProjectByDefault: false, projectSpecsRequireTrustAndRegistration: true, allowRecursiveSubagents: false, promptTransport: "stdin-or-private-tempfile", forbiddenTools: ["write", "edit", "bash", "run_subagent"], redactDisplayedCommand: true },
+		...overrides,
+	};
+}
+
+async function testGenericRegisteredRunUsesSpecPromptAndLimits() {
+	let child;
+	const spec = registeredSpec();
+	const result = await runChildAgent(spec, "inspect registered files", {
+		piCommand: "pi-test",
+		spawn: (_cmd, argv) => {
+			child = new FakeChild();
+			assert.equal(argv.includes("--no-approve"), true);
+			assert.equal(argv.includes("--approve"), false);
+			assert.equal(argv.includes("run_subagent"), false);
+			assert.equal(argv.join(" ").includes("inspect registered files"), false);
+			queueMicrotask(() => {
+				child.stdout.emit("data", jsonLine({ type: "message_end", message: { role: "assistant", content: "Summary\nDone" } }));
+				child.close(0, null);
+			});
+			return child;
+		},
+	});
+	assert.equal(child.stdinText.includes("Agent: user-helper"), true);
+	assert.equal(child.stdinText.includes("Source: user"), true);
+	assert.equal(child.stdinText.includes("inspect registered files"), true);
+	assert.equal(result.agentName, "user-helper");
+	assert.equal(result.status, "completed");
+}
+
+async function testRegisteredRunRejectsOversizedTaskBeforeSpawn() {
+	let spawned = false;
+	const spec = registeredSpec();
+	await assert.rejects(
+		() => runChildAgent(spec, "x".repeat(spec.inputContract.maxTaskChars + 1), { spawn: () => { spawned = true; return new FakeChild(); } }),
+		/maxTaskChars/,
+	);
+	assert.equal(spawned, false);
+}
+
+async function testRegisteredRunRejectsForbiddenToolsBeforeSpawn() {
+	let spawned = false;
+	await assert.rejects(
+		() => runChildAgent(registeredSpec({ tools: ["read", "run_subagent"] }), "task", { spawn: () => { spawned = true; return new FakeChild(); } }),
+		/forbidden child tool 'run_subagent'/,
+	);
+	assert.equal(spawned, false);
+}
+
 async function testNonZeroExitIsFailedAndFormatsCompactResult() {
 	const result = await runBuiltInChildAgent("reviewer", "review this", {
 		spawn: () => {
@@ -160,6 +221,9 @@ async function testSpawnErrorAndInvalidLimits() {
 async function main() {
 	await testCompletedBuiltInRunUsesSafeArgvAndStdin();
 	await testRejectsNonBuiltInAgentsBeforeSpawn();
+	await testGenericRegisteredRunUsesSpecPromptAndLimits();
+	await testRegisteredRunRejectsOversizedTaskBeforeSpawn();
+	await testRegisteredRunRejectsForbiddenToolsBeforeSpawn();
 	await testNonZeroExitIsFailedAndFormatsCompactResult();
 	await testTimeoutKillsChild();
 	await testOutputLimitKillsChildAndBoundsStdout();
