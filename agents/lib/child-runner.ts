@@ -3,12 +3,12 @@ import { promises as fs } from "node:fs";
 import { Buffer } from "node:buffer";
 import { buildChildPiArgs, type ChildPiArgsOptions, type ChildPiInvocation } from "./child-args.ts";
 import { reduceChildJsonl, type ChildJsonlSummary } from "./jsonl-monitor.ts";
-import { getBuiltInAgentSpec, isReservedBuiltInAgentName, type BuiltInAgentName } from "./specs.ts";
+import { getBuiltInAgentSpec, isReservedBuiltInAgentName, type AgentSpec } from "./specs.ts";
 
 export type ChildAgentRunStatus = "completed" | "failed" | "timed-out" | "output-limit-exceeded" | "spawn-error";
 
 export type ChildAgentRunResult = {
-	agentName: BuiltInAgentName;
+	agentName: string;
 	status: ChildAgentRunStatus;
 	exitCode?: number | null;
 	signal?: string | null;
@@ -48,7 +48,9 @@ export type RunBuiltInChildAgentOptions = ChildPiArgsOptions & {
 	forceKillAfterMs?: number;
 };
 
-export type ChildAgentRunner = (agentName: string, task: string, options?: RunBuiltInChildAgentOptions) => Promise<ChildAgentRunResult>;
+export type RunChildAgentOptions = RunBuiltInChildAgentOptions;
+
+export type ChildAgentRunner = (agent: string | AgentSpec, task: string, options?: RunChildAgentOptions) => Promise<ChildAgentRunResult>;
 
 const DEFAULT_KILL_SIGNAL: NodeJS.Signals = "SIGTERM";
 const DEFAULT_FORCE_KILL_AFTER_MS = 1_000;
@@ -57,6 +59,10 @@ export async function runBuiltInChildAgent(agentName: string, task: string, opti
 	if (!isReservedBuiltInAgentName(agentName)) throw new Error(`P3c-2 only supports built-in agents: scout, planner, reviewer`);
 	const spec = getBuiltInAgentSpec(agentName);
 	if (!spec || spec.source !== "built-in") throw new Error(`built-in agent '${agentName}' was not found`);
+	return runChildAgent(spec, task, options);
+}
+
+export async function runChildAgent(spec: AgentSpec, task: string, options: RunChildAgentOptions = {}): Promise<ChildAgentRunResult> {
 	const invocation = buildChildPiArgs(spec, task, options);
 	const stdoutLimit = options.maxStdoutBytes ?? spec.limits.maxStdoutBytes;
 	const stderrLimit = options.maxStderrChars ?? spec.limits.maxStderrChars;
@@ -70,7 +76,7 @@ export async function runBuiltInChildAgent(agentName: string, task: string, opti
 			await fs.writeFile(invocation.promptTransport.path, invocation.promptTransport.fileText, { mode: 0o600, flag: "wx" });
 			promptFileCreated = true;
 		}
-		return await spawnAndCollect(agentName, invocation, {
+		return await spawnAndCollect(spec.name, invocation, {
 			cwd: options.cwd,
 			env: options.env,
 			spawn: options.spawn ?? defaultSpawner,
@@ -116,7 +122,7 @@ export function formatChildAgentRunResult(result: ChildAgentRunResult): string {
 	return lines.join("\n");
 }
 
-async function spawnAndCollect(agentName: BuiltInAgentName, invocation: ChildPiInvocation, options: {
+async function spawnAndCollect(agentName: string, invocation: ChildPiInvocation, options: {
 	cwd?: string;
 	env?: NodeJS.ProcessEnv;
 	spawn: ChildProcessSpawner;
@@ -233,7 +239,7 @@ function defaultSpawner(command: string, argv: readonly string[], options: { cwd
 	return nodeSpawn(command, [...argv], options);
 }
 
-function spawnErrorResult(agentName: BuiltInAgentName, invocation: ChildPiInvocation, error: unknown): ChildAgentRunResult {
+function spawnErrorResult(agentName: string, invocation: ChildPiInvocation, error: unknown): ChildAgentRunResult {
 	const message = error instanceof Error ? error.message : String(error);
 	return {
 		agentName,

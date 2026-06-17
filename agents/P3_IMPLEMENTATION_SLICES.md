@@ -18,12 +18,13 @@ Completed and merged:
 - P3b-4: diagnostics commands and proactive guidance, PR #21, commit `21a8ed0`
 - P3b-5: registration flows, PR #22, commit `691f001`
 - P3c-1: JSONL monitor/parser and child argv builder, PR #26, commit `dddb726`
+- P3c-2: command-only built-in child execution, PR #27, commit `6c7d885`
 
 Current slice:
 
-- P3c-2: command-only built-in child execution.
+- P3c-3: registered user/project execution.
 
-Current hard stop: P3c-2 is limited to `/agents run scout|planner|reviewer <task>` with timeout/output caps and compact result rendering. It must not add user/project spec execution, ephemeral agents, `run_subagent`, chain mode, parallel execution, or broad workflow behavior.
+Current hard stop: P3c-3 is limited to `/agents run <registered-user-agent> <task>` and `/agents run <registered-project-agent> <task>` after the shared `canRunAgent` runtime gate passes. It must not add unregistered spec execution, ephemeral agents, `run_subagent`, chain mode, parallel execution, or broad workflow behavior.
 
 ## Slice Rules
 
@@ -208,7 +209,7 @@ Tests use fake JSONL only.
 
 ### P3c-2: Command-only built-in child execution
 
-Status: current implementation slice.
+Status: completed and merged in PR #27 at commit `6c7d885`.
 
 Goal: first live child Pi runner for built-ins only.
 
@@ -228,6 +229,8 @@ Scope limit:
 - no chain
 
 ### P3c-3: Registered user/project execution
+
+Status: current implementation slice.
 
 Goal: allow registered Markdown specs to run through the same gate.
 
