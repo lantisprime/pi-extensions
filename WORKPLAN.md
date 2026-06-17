@@ -5,9 +5,9 @@
 The canonical `pi-extensions` workplan now lives in episodic memory as:
 
 - Project: `pi-extensions`
-- Current episode ID: `20260615-092421-canonical-workplan-refreshed-after-p3b-5-7922`
-- Tags include: `canonical-workplan`, `workplan`, `roadmap`, `agents`, `p3b5`, `p3c1`
-- Summary: `Canonical workplan refreshed after P3b-5 merge; docs point to P3c-1 next`
+- Current episode ID: `20260617-102715-canonical-workplan-p3c4-next-p3f-model-p-35e8`
+- Tags include: `canonical-workplan`, `workplan`, `roadmap`, `p3c4`, `p3f`
+- Summary: `Canonical workplan: P3c4 next, P3F model profiles added as parallel track, P3F-1 can start now (zero dependencies)`
 
 To recall it, use episodic memory search for project `pi-extensions` and tag `canonical-workplan`.
 
