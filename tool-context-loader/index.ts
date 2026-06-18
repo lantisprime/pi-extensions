@@ -965,7 +965,7 @@ function matchRecordForTool(record: RunbookRecord, toolName: string, input: Tool
 		return { record, reason: `tool \`${toolName}\` matched declared tools metadata` };
 	}
 
-	return undefined;
+	return { record, reason: `tool \`${toolName}\` matched declared tools metadata` };
 }
 
 function formatBodyInjectionBlock(item: BodyInjectionItem, excerpt: string): string {

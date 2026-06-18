@@ -103,6 +103,12 @@ async function testInactiveToolAndFallbackRules() {
 
 	const editOnly = record({ id: "edit-only", tools: ["edit"], match: { commandIncludes: [], pathIncludes: ["src/"] } });
 	assert.deepEqual(matchRunbooksForToolCall([editOnly], "read", { path: "src/index.ts" }), []);
+
+	const nativeMemoryTool = record({ id: "native-memory-tool", tools: ["em_store"], match: { commandIncludes: ["em-store.mjs"], pathIncludes: [] } });
+	const nativeMatches = matchRunbooksForToolCall([nativeMemoryTool], "em_store", { project: "pi-extensions", summary: "store plan" });
+	assert.deepEqual(nativeMatches.map((item) => item.record.id), ["native-memory-tool"]);
+	assert.match(nativeMatches[0]?.reason ?? "", /declared tools metadata/);
+	assert.deepEqual(matchRunbooksForToolCall([nativeMemoryTool], "em_search", { project: "pi-extensions" }), []);
 }
 
 async function testExplicitInjectionRequired() {
