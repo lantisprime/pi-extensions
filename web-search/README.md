@@ -2,6 +2,8 @@
 
 Adds a `secure_web_search` tool for web research.
 
+> **User Manual**: See [../../docs/USER_MANUAL.md](../../docs/USER_MANUAL.md#web-research-with-security) for scenario guides.
+
 ## Features
 
 - Uses the current Pi LLM to suggest relevant search queries and reputable websites.

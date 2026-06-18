@@ -2,6 +2,8 @@
 
 A Pi extension that asks before allowing sensitive operations and stores persistent decisions per project folder.
 
+> **User Manual**: See [../../docs/USER_MANUAL.md](../../docs/USER_MANUAL.md#permission-modes-deep-dive) for scenario guides.
+
 ## What it gates
 
 - Reads outside the current project folder via `read`

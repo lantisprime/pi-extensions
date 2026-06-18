@@ -21,6 +21,7 @@ To keep each extension independently installable, this file is vendored into ext
 ```text
 prompt-shield/lib/security-scan.ts
 web-search/lib/security-scan.ts
+agents/lib/security-scan.ts
 ```
 
 Sync vendored copies after editing:

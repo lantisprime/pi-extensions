@@ -2,6 +2,8 @@
 
 Scans project/global Pi resources for prompt-injection and agent-security risk. It can monitor, ask, or block direct dangerous resource writes depending on mode.
 
+> **User Manual**: See [../../docs/USER_MANUAL.md](../../docs/USER_MANUAL.md#defense-in-depth) for scenario guides.
+
 ## What it scans
 
 Prompt Shield scans project text-like resource files in:

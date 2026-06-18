@@ -2,6 +2,8 @@
 
 Dynamic local runbook/episode discovery for Pi tools.
 
+> **User Manual**: See [../../docs/USER_MANUAL.md](../../docs/USER_MANUAL.md#just-in-time-runbook-guidance) for scenario guides.
+
 ## Why runbooks instead of always-on memory?
 
 Runbooks provide just-in-time operational guidance without permanently bloating the model context. The extension discovers runbook metadata up front, but it does **not** read or inject runbook bodies unless the configured injection mode and tool match require it.

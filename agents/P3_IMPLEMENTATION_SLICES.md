@@ -25,11 +25,12 @@ Completed and merged:
 - P3f-1: model profiles pure helpers, PR #31, commit `6a492b7`
 - P3G: child tool-context-loader JIT, PR #34, commit `c09ac5e`
 - P3f-2: model profiles wiring, PR #35, commit `8c7243a`
+- P3d-2: command-only chain mode, PR #36, commit `bf1a240`
+- P3f-3: profile file discovery + hash-registration, PR #37, commit `4f0a87b`
 
-Current slices:
+Current slice:
 
-- P3d-2: command-only chain mode (next priority)
-- P3f-3: model profiles file discovery + hash-registration (parallel option)
+- P3e: docs, local eval command, smoke
 
 ## Slice Rules
 
