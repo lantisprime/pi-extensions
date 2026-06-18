@@ -2,6 +2,7 @@ import { getBuiltInAgentSpec, isReservedBuiltInAgentName, isValidAgentName, type
 import { canRunAgent } from "./can-run-agent.ts";
 import { runChildAgent, formatChildAgentRunResult, type ChildAgentRunner } from "./child-runner.ts";
 import { scanTextForAgentRisk, type RiskLevel } from "./security-scan.ts";
+import { resolveExplicitToolContextLoaderPath } from "./run-resolver.ts";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 
@@ -53,6 +54,7 @@ export type EphemeralRunHandlerContext = {
 	hasUI?: boolean;
 	agentsPiCommand?: string;
 	agentsChildRunner?: ChildAgentRunner;
+	explicitToolContextLoaderPath?: string;
 	agentsLastEphemeralSpec?: { spec: AgentSpec; task: string };
 	ui: {
 		notify(message: string, level?: "info" | "warning" | "error" | string): void;
@@ -111,9 +113,15 @@ export async function runEphemeralCommand(input: string, ctx: EphemeralRunHandle
 	const stashed = { spec, task: args.task };
 	ctx.ui.notify(`Running ephemeral agent '${spec.name}' with base role '${args.baseRole}' and read-only tools.`, "info");
 	try {
+		const explicitToolContextLoaderPath = resolveExplicitToolContextLoaderPath(ctx);
+		const childOptions = {
+			cwd: ctx.cwd,
+			piCommand: ctx.agentsPiCommand,
+			...(explicitToolContextLoaderPath ? { explicitToolContextLoaderPath } : {}),
+		};
 		const result = ctx.agentsChildRunner
-			? await ctx.agentsChildRunner(spec, args.task, { cwd: ctx.cwd, piCommand: ctx.agentsPiCommand })
-			: await runChildAgent(spec, args.task, { cwd: ctx.cwd, piCommand: ctx.agentsPiCommand });
+			? await ctx.agentsChildRunner(spec, args.task, childOptions)
+			: await runChildAgent(spec, args.task, childOptions);
 		ctx.ui.notify(formatChildAgentRunResult(result), result.status === "completed" ? "info" : "warning");
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);

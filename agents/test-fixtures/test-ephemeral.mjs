@@ -122,6 +122,22 @@ async function testRunTempSafeTaskSpawnsAfterGateOk() {
 	}
 }
 
+async function testRunTempForwardsToolContextLoaderPath() {
+	const harness = await makeHarness();
+	try {
+		harness.ctx.explicitToolContextLoaderPath = "/trusted/tool-context-loader/index.ts";
+		await runEphemeralCommand("scout inspect safely", harness.ctx);
+		assert.equal(harness.runnerCalls.length, 1);
+		assert.deepEqual(harness.runnerCalls[0].options, {
+			cwd: harness.ctx.cwd,
+			piCommand: "pi-test",
+			explicitToolContextLoaderPath: "/trusted/tool-context-loader/index.ts",
+		});
+	} finally {
+		await cleanup(harness);
+	}
+}
+
 async function testRunTempDangerousTaskBlocksNoSpawn() {
 	const harness = await makeHarness();
 	try {
@@ -450,6 +466,7 @@ async function main() {
 
 	// Group 2: Ephemeral run — gate and spawn
 	await testRunTempSafeTaskSpawnsAfterGateOk();
+	await testRunTempForwardsToolContextLoaderPath();
 	await testRunTempDangerousTaskBlocksNoSpawn();
 	await testRunTempSuspiciousTaskTuiConfirmSpawns();
 	await testRunTempSuspiciousTaskTuiCancelNoSpawn();

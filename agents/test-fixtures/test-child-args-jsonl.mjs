@@ -47,6 +47,8 @@ function testChildArgsPrivateTempTransportAndPreview() {
 	assert.equal(argvText(invocation).includes("FULL_DELEGATED_PROMPT"), false);
 	assert.deepEqual(redactChildPiArgv(invocation.argv).filter((arg) => arg.startsWith("@")), ["@<prompt-file>"]);
 	assert.equal(invocation.argv.filter((arg) => arg === "-e").length, 1);
+	assert.equal(invocation.argv[invocation.argv.indexOf("-e") + 1], "/Users/test/.pi/agent/extensions/tool-context-loader/index.ts");
+	assert.equal(invocation.argv.includes("--no-extensions"), true, "explicit loader path must not re-enable broad extension discovery");
 	assert.equal(invocation.argv.includes("--no-context-files"), true);
 	assert.equal(buildChildPiArgs(scout, secretTask, { disableResourceDiscovery: false }).argv.includes("--no-extensions"), false);
 }

@@ -10,7 +10,7 @@ import { DEFAULT_MAX_TASK_CHARS, isReservedBuiltInAgentName } from "./specs.ts";
 import { collectAgentDiagnostics, type AgentDiagnostics } from "./diagnostics.ts";
 import { formatChildAgentRunResult, runBuiltInChildAgent, runChildAgent, type ChildAgentRunResult, type ChildAgentRunner } from "./child-runner.ts";
 import { parseAgentMarkdownFile } from "./agent-markdown.ts";
-import { resolveRegisteredRunTarget } from "./run-resolver.ts";
+import { resolveExplicitToolContextLoaderPath, resolveRegisteredRunTarget } from "./run-resolver.ts";
 
 // --- Types ---
 
@@ -20,6 +20,7 @@ export type SubagentRunContext = {
 	projectTrusted: boolean;
 	piCommand?: string;
 	childRunner?: ChildAgentRunner;
+	explicitToolContextLoaderPath?: string;
 };
 
 export type SubagentRunDetails = {
@@ -116,13 +117,20 @@ export async function executeSubagentRun(agent: string, task: string, runCtx: Su
 	const validatedAgent = input.agent;
 	const validatedTask = input.task;
 
+	const explicitToolContextLoaderPath = resolveExplicitToolContextLoaderPath(runCtx);
+	const childOptions = {
+		cwd: runCtx.cwd,
+		piCommand: runCtx.piCommand,
+		...(explicitToolContextLoaderPath ? { explicitToolContextLoaderPath } : {}),
+	};
+
 	// 1. Built-in shortcut (matches /agents run parity — built-ins skip canRunAgent,
 	//    they are trusted extension code, not spec files).
 	if (isReservedBuiltInAgentName(validatedAgent)) {
 		try {
 			const result = runCtx.childRunner
-				? await runCtx.childRunner(validatedAgent, validatedTask, { cwd: runCtx.cwd, piCommand: runCtx.piCommand })
-				: await runBuiltInChildAgent(validatedAgent, validatedTask, { cwd: runCtx.cwd, piCommand: runCtx.piCommand });
+				? await runCtx.childRunner(validatedAgent, validatedTask, childOptions)
+				: await runBuiltInChildAgent(validatedAgent, validatedTask, childOptions);
 			const { text, details } = compactResult(result);
 			return { ok: result.status === "completed", text, details, isError: result.status !== "completed" };
 		} catch (error) {
@@ -184,8 +192,8 @@ export async function executeSubagentRun(agent: string, task: string, runCtx: Su
 	//    buildChildPiArgs; never as argv tokens.
 	try {
 		const result = runCtx.childRunner
-			? await runCtx.childRunner(currentParsed.spec, validatedTask, { cwd: runCtx.cwd, piCommand: runCtx.piCommand })
-			: await runChildAgent(currentParsed.spec, validatedTask, { cwd: runCtx.cwd, piCommand: runCtx.piCommand });
+			? await runCtx.childRunner(currentParsed.spec, validatedTask, childOptions)
+			: await runChildAgent(currentParsed.spec, validatedTask, childOptions);
 		const { text, details } = compactResult(result);
 		return { ok: result.status === "completed", text, details, isError: result.status !== "completed" };
 	} catch (error) {
@@ -249,6 +257,7 @@ export function registerSubagentTool(pi: ExtensionAPI, sessionCtxRef: SessionAge
 				projectTrusted: extensionCtx.isProjectTrusted(),
 				piCommand: sessionCtx.agentsPiCommand,
 				childRunner: sessionCtx.agentsChildRunner,
+				explicitToolContextLoaderPath: sessionCtx.explicitToolContextLoaderPath,
 			};
 
 			const outcome = await executeSubagentRun(agent, task, runCtx);

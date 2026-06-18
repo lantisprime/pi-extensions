@@ -9,7 +9,9 @@ import {
 	executeSubagentRun,
 	validateSubagentInput,
 } from "../lib/subagent-tool.ts";
-import { isReservedBuiltInAgentName } from "../lib/specs.ts";
+import { buildChildPiArgs } from "../lib/child-args.ts";
+import { buildChildRunOptions, TOOL_CONTEXT_LOADER_PATH_ENV } from "../lib/run-resolver.ts";
+import { getBuiltInAgentSpec, isReservedBuiltInAgentName } from "../lib/specs.ts";
 
 function makeFakeChild(jsonlText) {
 	const child = new EventEmitter();
@@ -94,6 +96,12 @@ function testSchemaHasNoToolsField() {
 	assert.equal(def.parameters.properties.tools, undefined);
 }
 
+function testSchemaHasNoToolContextLoaderPathField() {
+	const def = buildSubagentToolDefinition();
+	assert.equal(def.parameters.properties.explicitToolContextLoaderPath, undefined);
+	assert.equal(def.parameters.properties.toolContextLoaderPath, undefined);
+}
+
 function testSchemaRejectsAdditionalProperties() {
 	const def = buildSubagentToolDefinition();
 	assert.equal(def.parameters.additionalProperties, false);
@@ -166,6 +174,23 @@ async function testBuiltInScoutRunsWithReadonlyTools() {
 	assert.equal(capture.task, "inspect foo");
 }
 
+async function testRunSubagentBuiltInForwardsToolContextLoaderPath() {
+	let captured;
+	const result = await executeSubagentRun("scout", "inspect foo", baseCtx({
+		explicitToolContextLoaderPath: "/trusted/tool-context-loader/index.ts",
+		childRunner: async (agent, task, opts) => {
+			captured = { agent, task, opts };
+			return makeCompleteResult(agent, "ok");
+		},
+	}));
+	assert.equal(result.isError, false);
+	assert.deepEqual(captured, {
+		agent: "scout",
+		task: "inspect foo",
+		opts: { cwd: "/tmp/project", piCommand: undefined, explicitToolContextLoaderPath: "/trusted/tool-context-loader/index.ts" },
+	});
+}
+
 async function testBuiltInPlannerAndReviewerRun() {
 	const calls = [];
 	const ctx = baseCtx({
@@ -227,6 +252,44 @@ Body.
 	}));
 	assert.equal(result.isError, false, result.text);
 	assert.equal(runnerCalled, true);
+	await fs.rm(userDir, { recursive: true, force: true });
+}
+
+async function testRunSubagentRegisteredForwardsToolContextLoaderPath() {
+	const userDir = await fs.mkdtemp(path.join(os.tmpdir(), "subagent-user-loader-"));
+	const userAgentsDir = path.join(userDir, ".pi", "agent", "agents");
+	await fs.mkdir(userAgentsDir, { recursive: true });
+	const specPath = path.join(userAgentsDir, "researcher.md");
+	const specBody = `---
+name: researcher
+description: A research agent
+source: user
+tools: [read, grep]
+prompt: Research the codebase for the question.
+---
+Body.
+`;
+	await fs.writeFile(specPath, specBody);
+	const { registerAgent } = await import("../lib/registration.ts");
+	const regResult = await registerAgent(specPath, { cwd: userDir, homeDir: userDir, projectTrusted: false, hasUI: true, ui: confirmAllUi() });
+	assert.equal(regResult.status, "registered");
+
+	let captured;
+	const result = await executeSubagentRun("researcher", "investigate", baseCtx({
+		cwd: userDir,
+		homeDir: userDir,
+		explicitToolContextLoaderPath: "/trusted/tool-context-loader/index.ts",
+		childRunner: async (agent, task, opts) => {
+			captured = { name: agent.name, task, opts };
+			return makeCompleteResult(agent.name, "ok");
+		},
+	}));
+	assert.equal(result.isError, false, result.text);
+	assert.deepEqual(captured, {
+		name: "researcher",
+		task: "investigate",
+		opts: { cwd: userDir, piCommand: undefined, explicitToolContextLoaderPath: "/trusted/tool-context-loader/index.ts" },
+	});
 	await fs.rm(userDir, { recursive: true, force: true });
 }
 
@@ -474,6 +537,29 @@ b
 
 // --- Group 8: Recursion prevention ---
 
+async function testAgentSpecCannotSetLoaderPath() {
+	const userDir = await fs.mkdtemp(path.join(os.tmpdir(), "subagent-loader-field-"));
+	const userAgentsDir = path.join(userDir, ".pi", "agent", "agents");
+	await fs.mkdir(userAgentsDir, { recursive: true });
+	const specPath = path.join(userAgentsDir, "loaderbot.md");
+	await fs.writeFile(specPath, `---
+name: loaderbot
+description: d
+source: user
+tools: [read]
+explicitToolContextLoaderPath: /tmp/evil-loader.ts
+prompt: p
+---
+b
+`);
+	const { parseAgentMarkdownFile } = await import("../lib/agent-markdown.ts");
+	const parsed = await parseAgentMarkdownFile(specPath, { source: "user" });
+	assert.ok(parsed.spec, "unknown frontmatter field must not become an AgentSpec field");
+	assert.equal(Object.prototype.hasOwnProperty.call(parsed.spec, "explicitToolContextLoaderPath"), false);
+	assert.equal(parsed.spec.explicitToolContextLoaderPath, undefined);
+	await fs.rm(userDir, { recursive: true, force: true });
+}
+
 async function testChildArgvExcludesRunSubagent() {
 	const userDir = await fs.mkdtemp(path.join(os.tmpdir(), "subagent-recurse-"));
 	const userAgentsDir = path.join(userDir, ".pi", "agent", "agents");
@@ -669,6 +755,66 @@ async function testResultDetailsContainOnlyAllowlistedFields() {
 
 // --- Group 11: Context freshness + parity ---
 
+function testLoaderPathSourcePrecedenceAndValidation() {
+	const previous = process.env[TOOL_CONTEXT_LOADER_PATH_ENV];
+	try {
+		process.env[TOOL_CONTEXT_LOADER_PATH_ENV] = "/env/tool-context-loader/index.ts";
+		assert.deepEqual(
+			buildChildRunOptions({ cwd: "/tmp/project", agentsPiCommand: "pi-test" }),
+			{ cwd: "/tmp/project", piCommand: "pi-test", explicitToolContextLoaderPath: "/env/tool-context-loader/index.ts" },
+		);
+		assert.deepEqual(
+			buildChildRunOptions({ cwd: "/tmp/project", agentsPiCommand: "pi-test", explicitToolContextLoaderPath: "/ctx/tool-context-loader/index.ts" }),
+			{ cwd: "/tmp/project", piCommand: "pi-test", explicitToolContextLoaderPath: "/ctx/tool-context-loader/index.ts" },
+			"explicit session/context path must take precedence over environment fallback",
+		);
+		process.env[TOOL_CONTEXT_LOADER_PATH_ENV] = "/tmp/bad\nloader.ts";
+		const scout = getBuiltInAgentSpec("scout");
+		assert.throws(
+			() => buildChildPiArgs(scout, "inspect", buildChildRunOptions({ cwd: "/tmp/project" })),
+			/explicitToolContextLoaderPath must not contain/,
+			"environment fallback must still pass through child-args path validation",
+		);
+	} finally {
+		if (previous === undefined) delete process.env[TOOL_CONTEXT_LOADER_PATH_ENV];
+		else process.env[TOOL_CONTEXT_LOADER_PATH_ENV] = previous;
+	}
+}
+
+async function testTrustedLoaderPathSourcePopulatesSessionContext() {
+	const { registerSubagentTool } = await import("../lib/subagent-tool.ts");
+	const previous = process.env.PI_AGENTS_TOOL_CONTEXT_LOADER_PATH;
+	const tools = new Map();
+	const pi = {
+		registerCommand() {},
+		registerTool(d) { tools.set(d.name, d); },
+		on() {},
+	};
+	try {
+		process.env.PI_AGENTS_TOOL_CONTEXT_LOADER_PATH = "/env/tool-context-loader/index.ts";
+		const sessionCtx = {
+			agentsHomeDir: "/tmp/home",
+			agentsPiCommand: "pi-test",
+			agentsChildRunner: async (agent, task, opts) => makeCompleteResult(typeof agent === "string" ? agent : agent.name, JSON.stringify({ agent: typeof agent === "string" ? agent : agent.name, task, opts })),
+		};
+		registerSubagentTool(pi, () => sessionCtx);
+		const tool = tools.get("run_subagent");
+		const result = await tool.execute("c1", { agent: "scout", task: "inspect", explicitToolContextLoaderPath: "/tmp/model-controlled.ts" }, undefined, undefined, {
+			cwd: "/tmp/project",
+			hasUI: true,
+			isProjectTrusted: () => false,
+			ui: { notify: () => {} },
+		});
+		assert.equal(result.isError, false);
+		assert.match(result.content[0].text, /explicitToolContextLoaderPath/);
+		assert.match(result.content[0].text, /\/env\/tool-context-loader\/index\.ts/);
+		assert.equal(result.content[0].text.includes("/tmp/model-controlled.ts"), false, "tool params must not control loader path");
+	} finally {
+		if (previous === undefined) delete process.env.PI_AGENTS_TOOL_CONTEXT_LOADER_PATH;
+		else process.env.PI_AGENTS_TOOL_CONTEXT_LOADER_PATH = previous;
+	}
+}
+
 async function testToolDeniesWhenSessionContextUndefined() {
 	const { registerSubagentTool } = await import("../lib/subagent-tool.ts");
 	const tools = new Map();
@@ -709,6 +855,7 @@ async function main() {
 		testSchemaHasOnlyAgentAndTask,
 		testSchemaHasNoPromptField,
 		testSchemaHasNoToolsField,
+		testSchemaHasNoToolContextLoaderPathField,
 		testSchemaRejectsAdditionalProperties,
 		testRejectsEmptyAgent,
 		testRejectsMissingAgent,
@@ -718,9 +865,11 @@ async function main() {
 		testAllowsMultilineTaskText,
 		testRejectsWhitespaceOnlyTask,
 		testBuiltInScoutRunsWithReadonlyTools,
+		testRunSubagentBuiltInForwardsToolContextLoaderPath,
 		testBuiltInPlannerAndReviewerRun,
 		testBuiltInTrimsAgentAndPreservesMultilineTask,
 		testRegisteredUserRunsAfterGate,
+		testRunSubagentRegisteredForwardsToolContextLoaderPath,
 		testUnregisteredUserDeniedNoSpawn,
 		testHashMismatchDeniedNoSpawn,
 		testProjectUntrustedDeniedNoSpawn,
@@ -730,6 +879,7 @@ async function main() {
 		testSchemaHasNoPromptParameter,
 		testChildUsesSpecPromptNotCallerText,
 		testTaskWithFlagLikeContentRunsAsLiteralText,
+		testAgentSpecCannotSetLoaderPath,
 		testChildArgvExcludesRunSubagent,
 		testChildArgvExcludesApprove,
 		testChildPiHasNoRunSubagentRegistered,
@@ -739,6 +889,8 @@ async function main() {
 		testCompletedReturnsBoundedText,
 		testDenialReturnsIsErrorTrueWithCode,
 		testResultDetailsContainOnlyAllowlistedFields,
+		testLoaderPathSourcePrecedenceAndValidation,
+		testTrustedLoaderPathSourcePopulatesSessionContext,
 		testToolDeniesWhenSessionContextUndefined,
 		testBuiltInPathParityWithAgentsRun,
 	];

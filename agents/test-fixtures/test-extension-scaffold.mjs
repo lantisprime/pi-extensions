@@ -30,6 +30,7 @@ async function makeHarness() {
 		agentsHomeDir: path.join(root, "home"),
 		agentsPiCommand: "pi-test",
 		agentsChildRunner: undefined,
+		explicitToolContextLoaderPath: undefined,
 		hasUI: true,
 		isProjectTrusted: () => false,
 		ui: {
@@ -170,6 +171,50 @@ async function testRunBuiltInUsesInjectedRunner() {
 	}
 }
 
+async function testRunBuiltInForwardsToolContextLoaderPath() {
+	const harness = await makeHarness();
+	try {
+		const calls = [];
+		harness.ctx.explicitToolContextLoaderPath = "/trusted/tool-context-loader/index.ts";
+		harness.ctx.agentsChildRunner = async (name, task, options) => {
+			calls.push({ name, task, options });
+			return childRunResult(name, "Concise findings\nDone");
+		};
+		agentsExtension(harness.pi);
+		await invoke(harness.commands.get("agents"), "run scout inspect the repo", harness.ctx);
+		assert.equal(calls.length, 1);
+		assert.deepEqual(calls[0], {
+			name: "scout",
+			task: "inspect the repo",
+			options: { cwd: harness.ctx.cwd, piCommand: "pi-test", explicitToolContextLoaderPath: "/trusted/tool-context-loader/index.ts" },
+		});
+	} finally {
+		await cleanup(harness);
+	}
+}
+
+async function testEnvToolContextLoaderPathSourcePopulatesRunOptions() {
+	const harness = await makeHarness();
+	const previous = process.env.PI_AGENTS_TOOL_CONTEXT_LOADER_PATH;
+	try {
+		const calls = [];
+		delete harness.ctx.explicitToolContextLoaderPath;
+		process.env.PI_AGENTS_TOOL_CONTEXT_LOADER_PATH = "/env/tool-context-loader/index.ts";
+		harness.ctx.agentsChildRunner = async (name, task, options) => {
+			calls.push({ name, task, options });
+			return childRunResult(name, "Concise findings\nDone");
+		};
+		agentsExtension(harness.pi);
+		await invoke(harness.commands.get("agents"), "run scout inspect the repo", harness.ctx);
+		assert.equal(calls.length, 1);
+		assert.deepEqual(calls[0].options, { cwd: harness.ctx.cwd, piCommand: "pi-test", explicitToolContextLoaderPath: "/env/tool-context-loader/index.ts" });
+	} finally {
+		if (previous === undefined) delete process.env.PI_AGENTS_TOOL_CONTEXT_LOADER_PATH;
+		else process.env.PI_AGENTS_TOOL_CONTEXT_LOADER_PATH = previous;
+		await cleanup(harness);
+	}
+}
+
 async function testRegistrationCommandsAndRegisteredUserRun() {
 	const harness = await makeHarness();
 	try {
@@ -199,6 +244,34 @@ async function testRegistrationCommandsAndRegisteredUserRun() {
 		await invoke(harness.commands.get("agents"), "unregister user-helper", harness.ctx);
 		assert.equal(harness.notifications.at(-1).level, "info");
 		assert.match(harness.notifications.at(-1).message, /Unregistered 1 entry/);
+	} finally {
+		await cleanup(harness);
+	}
+}
+
+async function testRunRegisteredForwardsToolContextLoaderPath() {
+	const harness = await makeHarness();
+	try {
+		agentsExtension(harness.pi);
+		const userDir = path.join(harness.ctx.agentsHomeDir, ".pi", "agent", "agents");
+		await fs.mkdir(userDir, { recursive: true });
+		await fs.writeFile(path.join(userDir, "helper.md"), "---\nname: user-helper\ndescription: helper\ntools: [read, grep, find, ls]\n---\nRead files.\n");
+		harness.confirmations.push(true);
+		await invoke(harness.commands.get("agents"), "register user-helper", harness.ctx);
+
+		const calls = [];
+		harness.ctx.explicitToolContextLoaderPath = "/trusted/tool-context-loader/index.ts";
+		harness.ctx.agentsChildRunner = async (agent, task, options) => {
+			calls.push({ name: typeof agent === "string" ? agent : agent.name, source: typeof agent === "string" ? "built-in" : agent.source, task, options });
+			return childRunResult(typeof agent === "string" ? agent : agent.name, "Registered user summary");
+		};
+		await invoke(harness.commands.get("agents"), "run user-helper inspect safely", harness.ctx);
+		assert.deepEqual(calls, [{
+			name: "user-helper",
+			source: "user",
+			task: "inspect safely",
+			options: { cwd: harness.ctx.cwd, piCommand: "pi-test", explicitToolContextLoaderPath: "/trusted/tool-context-loader/index.ts" },
+		}]);
 	} finally {
 		await cleanup(harness);
 	}
@@ -419,7 +492,10 @@ async function main() {
 	await testVerifyPath();
 	await testRunRejectsUndiscoveredRegisteredAgentWithoutRunner();
 	await testRunBuiltInUsesInjectedRunner();
+	await testRunBuiltInForwardsToolContextLoaderPath();
+	await testEnvToolContextLoaderPathSourcePopulatesRunOptions();
 	await testRegistrationCommandsAndRegisteredUserRun();
+	await testRunRegisteredForwardsToolContextLoaderPath();
 	await testRegisteredProjectRunRequiresTrustAndGate();
 	await testRegisteredRunBlocksHashMismatchBeforeRunner();
 	await testRegisteredRunBlocksDeletedSpecBeforeRunner();
