@@ -16,6 +16,7 @@ export type AgentsContextLike = {
 	agentsHomeDir?: string;
 	agentsPiCommand?: string;
 	agentsChildRunner?: ChildAgentRunner;
+	explicitToolContextLoaderPath?: string;
 	isProjectTrusted?: () => boolean;
 	ui: {
 		notify(message: string, level?: "info" | "warning" | "error" | string): void;
@@ -30,6 +31,21 @@ export type RunnableRegisteredRecord = AgentDiagnosticRecord & {
 	rawBytesSha256: string;
 	filePath: string;
 };
+
+export const TOOL_CONTEXT_LOADER_PATH_ENV = "PI_AGENTS_TOOL_CONTEXT_LOADER_PATH";
+
+export function resolveExplicitToolContextLoaderPath(ctx?: { explicitToolContextLoaderPath?: string }): string | undefined {
+	return ctx?.explicitToolContextLoaderPath || process.env[TOOL_CONTEXT_LOADER_PATH_ENV];
+}
+
+export function buildChildRunOptions(ctx: { cwd?: string; agentsPiCommand?: string; explicitToolContextLoaderPath?: string }) {
+	const explicitToolContextLoaderPath = resolveExplicitToolContextLoaderPath(ctx);
+	return {
+		cwd: ctx.cwd,
+		piCommand: ctx.agentsPiCommand,
+		...(explicitToolContextLoaderPath ? { explicitToolContextLoaderPath } : {}),
+	};
+}
 
 export async function resolveRegisteredRunTarget(name: string, diagnostics: AgentDiagnostics): Promise<{ ok: true; record: RunnableRegisteredRecord } | { ok: false; message: string }> {
 	const matches = diagnostics.records.filter((record) => record.source !== "built-in" && record.name === name);
@@ -59,11 +75,12 @@ export function nextStepForRunBlock(record: AgentDiagnosticRecord, code: string)
 
 export async function executeChildRun(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string): Promise<void> {
 	try {
+		const childOptions = buildChildRunOptions(ctx);
 		const result = ctx.agentsChildRunner
-			? await ctx.agentsChildRunner(agent, task, { cwd: ctx.cwd, piCommand: ctx.agentsPiCommand })
+			? await ctx.agentsChildRunner(agent, task, childOptions)
 			: typeof agent === "string"
-				? await runBuiltInChildAgent(agent, task, { cwd: ctx.cwd, piCommand: ctx.agentsPiCommand })
-				: await runChildAgent(agent, task, { cwd: ctx.cwd, piCommand: ctx.agentsPiCommand });
+				? await runBuiltInChildAgent(agent, task, childOptions)
+				: await runChildAgent(agent, task, childOptions);
 		ctx.ui.notify(formatChildAgentRunResult(result), result.status === "completed" ? "info" : "warning");
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);

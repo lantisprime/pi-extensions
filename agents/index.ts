@@ -27,6 +27,7 @@ type AgentsContext = {
 	agentsHomeDir?: string;
 	agentsPiCommand?: string;
 	agentsChildRunner?: import("./lib/child-runner.ts").ChildAgentRunner;
+	explicitToolContextLoaderPath?: string;
 	agentsLastEphemeralSpec?: { spec: import("./lib/specs.ts").AgentSpec; task: string };
 	isProjectTrusted?: () => boolean;
 	ui: {
