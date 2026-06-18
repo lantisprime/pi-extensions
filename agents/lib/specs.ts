@@ -391,6 +391,8 @@ Do not produce a long implementation plan.`,
 		name: "planner",
 		description: "Implementation or validation planning without editing files.",
 		source: "built-in",
+		model: "openai-codex/gpt-5.5",
+		thinking: "high",
 		tools: [...P3_READONLY_TOOLS],
 		prompt: `${COMMON_PROMPT}
 
@@ -411,6 +413,8 @@ Do not edit files or present execution as already completed.`,
 		name: "reviewer",
 		description: "Adversarial review of a plan, diff, or design with a single verdict.",
 		source: "built-in",
+		model: "openai-codex/gpt-5.5",
+		thinking: "high",
 		tools: [...P3_READONLY_TOOLS],
 		prompt: `${COMMON_PROMPT}
 
