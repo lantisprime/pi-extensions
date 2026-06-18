@@ -1,7 +1,8 @@
 # P4: Background/Tmux Agent Execution Plan
 
-**Status**: Planning
+**Status**: Planning (revised after planner review)
 **Date**: 2026-06-18
+**Review**: [P4_BACKGROUND_AGENTS_PLAN_REVIEW.md](./P4_BACKGROUND_AGENTS_PLAN_REVIEW.md) — planner `openai-codex/gpt-5.5`
 **Depends on**: P3 agent scaffold (complete)
 
 ## Objective
@@ -31,9 +32,6 @@ Three existing Pi packages already demonstrate this pattern:
 | `pi-side-agents` (GitHub, pasky) | Tmux windows + git worktrees + topic branches |
 | `pi-crew` (pi.dev) | Coordinated teams + async orchestration |
 
-We can reuse their proven tmux patterns layered on P3's existing security
-model.
-
 ## Non-goals
 
 - No parallel fan-out beyond what the user explicitly spawns
@@ -43,107 +41,87 @@ model.
 - No write/edit/bash in child agents (still read-only by default)
 - No relaxation of any P3 security invariant
 
-## Design
+## Design (revised after planner review)
 
-### New execution path
+The planner review identified three critical architecture issues:
 
-```
-/agents run scout <task>         → synchronous (current, unchanged)
-/agents bg scout <task>           → tmux background (new)
-/agents chain scout,planner <task> → synchronous (current, unchanged)
-/agents bg-chain scout,planner <task>  → tmux background chain (new)
-```
+1. **In-memory tracker cannot survive parent restart** — plan claimed "agents
+   continue" but tracker was in-memory only
+2. **Timeout/output limits bypassed** — background `pi` launched raw would
+   bypass `runChildAgent` protections
+3. **Shell injection via tmux command strings** — task paths interpolated into
+   shell commands
 
-### Tmux integration
+Revised approach:
 
-The parent Pi session constructs the same safe child argv via
-`buildChildPiArgs()`. Instead of `child_process.exec`, it:
+### State on disk, not in memory
 
-1. Writes the task to a temp file (stdin transport)
-2. Constructs the full `pi` command with all safety flags
-3. Wraps it in `tmux new-window -d -n "agent-<name>" 'pi ... < task.md > <result.log> 2>&1'`
-4. Records agent metadata in an in-memory session tracker
-5. Returns immediately with an agent run ID
+Each background run gets a private directory:
 
-The child tmux window runs independently. The parent can:
-
-- Poll `tmux list-windows` to check if the window still exists
-- Read the result log file when complete
-- Show progress in the status line: `│ agents: 2 running`
-- Open the tmux window on demand: `tmux select-window -t "agent-scout"`
-
-### Background agent tracker
-
-```typescript
-interface BgAgentRun {
-  id: string;           // UUID
-  agentName: string;
-  spec: AgentSpec;
-  task: string;
-  tmuxWindow: string;   // tmux window name
-  resultFile: string;   // /tmp/pi-agent-<id>.(jsonl|log)
-  taskFile: string;     // /tmp/pi-agent-<id>.task.md
-  startedAt: number;
-  status: "running" | "completed" | "failed" | "timed-out" | "stopped";
-}
+```text
+~/.pi/agent/bg/<runId>/     (0700)
+  manifest.json              (0600) — frozen approved spec + options
+  prompt.txt                 (0600) — task text
+  result.json                (0600) — ChildAgentRunResult
+  events.jsonl               (0600) — raw JSONL events
+  done                       (sentinel, empty file)
 ```
 
-In-memory only — session-scoped `Map<string, BgAgentRun>` on the
-extension's `sessionState`. No persistence to disk. Cleaned on session end.
+Random run IDs, not derived from agent names or tasks. Tracker is
+reconstructable from disk state + tmux windows. In-memory cache only.
+
+### Supervisor pattern
+
+A background worker process calls `runChildAgent` (not raw `pi`).
+This preserves:
+- Timeout enforcement
+- Stdout/output byte caps
+- JSONL reduction and parsing
+- Result formatting and redaction
+- Force-kill on timeout
+- `--no-approve`, `--no-session`, forbidden tool blocking
+
+The tmux launcher only passes a manifest path to the supervisor:
+
+```
+tmux new-window -d -n "pi-agent-<shortId>" \
+  '/path/to/supervisor /path/to/.pi/agent/bg/<runId>/manifest.json'
+```
+
+### Tmux as launcher only
+
+- Window name: `pi-agent-<shortId>` (sanitized, no task/name/path data)
+- Fixed shell-quoted command: trusted executable + manifest path only
+- No task text, agent names, or file paths in the tmux command string
+
+### Private-temp-file transport
+
+Use existing `buildChildPiArgs` with `promptTransport: "private-temp-file"`
+and `-p @file`. Not shell pipe redirection.
 
 ### Commands
 
 ```text
 /agents bg <agent> <task>             Launch background agent
 /agents bg-chain <a>,<b>[,<c>] <task>  Launch background chain
-/agents bg-status                     Show running agents
+/agents bg-status                     Show running + recent agents
 /agents bg-stop <id>                  Kill a background agent
-/agents bg-result <id>                Show result of a completed agent
-/agents bg-open <id>                  Switch to agent's tmux window
+/agents bg-result <id>                Show redacted result
+/agents bg-open <id>                  Switch to tmux window
 ```
-
-### Security invariants (all preserved)
-
-| Invariant | How it's preserved |
-|---|---|
-| canRunAgent before spawn | Same gate, same code path — `resolveRegisteredRunTarget` → `canRunAgent` |
-| Hash registration check | Registry check identical to synchronous path |
-| Project trust required | `ctx.isProjectTrusted()` check before project agent spawn |
-| Task in stdin, not argv | Written to temp file, piped via `< task.md` in tmux command |
-| `--no-approve` by default | Same `buildChildPiArgs` output |
-| Forbidden tools blocked | Same `buildChildPiArgs` output — no write/edit/bash/run_subagent |
-| No model/tool/spec injection | Trusted loader path from `ctx.explicitToolContextLoaderPath` only |
-| Result redaction | Result log read by parent, redacted before display (no task content) |
-| Prompt-shield scanning | Task file written to `/tmp` not project dir; parent's prompt-shield still active |
-| Tmux window isolation | Each agent in own tmux window, no shared state |
 
 ### Background chain mode
 
-`/agents bg-chain scout,planner <task>`:
-
-1. Preflight all agents through `canRunAgent` (same as sync chain)
-2. Spawn `scout` in background tmux window with task + result file path
-3. Scout completes → parent reads result log → extracts summaryText
-4. Spawn `planner` in background tmux window with summaryText as handoff
-5. Repeat for subsequent agents
-6. Status line updates at each transition
-
-Chain handoff still uses `summary.summaryText` capped at 24,000 bytes.
-Mid-chain failure stops subsequent spawns.
+Same as sync chain but each step spawns via the supervisor. Chain handoff
+uses `summary.summaryText` capped at 24,000 bytes. Mid-chain failure stops
+subsequent spawns.
 
 ### Completion detection
 
-Multiple mechanisms in order of preference:
-
-1. **Result file with sentinel**: Parent writes a `.done` file after child exits.
-   Tmux command: `pi ... < task.md > result.log 2>&1; touch result.log.done`
-   Parent polls for `.done` file existence (every 2s, max timeout).
-2. **Tmux window check**: `tmux list-windows -F "#{window_name}" | grep "agent-<id>"`
-   Fallback: check if tmux window still exists.
-3. **Process supervision**: Parent records tmux window PID via
-   `tmux display -p -t "agent-<id>" "#{pane_pid}"`. Poll `kill -0 $PID`.
-
-Preferred: result file sentinel (simple, works across sessions).
+1. **done sentinel**: Supervisor writes `done` after atomic result write.
+   Parent polls every 2s with max timeout.
+2. **Tmux window check**: `tmux list-windows -F "#{window_name}"` fallback.
+3. **State dir scan**: bg-status checks all `~/.pi/agent/bg/*/done` files.
 
 ### Status line
 
@@ -151,101 +129,144 @@ Preferred: result file sentinel (simple, works across sessions).
 │ agents: 2 running │ permission: ask │ runbooks: 3
 ```
 
-Hovering shows agent names and elapsed time:
+### Concurrency
 
-```text
-│ agents: scout (12s), planner (4s)
-```
+- Max concurrent background runs (configurable, default 5)
+- Prune old completed runs from state dir (default: keep last 20)
+- Orphaned/stale run detection via tmux window check
 
-### Edge cases
+## Security invariants (all preserved)
 
-| Edge case | Behavior |
+| Invariant | How it's preserved |
 |---|---|
-| Tmux not installed | `/agents bg` returns error: "tmux not found on PATH" |
-| Tmux session detached | Agent windows still run (detached mode `-d`) |
-| Parent session killed | Agent windows continue (owned by tmux server) |
-| Result file lost | After timeout, mark as `unknown`, log warning |
-| Multiple agents with same name | Append `-1`, `-2` to tmux window names |
-| Agent times out | `tmux kill-window -t "agent-<id>"` + mark as `timed-out` |
-| Chain handoff to dead agent | Mid-chain failure stops subsequent spawns |
-| Prompt-shield blocks task | Fail-closed — do not write task file, do not spawn |
+| canRunAgent before spawn | Shared preflight in `bg-preflight.ts` — same code path for sync + bg |
+| Hash registration check | Verified during preflight, frozen into manifest |
+| Project trust required | `ctx.isProjectTrusted()` check before project agent bg spawn |
+| Task in stdin, not argv | `promptTransport: "private-temp-file"` via `buildChildPiArgs` |
+| `--no-approve` by default | Same `buildChildPiArgs` output |
+| Forbidden tools blocked | Same `buildChildPiArgs` output — no write/edit/bash/run_subagent |
+| No model/tool/spec injection | Trusted loader path from `ctx.explicitToolContextLoaderPath` only |
+| Result redaction | Supervisor uses `formatChildAgentRunResult` for result.json |
+| Spec/profile TOCTOU | Freeze approved spec into manifest; revalidate hash before each spawn |
+| Shell injection prevention | Tmux command contains only trusted paths, no interpolation |
+| Tmux window isolation | Each agent in own window, no shared state |
+| State-file protection | 0700 state dir, 0600 sensitive files |
+| Resource DoS | Max concurrent run limit |
+| Task privacy | `result.json` uses redacted format; prompt.txt deleted after read |
 
-### Implementation plan
+## Implementation slices
 
-**P4-1: Background runner core** (new file, ~150 lines)
-- `agents/lib/bg-runner.ts`
-- `spawnBgAgent(spec, task, options) → BgAgentRun`
-- `spawnBgChain(resolvedAgents, task, options) → BgAgentRun[]`
-- Tmux command construction with result file setup
-- Completion polling loop
+### P4-1: bg-state.ts — Run state format (~100 lines)
+
+- State directory: `~/.pi/agent/bg/`
+- Per-run directory: `<runId>/` with manifest, prompt, result, events, done
+- Atomic result write: tmp → rename
+- Cleanup: prune old runs, handle orphans
+- Random run IDs, 0700/0600 permissions
+- **New file only, zero existing-file changes**
+
+### P4-2: bg-preflight.ts — Shared preflight (~80 lines)
+
+- `preflightBgAgent(target, task, ctx)` shared path for sync run, sync chain, bg, bg-chain
+- Calls `canRunAgent`, verifies registered hash, enforces project trust
+- Freezes approved effective spec into manifest
+- **Modifies run-resolver.ts** to use shared preflight
+- **New file, plus refactor of existing preflight code**
+
+### P4-3: bg-worker.ts — Supervisor (~120 lines)
+
+- `runBgWorker(manifestPath)` — called by tmux
+- Reads manifest, calls `runChildAgent` or chain runner
+- Enforces timeout, output limits, JSONL reduction
+- Writes result.json atomically, writes `done` sentinel
+- Handles SIGTERM (kill) — writes stopped status
+- **New file only**
+
+### P4-4: bg-tmux.ts — Tmux integration (~80 lines)
+
+- `spawnBgAgent(spec, task, opts)` → BgAgentRun
+- `spawnBgChain(resolvedAgents, task, opts)` → BgAgentRun[]
+- Tmux command construction (fixed, no interpolation)
+- Fake tmux adapter for tests
 - `killBgAgent(id)`, `getBgResult(id)`
-- Reuse `buildChildPiArgs` unchanged
+- Completion polling
+- **New file only**
 
-**P4-2: Session tracker** (new file, ~80 lines)
-- `agents/lib/bg-tracker.ts`
-- In-memory `Map<string, BgAgentRun>`
-- Status line integration via `appendEntry`
-- Prune completed agents after result read
-- Clean on session end
+### P4-5: index.ts — Command wiring (~80 lines)
 
-**P4-3: Command wiring** (modify index.ts, ~60 lines)
-- `/agents bg` handler → parseRunArgs + spawnBgAgent
-- `/agents bg-chain` handler → parseChainArgs + spawnBgChain
-- `/agents bg-status` handler → format running agents
-- `/agents bg-stop <id>` handler → killBgAgent + kill tmux window
-- `/agents bg-result <id>` handler → read result file + redact
-- `/agents bg-open <id>` handler → `tmux select-window`
-- Completion argument: add `bg`, `bg-chain`, `bg-status`, `bg-stop`, `bg-result`, `bg-open`
+- `/agents bg` handler
+- `/agents bg-chain` handler
+- `/agents bg-status` handler (reads state dir + tmux)
+- `/agents bg-stop <id>` handler
+- `/agents bg-result <id>` handler
+- `/agents bg-open <id>` handler
 - Usage text update
+- Completion arguments
 
-**P4-4: Tests** (~20 tests)
+### P4-6: Status line (~30 lines)
+
+- AppendEntry for running agent count
+- Hover shows names and elapsed time
+- **Minor index.ts change**
+
+### P4-7: Tests (~25 tests)
+
 - `agents/test-fixtures/test-bg.mjs`
-- Tmux not installed → graceful error
-- Tmux command construction (no real spawn)
-- Result file sentinel detection
-- Completion polling works
-- Chain handoff between background agents
-- Status tracker add/remove/status
-- Multiple agents with name collision
-- Agent timeout/kill
-- Result redaction
+- Fake tmux adapter, fake supervisor, temp state dir
+- Tests for: preflight blocks, hash mismatch, project trust, task privacy,
+  tmux unavailable, shell quoting, timeout, stop, parent restart reconstruction,
+  lost result, bg-chain failure, profile trust, concurrency limit
 
-### Hard stops
+### P4-8: Cleanup + cross-test verification
+
+- Ensure all existing P3 test suites pass
+- Verify no regression in sync `/agents run`
+- Verify extension load smoke
+
+## Hard stops
 
 - Do not add write/edit/bash to child agents
 - Do not add autonomous delegation or cross-agent memory
 - Do not relax any P3 security gate
-- Do not add persistence beyond session memory
+- Do not add persistence beyond agent state dir (no user-visible registry changes)
 - Do not add parallel fan-out from a single command (user must spawn individually)
 - Do not change synchronous `/agents run` behavior
 - Do not add a daemon, service, or long-running agent process
+- Do not ship a real supervisor binary — reuse `runChildAgent` in the same process
 
-### Done criteria
+## Done criteria
 
 - `/agents bg scout <task>` launches a scout in a tmux window, parent returns immediately
 - `/agents bg-chain scout,planner <task>` runs chain in background
 - `/agents bg-status` shows running agents with elapsed time
 - `/agents bg-stop <id>` kills tmux window and marks agent stopped
-- `/agents bg-result <id>` reads result log with task content redacted
+- `/agents bg-result <id>` reads result with task content redacted
 - Status line shows running agent count
 - `tmux` not installed → clean error, no crash
 - All P3 security invariants verified for the background path
-- 20+ tests passing
+- 25+ tests passing
+- All existing P3 test suites still pass
 - Extension load smoke unchanged
 
-### Security review checklist
+## Security review checklist
 
-- [ ] canRunAgent called before tmux spawn (same code path as sync)
-- [ ] Hash registration check identical to sync path
+- [ ] Shared preflight used for sync run, chain, bg run, bg chain
+- [ ] canRunAgent called before tmux spawn
+- [ ] Hash registration check frozen into manifest
 - [ ] Project trust required before project agent bg spawn
-- [ ] Task in temp file, piped via `<` — never in argv or tmux command text
+- [ ] Task in private temp file, not in argv or tmux command
 - [ ] `--no-approve` present in child argv
 - [ ] `--no-extensions --no-skills --no-prompt-templates --no-themes` present
 - [ ] Forbidden tools (`write/edit/bash/run_subagent`) blocked
 - [ ] `--no-session` on child (ephemeral)
 - [ ] Tool-context-loader JIT forwarded if configured
 - [ ] Model/tool/spec path injection exclusion (trusted source only)
-- [ ] Result log redacted before display (no task content leaked)
-- [ ] Temp files cleaned up after result read
+- [ ] Result redacted via `formatChildAgentRunResult` before write
+- [ ] Prompt file deleted after result read
+- [ ] State dir 0700, sensitive files 0600
+- [ ] Tmux command contains only trusted paths (no task/name/path interpolation)
+- [ ] Tmux window name sanitized (`pi-agent-<shortId>`)
 - [ ] No cross-agent state leakage
-- [ ] Tmux window naming prevents injection (sanitize agent name)
+- [ ] Max concurrent runs enforced
+- [ ] Old runs pruned
+- [ ] `ctx.agentsChildRunner` not used in production bg path
