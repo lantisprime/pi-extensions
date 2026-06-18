@@ -78,7 +78,7 @@ export function nextStepForRunBlock(record: AgentDiagnosticRecord, code: string)
 	return `/agents inspect ${record.name}`;
 }
 
-export async function executeChildRun(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string): Promise<void> {
+export async function executeChildRun(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string, profileOverride?: string): Promise<void> {
 	try {
 		const childOptions = buildChildRunOptions(ctx);
 		const profiles = ctx.profileLibrary;
@@ -88,10 +88,10 @@ export async function executeChildRun(agent: Parameters<ChildAgentRunner>[0], ta
 			projectRegistry: ctx.projectRegistry,
 		};
 		const result = ctx.agentsChildRunner
-			? await ctx.agentsChildRunner(agent, task, childOptions)
+			? await ctx.agentsChildRunner(agent, task, profileOverride ? { ...childOptions, profileOverride } : childOptions)
 			: typeof agent === "string"
-				? await runBuiltInChildAgent(agent, task, runOptions, profiles)
-				: await runChildAgent(agent, task, runOptions, profiles);
+				? await runBuiltInChildAgent(agent, task, runOptions, profiles, profileOverride)
+				: await runChildAgent(agent, task, runOptions, profiles, profileOverride);
 		ctx.ui.notify(formatChildAgentRunResult(result), result.status === "completed" ? "info" : "warning");
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
@@ -107,7 +107,7 @@ export async function runAgentCommand(input: string, ctx: AgentsContextLike, dia
 	}
 	if (isReservedBuiltInAgentName(parsed.name)) {
 		ctx.ui.notify(`Running built-in agent '${parsed.name}' with read-only tools.`, "info");
-		await executeChildRun(parsed.name, parsed.task, ctx, "built-in");
+		await executeChildRun(parsed.name, parsed.task, ctx, "built-in", parsed.profileOverride);
 		return;
 	}
 
@@ -138,16 +138,39 @@ export async function runAgentCommand(input: string, ctx: AgentsContextLike, dia
 		return;
 	}
 	ctx.ui.notify(`Running registered ${record.source} agent '${currentParsed.spec.name}' with read-only tools.`, "info");
-	await executeChildRun(currentParsed.spec, parsed.task, ctx, record.source);
+	await executeChildRun(currentParsed.spec, parsed.task, ctx, record.source, parsed.profileOverride);
 }
 
-export function parseRunArgs(input: string): { ok: true; name: string; task: string } | { ok: false; message: string } {
+export function parseRunArgs(input: string): { ok: true; name: string; task: string; profileOverride?: string } | { ok: false; message: string } {
+	const usage = "Usage: /agents run <agent> [--profile <name>] <task>";
 	const trimmed = input.trim();
-	if (!trimmed) return { ok: false, message: "Usage: /agents run <agent> <task>" };
-	const match = trimmed.match(/^(\S+)\s+([\s\S]+)$/);
-	if (!match) return { ok: false, message: "Usage: /agents run <agent> <task>" };
-	const name = match[1];
-	const task = match[2].trim();
-	if (!task) return { ok: false, message: "Usage: /agents run <agent> <task>" };
-	return { ok: true, name, task };
+	if (!trimmed) return { ok: false, message: usage };
+
+	// Extract optional --profile <name> that must come immediately after the agent name.
+	// Forms: "<agent> --profile <name> <task>" or "<agent> <task>".
+	// Mid-task --profile is part of the task, not an override.
+	const tokens = trimmed.split(/\s+/);
+	const name = tokens[0];
+	if (!name) return { ok: false, message: usage };
+
+	let profileOverride: string | undefined;
+	let rest: string;
+	if (tokens.length >= 2 && tokens[1] === "--profile") {
+		// <agent> --profile ...
+		if (tokens.length < 3) return { ok: false, message: usage }; // no value after --profile
+		const profileValue = tokens[2];
+		if (profileValue.startsWith("--")) return { ok: false, message: usage }; // option-looking value
+		profileOverride = profileValue;
+		rest = tokens.slice(3).join(" ");
+	} else {
+		rest = tokens.slice(1).join(" ");
+	}
+
+	// Reject repeated --profile token (token-level, so task text containing "--profile"
+	// as a substring like "--profiled" is NOT rejected)
+	if (profileOverride && tokens.slice(3).some((t) => t === "--profile")) return { ok: false, message: usage };
+
+	const task = rest.trim();
+	if (!task) return { ok: false, message: usage };
+	return { ok: true, name, task, profileOverride };
 }
