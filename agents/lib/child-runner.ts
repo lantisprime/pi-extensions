@@ -82,10 +82,21 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 		}
 		// P3f-3: Profile trust check for project-source profiles
 		if (result.profileSourceOrigin === "project") {
+			if (!result.profileCanonicalPath || !result.profileRawBytesSha256) {
+				return {
+					agentName: spec.name,
+					status: "spawn-error" as const,
+					durationMs: 0, stdoutBytes: 0, stderrPreview: "",
+					invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin" as const, stdinText: "" } },
+					summary: { summaryText: "", toolCalls: [], errors: [], usage: undefined, cost: undefined, stopReason: undefined, model: undefined, provider: undefined, truncation: {} },
+					timedOut: false, outputLimitExceeded: false,
+					error: "project profile missing canonicalPath or rawBytesSha256 metadata",
+				};
+			}
 			const trustCheck = profileTrustCheck(
 				result.profileName!,
-				result.profileCanonicalPath,
-				result.profileRawBytesSha256 ?? "",
+				result.profileCanonicalPath!,
+				result.profileRawBytesSha256!,
 				options.projectRegistry,
 				options.projectTrusted ?? false,
 			);

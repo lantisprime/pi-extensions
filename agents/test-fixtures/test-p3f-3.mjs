@@ -211,13 +211,13 @@ function testRegisterProjectProfileStoresHash() {
     name: "test-profile",
     source: "project",
     canonicalPath: "/path/to/profile.md",
-    rawBytesSha256: "abc123",
+    rawBytesSha256: "a".repeat(64),
     approvedAt: new Date().toISOString(),
     approvedBy: "user",
   };
-  const registry = addOrReplaceRegisteredProfile(emptyProjectRegistry("/root", "hash"), entry);
+  const registry = addOrReplaceRegisteredProfile(emptyProjectRegistry("/root", "f".repeat(64)), entry);
   assert.equal(registry.profiles?.length, 1);
-  assert.equal(registry.profiles[0].rawBytesSha256, "abc123");
+  assert.equal(registry.profiles[0].rawBytesSha256, "a".repeat(64));
   assert.equal(registry.profiles[0].name, "test-profile");
 }
 
@@ -226,11 +226,11 @@ function testRegistryStoresProfilesAlongsideAgents() {
     name: "test-profile",
     source: "project",
     canonicalPath: "/path/to/profile.md",
-    rawBytesSha256: "abc123",
+    rawBytesSha256: "a".repeat(64),
     approvedAt: new Date().toISOString(),
     approvedBy: "user",
   };
-  const registry = addOrReplaceRegisteredProfile(emptyProjectRegistry("/root", "hash"), entry);
+  const registry = addOrReplaceRegisteredProfile(emptyProjectRegistry("/root", "f".repeat(64)), entry);
   assert.ok(Array.isArray(registry.agents));
   assert.ok(Array.isArray(registry.profiles));
   assert.equal(registry.profiles.length, 1);
@@ -251,7 +251,7 @@ function testProfileRegisterRequiresConfirmation() {
     name: "test",
     source: "project",
     canonicalPath: "/p/test.md",
-    rawBytesSha256: "abc",
+    rawBytesSha256: "a".repeat(64),
     approvedAt: new Date().toISOString(),
     approvedBy: "user",
   };
@@ -265,7 +265,7 @@ function testProfileRegisterNonTuiFailClosed() {
     name: "test",
     source: "project",
     canonicalPath: "/p/test.md",
-    rawBytesSha256: "abc",
+    rawBytesSha256: "a".repeat(64),
     approvedAt: new Date().toISOString(),
     approvedBy: "user",
   };
@@ -281,7 +281,7 @@ function testProfileRegisterRequiresProjectTrust() {
     name: "test",
     source: "project",
     canonicalPath: "/p/test.md",
-    rawBytesSha256: "abc",
+    rawBytesSha256: "a".repeat(64),
     approvedAt: new Date().toISOString(),
     approvedBy: "user",
   };
@@ -293,7 +293,7 @@ function testProfileUnregisterRequiresConfirmation() {
     name: "test",
     source: "project",
     canonicalPath: "/p/test.md",
-    rawBytesSha256: "abc",
+    rawBytesSha256: "a".repeat(64),
     approvedAt: new Date().toISOString(),
     approvedBy: "user",
   };
@@ -312,14 +312,14 @@ function testProfileTrustCheckBlocksMismatch() {
     name: "test-profile",
     source: "project",
     canonicalPath: "/path/to/profile.md",
-    rawBytesSha256: "registered-hash",
+    rawBytesSha256: "a".repeat(64),
     approvedAt: new Date().toISOString(),
     approvedBy: "user",
   };
   const reg = addOrReplaceRegisteredProfile(registry, entry);
 
   // Try with different hash
-  const result = profileTrustCheck("test-profile", "/path/to/profile.md", "different-hash", reg, true);
+  const result = profileTrustCheck("test-profile", "/path/to/profile.md", "b".repeat(64), reg, true);
   assert.equal(result.ok, false);
   assert.equal(result.code, "profile-hash-mismatch");
 }
@@ -330,13 +330,13 @@ function testProfileTrustCheckPassesMatch() {
     name: "test-profile",
     source: "project",
     canonicalPath: "/path/to/profile.md",
-    rawBytesSha256: "matching-hash",
+    rawBytesSha256: "c".repeat(64),
     approvedAt: new Date().toISOString(),
     approvedBy: "user",
   };
   const reg = addOrReplaceRegisteredProfile(registry, entry);
 
-  const result = profileTrustCheck("test-profile", "/path/to/profile.md", "matching-hash", reg, true);
+  const result = profileTrustCheck("test-profile", "/path/to/profile.md", "c".repeat(64), reg, true);
   assert.equal(result.ok, true);
 }
 
@@ -349,7 +349,7 @@ function testProfileTrustCheckSkippedForUser() {
   // User profiles are not in built-in set, so they go through trust check
   const registry = emptyProjectRegistry("/root", "rhash");
   // With projectTrusted: true but no registry entry, it should fail
-  const result = profileTrustCheck("user-profile", "/user/path.md", "some-hash", registry, true);
+  const result = profileTrustCheck("user-profile", "/user/path.md", "f".repeat(64), registry, true);
   assert.equal(result.ok, false);
   assert.equal(result.code, "profile-unregistered");
 }
@@ -360,14 +360,14 @@ function testProfileTrustCheckRequiresActiveProjectTrust() {
     name: "test-profile",
     source: "project",
     canonicalPath: "/path/to/profile.md",
-    rawBytesSha256: "hash",
+    rawBytesSha256: "f".repeat(64),
     approvedAt: new Date().toISOString(),
     approvedBy: "user",
   };
   const reg = addOrReplaceRegisteredProfile(registry, entry);
 
   // With projectTrusted: false, even registered profiles are denied
-  const result = profileTrustCheck("test-profile", "/path/to/profile.md", "hash", reg, false);
+  const result = profileTrustCheck("test-profile", "/path/to/profile.md", "f".repeat(64), reg, false);
   assert.equal(result.ok, false);
   assert.equal(result.code, "profile-trust-inactive");
 }
@@ -378,14 +378,14 @@ function testProfileTrustCheckValidatesCanonicalPath() {
     name: "test-profile",
     source: "project",
     canonicalPath: "/correct/path.md",
-    rawBytesSha256: "hash",
+    rawBytesSha256: "f".repeat(64),
     approvedAt: new Date().toISOString(),
     approvedBy: "user",
   };
   const reg = addOrReplaceRegisteredProfile(registry, entry);
 
   // Same name, same hash, but different path
-  const result = profileTrustCheck("test-profile", "/wrong/path.md", "hash", reg, true);
+  const result = profileTrustCheck("test-profile", "/wrong/path.md", "f".repeat(64), reg, true);
   assert.equal(result.ok, false);
   assert.equal(result.code, "profile-path-mismatch");
 }
@@ -396,14 +396,14 @@ function testProfileTrustCheckBlocksSameNameDifferentPath() {
     name: "shared-name",
     source: "project",
     canonicalPath: "/path/a.md",
-    rawBytesSha256: "hash-a",
+    rawBytesSha256: "a".repeat(64),
     approvedAt: new Date().toISOString(),
     approvedBy: "user",
   };
   const reg = addOrReplaceRegisteredProfile(registry, entry);
 
   // Different path with same name
-  const result = profileTrustCheck("shared-name", "/path/b.md", "hash-b", reg, true);
+  const result = profileTrustCheck("shared-name", "/path/b.md", "b".repeat(64), reg, true);
   assert.equal(result.ok, false);
   assert.equal(result.code, "profile-path-mismatch");
 }
@@ -423,7 +423,7 @@ async function testEphemeralAgentCannotResolveProjectProfile() {
 
 function testCorruptRegistryFailsClosed() {
   // No registry (undefined) should fail
-  const result = profileTrustCheck("test", "/p/test.md", "hash", undefined, true);
+  const result = profileTrustCheck("test", "/p/test.md", "f".repeat(64), undefined, true);
   assert.equal(result.ok, false);
   assert.equal(result.code, "profile-unregistered");
 }
@@ -526,12 +526,12 @@ function testDoctorFlagsProfileHashMismatch() {
     name: "test",
     source: "project",
     canonicalPath: "/p/test.md",
-    rawBytesSha256: "old-hash",
+    rawBytesSha256: "d".repeat(64),
     approvedAt: new Date().toISOString(),
     approvedBy: "user",
   };
   const reg = addOrReplaceRegisteredProfile(registry, entry);
-  const result = profileTrustCheck("test", "/p/test.md", "new-hash", reg, true);
+  const result = profileTrustCheck("test", "/p/test.md", "e".repeat(64), reg, true);
   assert.equal(result.ok, false);
   assert.equal(result.code, "profile-hash-mismatch");
 }

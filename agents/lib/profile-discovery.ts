@@ -149,13 +149,23 @@ export async function parseProfileFile(
 		return baseResult({ rawBytesSha256, issues, warnings, unknownKeys: rawUnknownKeys });
 	}
 
-	// Build ModelProfile from merged metadata
+	// Build ModelProfile from merged metadata — require canonical path
+	let canonicalProfilePath: string;
+	try {
+		canonicalProfilePath = await fs.realpath(filePath);
+	} catch {
+		return baseResult({
+			rawBytesSha256,
+			issues: [{ field: "file", code: "file-read-error", message: "cannot resolve canonical path for profile file" }],
+		});
+	}
 	const profile: ModelProfile = {
 		name: mergedMetadata.name as string,
 		...(mergedMetadata.model !== undefined ? { model: mergedMetadata.model as string } : {}),
 		...(mergedMetadata.thinking !== undefined ? { thinking: mergedMetadata.thinking as ModelProfile["thinking"] } : {}),
 		...(mergedMetadata.purpose !== undefined ? { purpose: mergedMetadata.purpose as string } : {}),
 		sourceOrigin: source,
+		canonicalPath: canonicalProfilePath,
 		rawBytesSha256,
 	};
 
@@ -324,6 +334,9 @@ export function profileTrustCheck(
 		}
 		if (typeof entry.rawBytesSha256 !== "string" || entry.rawBytesSha256.length === 0) {
 			return { ok: false, code: "profile-registry-corrupt", message: `project registry profile entry ${i} has invalid rawBytesSha256` };
+		}
+		if (!/^[a-f0-9]{64}$/.test(entry.rawBytesSha256)) {
+			return { ok: false, code: "profile-registry-corrupt", message: `project registry profile entry ${i} rawBytesSha256 is not a valid 64-char hex string` };
 		}
 	}
 
