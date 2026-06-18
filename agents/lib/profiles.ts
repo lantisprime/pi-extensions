@@ -47,6 +47,8 @@ export type ModelProfile = {
   thinking?: ThinkingLevel;
   /** Human-readable description surfaced in /agents profiles (P3f-2). */
   purpose?: string;
+  /** P3f-3: Which source this profile came from. Used for trust check. */
+  sourceOrigin?: "built-in" | "user" | "project";
 };
 
 /** A collection of profiles. Order determines lookup precedence (built-in > user > project). */
@@ -64,6 +66,8 @@ export type ResolvedProfile = {
   profileProvidedModel: boolean;
   /** Did the profile (not spec fallback) set thinking? */
   profileProvidedThinking: boolean;
+  /** P3f-3: Which source the resolved profile came from. Used for trust check. */
+  profileSourceOrigin?: "built-in" | "user" | "project";
 };
 
 /** Discriminated union: resolution succeeds (resolved: true) or fails (resolved: false). */
@@ -312,6 +316,7 @@ export function resolveSpecProfile(
     profileName: profile.name,
     profileProvidedModel: profileHasModel,
     profileProvidedThinking: profileHasThinking,
+    profileSourceOrigin: profile.sourceOrigin,
   };
 }
 
@@ -352,7 +357,7 @@ export function getBuiltInProfile(name: string): ModelProfile | undefined {
 
 /** Return built-in profiles in definition order. */
 export function listBuiltInProfiles(): ModelProfile[] {
-  return BUILT_IN_PROFILE_DEFS.map((p) => ({ ...p }));
+  return BUILT_IN_PROFILE_DEFS.map((p) => ({ ...p, sourceOrigin: "built-in" as const }));
 }
 
 /** Format a one-line-per-profile listing for display. */
@@ -373,4 +378,81 @@ export function formatBuiltInProfilesList(profiles?: readonly ModelProfile[]): s
 /** Wrap built-in profiles in a ModelProfileLibrary for resolution. */
 export function toProfileLibrary(): ModelProfileLibrary {
   return deepFreeze({ profiles: listBuiltInProfiles() });
+}
+
+// ── P3f-3: Profile library building with source merging ──────────────────
+
+/** Options for building the full profile library from all sources. */
+export type BuildProfileLibraryOptions = {
+  /** Parsed user profiles (from ~/.pi/agent/profiles/*.md). */
+  userProfiles?: ModelProfile[];
+  /** Parsed project profiles (from .pi/profiles/*.md). Only used when projectTrusted. */
+  projectProfiles?: ModelProfile[];
+  /** Whether project trust is active. If false, projectProfiles are ignored. */
+  projectTrusted: boolean;
+};
+
+/** Diagnostic warnings produced during library building. */
+export type ProfileLibraryBuildWarning = {
+  code: string;
+  message: string;
+};
+
+/** Result of building the full profile library. */
+export type ProfileLibraryBuildResult = {
+  library: ModelProfileLibrary;
+  warnings: ProfileLibraryBuildWarning[];
+};
+
+/**
+ * Build the full profile library merging built-in, user, and project profiles
+ * with precedence: built-in > user > project.
+ *
+ * Shadowed profiles (same name from lower-precedence source) are excluded
+ * from the library and reported as warnings.
+ *
+ * Invalid profiles (caught by caller before passing in) are not included.
+ * Project profiles are only included when projectTrusted is true.
+ */
+export function buildProfileLibrary(options: BuildProfileLibraryOptions): ProfileLibraryBuildResult {
+  const builtIns = listBuiltInProfiles();
+  const users = options.userProfiles ?? [];
+  const projects = options.projectTrusted ? (options.projectProfiles ?? []) : [];
+
+  const warnings: ProfileLibraryBuildWarning[] = [];
+  const byName = new Map<string, ModelProfile>();
+
+  // Insert in reverse precedence order so higher-precedence overwrites
+  // Project first (lowest), then user, then built-ins (highest)
+  for (const p of projects) {
+    const withSource = { ...p, sourceOrigin: "project" as const };
+    if (!byName.has(p.name)) byName.set(p.name, withSource);
+  }
+  for (const p of users) {
+    const withSource = { ...p, sourceOrigin: "user" as const };
+    if (byName.has(p.name)) {
+      warnings.push({ code: "profile-name-shadowed", message: `user profile '${p.name}' shadows project profile` });
+    }
+    byName.set(p.name, withSource);
+  }
+  for (const p of builtIns) {
+    const withSource = { ...p, sourceOrigin: "built-in" as const };
+    if (byName.has(p.name)) {
+      warnings.push({ code: "profile-name-shadowed", message: `built-in profile '${p.name}' shadows user or project profile` });
+    }
+    byName.set(p.name, withSource);
+  }
+
+  // Build library in precedence order: built-ins first, then user, then project
+  // Use the final entries from byName (which have sourceOrigin set)
+  const allProfiles = [...byName.values()];
+  const builtInProfiles = allProfiles.filter((p) => p.sourceOrigin === "built-in");
+  const userProfiles = allProfiles.filter((p) => p.sourceOrigin === "user");
+  const projectProfiles = allProfiles.filter((p) => p.sourceOrigin === "project");
+
+  const library = deepFreeze({
+    profiles: [...builtInProfiles, ...userProfiles, ...projectProfiles],
+  });
+
+  return { library, warnings };
 }

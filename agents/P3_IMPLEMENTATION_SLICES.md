@@ -20,16 +20,16 @@ Completed and merged:
 - P3c-1: JSONL monitor/parser and child argv builder, PR #26, commit `dddb726`
 - P3c-2: command-only built-in child execution, PR #27, commit `6c7d885`
 - P3c-3: registered user/project execution, PR #28, commit `b72d531`
+- P3c-4: ephemeral one-shot agents, PR #30, commit `72e62bf`
+- P3d-1: run_subagent single-run LLM-callable tool, PR #33, commit `729cbc9`
+- P3f-1: model profiles pure helpers, PR #31, commit `6a492b7`
+- P3G: child tool-context-loader JIT, PR #34, commit `c09ac5e`
+- P3f-2: model profiles wiring, PR #35, commit `8c7243a`
 
 Current slices:
 
-- P3d-1: `run_subagent` single-run LLM-callable tool — implemented locally, opus-4.8 reviewed `go`, ready for PR/merge
-- P3d-2: command-only chain mode (next after P3d-1 merge)
-- P3f-2: model profiles wiring (parallel option after P3f-1 merge)
-
-P3c-4 (ephemeral one-shot agents) merged in PR #30 (commit `72e62bf`). P3f-1 (model profiles pure helpers) merged in PR #31 (commit `6a492b7`).
-
-Hard stops: P3c-4 is limited to run-temp and save-temp flows under explicit user request only, with read-only base roles, prompt scanning, no persistence on run, save does not register, and no `run_subagent` prompt override. P3f-1 is new files only (`agents/lib/profiles.ts`), zero changes to existing files, and does NOT add `AgentSpec.profile` (deferred to P3f-2).
+- P3d-2: command-only chain mode (next priority)
+- P3f-3: model profiles file discovery + hash-registration (parallel option)
 
 ## Slice Rules
 
@@ -55,9 +55,9 @@ Hard stops: P3c-4 is limited to run-temp and save-temp flows under explicit user
 | P3c-3 | Registered user/project execution | run command + registry integration tests | `/agents run <registered-user-agent>` and `<registered-project-agent>` through `canRunAgent` | Runtime hash recheck; project trust check; registered spec smoke where possible | No unregistered specs; no chain/tool exposure expansion |
 | P3c-4 | Ephemeral one-shot agents ✅ | temp-agent handlers/tests | `/agents run-temp`; `/agents save-temp`; scan prompt; save does not register | Dangerous/suspicious prompt tests; no persistence on run; saved spec blocked until registered | No `run_subagent` prompt override |
 | P3f-1 | Model profiles — pure helpers ✅ | `agents/lib/profiles.ts`, `agents/test-fixtures/test-profiles.mjs` | `ModelProfile` type, `resolveSpecProfile` (profile-as-authority), `validateProfile` (11 checks + 4 forbidden-field), `validateProfileLibrary`, built-in capability profiles | Pure helper tests (full contract coverage); `git diff --stat` on 10 existing files = empty | No wiring, no `AgentSpec.profile` field, no file discovery, no override-map tests |
-| P3f-2 | Model profiles — wiring | `agents/index.ts`, `specs.ts`, `agent-markdown.ts`, `child-runner.ts`, `diagnostics.ts`, `registration.ts`, `registry.ts` | `AgentSpec.profile` field; `profile` in accepted keys; resolution wired into `runChildAgent`; `/agents profiles` with hashes; effective vs declared in inspect; doctor checks; observability metadata | Wiring tests; profile hash visibility; doctor flags unresolved refs + hash drift; no runtime trust enforcement | No user/project profile file discovery; no profile hash registration; trust gap accepted until P3f-3 |
+| P3f-2 | Model profiles — wiring ✅ | `agents/index.ts`, `specs.ts`, `agent-markdown.ts`, `child-runner.ts`, `diagnostics.ts`, `registration.ts`, `registry.ts` | `AgentSpec.profile` field; `profile` in accepted keys; resolution wired into `runChildAgent`; `/agents profiles` with hashes; effective vs declared in inspect; doctor checks; observability metadata | Wiring tests; profile hash visibility; doctor flags unresolved refs + hash drift; no runtime trust enforcement | No user/project profile file discovery; no profile hash registration; trust gap accepted until P3f-3 |
 | P3f-3 | Model profiles — file discovery + hash-registration | profile file parser/discovery, registry, diagnostics | User/project profile file discovery; project trust gating; hash-register project profiles in registry; profile-change re-registration flow | File parsing caps; hash-registration prevents unregistered profile changes; re-registration tests | None — closes the trust gap |
-| P3d-1 | `run_subagent` single-run tool ✅ local | tool registration/tests | Model-callable single read-only run; same gate; child excludes `run_subagent`; no prompt override; redacted tool result details | Tool schema/gate/recursion/redaction tests; P3c regressions; opus-4.8 review `go` | No chain/parallel/write/bash |
+| P3d-1 | `run_subagent` single-run tool ✅ | tool registration/tests | Model-callable single read-only run; same gate; child excludes `run_subagent`; no prompt override; redacted tool result details | Tool schema/gate/recursion/redaction tests; P3c regressions; opus-4.8 review `go` | No chain/parallel/write/bash |
 | P3d-2 | Command-only chain mode | chain handler/tests | `/agents chain`; max length 3; preflight all agents; bounded prior-summary handoff | Chain preflight failure tests; handoff bounds tests | No chain via `run_subagent` |
 | P3e | Docs, local eval command, smoke | `agents/README.md`, eval docs/tests | README; local eval command docs; smoke commands; validation notes | `pi --no-extensions -e ./agents/index.ts --list-models`; local eval command | No new runtime capabilities |
 
@@ -273,7 +273,7 @@ Constraints:
 
 ### P3d-1: `run_subagent` single-run tool
 
-Status: implemented locally and reviewed by opus-4.8 with final verdict `go`.
+Status: merged in PR #33 at commit `729cbc9`.
 
 Goal: expose safe LLM-callable delegation after command path is proven.
 
@@ -313,7 +313,7 @@ Implement:
 
 ### P3f-1: Model profiles — pure helpers
 
-Status: planned (agents/P3F_MODEL_PROFILES.md). Three adversarial reviews, unanimous conditional-go. Can start in parallel with P3c-4.
+Status: merged in PR #31 at commit `6a492b7`.
 
 Goal: define profile model, validation, and resolution as pure helpers in a new file.
 
@@ -339,6 +339,8 @@ Do not implement:
 - Wiring, commands, or file discovery
 
 ### P3f-2: Model profiles — wiring
+
+Status: merged in PR #35 at commit `8c7243a`.
 
 Goal: wire profile resolution into the agent execution path.
 

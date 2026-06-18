@@ -5,6 +5,8 @@ import { buildChildPiArgs, type ChildPiArgsOptions, type ChildPiInvocation } fro
 import { reduceChildJsonl, type ChildJsonlSummary } from "./jsonl-monitor.ts";
 import { getBuiltInAgentSpec, isReservedBuiltInAgentName, type AgentSpec } from "./specs.ts";
 import { resolveSpecProfile, type ModelProfileLibrary } from "./profiles.ts";
+import { profileTrustCheck } from "./profile-discovery.ts";
+import type { ProjectAgentRegistry } from "./registry.ts";
 
 export type ChildAgentRunStatus = "completed" | "failed" | "timed-out" | "output-limit-exceeded" | "spawn-error";
 
@@ -50,6 +52,8 @@ export type RunBuiltInChildAgentOptions = ChildPiArgsOptions & {
 	maxResultChars?: number;
 	killSignal?: NodeJS.Signals | string;
 	forceKillAfterMs?: number;
+	projectTrusted?: boolean;
+	projectRegistry?: ProjectAgentRegistry;
 };
 
 export type RunChildAgentOptions = RunBuiltInChildAgentOptions;
@@ -75,6 +79,42 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 		const result = resolveSpecProfile({ model: spec.model, thinking: spec.thinking, profile: spec.profile }, profiles);
 		if (!result.resolved) {
 			return spawnErrorResult(spec.name, buildChildPiArgs(spec, task, options), new Error(result.error.message));
+		}
+		// P3f-3: Profile trust check for project-source profiles
+		if (result.profileSourceOrigin === "project") {
+			if (!result.profileCanonicalPath || !result.profileRawBytesSha256) {
+				return {
+					agentName: spec.name,
+					status: "spawn-error" as const,
+					durationMs: 0, stdoutBytes: 0, stderrPreview: "",
+					invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin" as const, stdinText: "" } },
+					summary: { summaryText: "", toolCalls: [], errors: [], usage: undefined, cost: undefined, stopReason: undefined, model: undefined, provider: undefined, truncation: {} },
+					timedOut: false, outputLimitExceeded: false,
+					error: "project profile missing canonicalPath or rawBytesSha256 metadata",
+				};
+			}
+			const trustCheck = profileTrustCheck(
+				result.profileName!,
+				result.profileCanonicalPath!,
+				result.profileRawBytesSha256!,
+				options.projectRegistry,
+				options.projectTrusted ?? false,
+			);
+			if (!trustCheck.ok) {
+				// Deny without calling buildChildPiArgs — trust check failed before profile was applied
+				return {
+					agentName: spec.name,
+					status: "spawn-error" as const,
+					durationMs: 0,
+					stdoutBytes: 0,
+					stderrPreview: "",
+					invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin" as const, stdinText: "" } },
+					summary: { summaryText: "", toolCalls: [], errors: [], usage: undefined, cost: undefined, stopReason: undefined, model: undefined, provider: undefined, truncation: {} },
+					timedOut: false,
+					outputLimitExceeded: false,
+					error: trustCheck.message,
+				};
+			}
 		}
 		resolvedProfile = result.profileName;
 		resolvedModel = result.effectiveModel;
