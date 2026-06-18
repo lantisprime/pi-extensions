@@ -28,11 +28,12 @@ Completed and merged:
 - P3d-2: command-only chain mode, PR #36, commit `bf1a240`
 - P3f-3: profile file discovery + hash-registration, PR #37, commit `4f0a87b`
 
-Current slice:
+Current slices:
 
 - P3e: docs, README, user manual, smoke, PR #38, commit `04695e6`
-
-P3 agent scaffold complete. No remaining slices.
+- P3f-4: runtime profile override + stdout spill, PR #41, commit `4473431`
+- P4: background agents (planning — agents/docs/P4_BACKGROUND_AGENTS_PLAN.md)
+- P5: pluggable terminal backend (planning — agents/docs/P5_PLUGGABLE_TERMINAL_BACKEND.md)
 
 ## Slice Rules
 
