@@ -30,11 +30,21 @@ export type AgentRegistry = {
 	version: 1;
 	updatedAt: string;
 	agents: RegisteredAgent[];
+	profiles?: RegisteredProfile[];
 };
 
 export type ProjectAgentRegistry = AgentRegistry & {
 	projectRoot: string;
 	projectRootHash: string;
+};
+
+export type RegisteredProfile = {
+	name: string;
+	source: "user" | "project";
+	canonicalPath: string;
+	rawBytesSha256: string;
+	approvedAt: string;
+	approvedBy: "user";
 };
 
 export type CreateRegisteredAgentOptions = {
@@ -85,7 +95,7 @@ export async function getProjectRegistryPaths(projectRoot: string, homeDir = os.
 }
 
 export function emptyUserRegistry(now = new Date().toISOString()): AgentRegistry {
-	return { version: AGENT_REGISTRY_VERSION, updatedAt: now, agents: [] };
+	return { version: AGENT_REGISTRY_VERSION, updatedAt: now, agents: [], profiles: [] };
 }
 
 export function emptyProjectRegistry(projectRoot: string, projectRootHash: string, now = new Date().toISOString()): ProjectAgentRegistry {
@@ -119,6 +129,32 @@ export function addOrReplaceRegisteredAgent<T extends AgentRegistry>(registry: T
 			entry,
 		].sort(compareRegisteredAgents),
 	};
+}
+
+export function addOrReplaceRegisteredProfile<T extends AgentRegistry>(registry: T, entry: RegisteredProfile, now = new Date().toISOString()): T {
+	const profiles = registry.profiles ?? [];
+	return {
+		...registry,
+		updatedAt: now,
+		profiles: [
+			...profiles.filter((p) => !(p.source === entry.source && p.name === entry.name && p.canonicalPath === entry.canonicalPath)),
+			entry,
+		].sort(compareRegisteredProfiles),
+	};
+}
+
+export function findMatchingRegisteredProfile(registry: AgentRegistry, candidate: { name: string; source: "user" | "project"; canonicalPath: string; rawBytesSha256: string }): RegisteredProfile | undefined {
+	const profiles = registry.profiles ?? [];
+	return profiles.find((p) =>
+		p.name === candidate.name &&
+		p.source === candidate.source &&
+		p.canonicalPath === candidate.canonicalPath &&
+		p.rawBytesSha256 === candidate.rawBytesSha256,
+	);
+}
+
+export function registeredProfileCount(registry: AgentRegistry): number {
+	return (registry.profiles ?? []).length;
 }
 
 export async function createRegisteredAgentFromParsed(parsed: ParsedAgentMarkdown, options: CreateRegisteredAgentOptions = {}): Promise<RegisteredAgent> {
@@ -216,6 +252,7 @@ function normalizeUserRegistry(registry: AgentRegistry): AgentRegistry {
 		version: AGENT_REGISTRY_VERSION,
 		updatedAt: registry.updatedAt ?? new Date().toISOString(),
 		agents: [...(registry.agents ?? [])].sort(compareRegisteredAgents),
+		profiles: [...(registry.profiles ?? [])].sort(compareRegisteredProfiles),
 	};
 }
 
@@ -228,5 +265,9 @@ function normalizeProjectRegistry(registry: ProjectAgentRegistry): ProjectAgentR
 }
 
 function compareRegisteredAgents(left: RegisteredAgent, right: RegisteredAgent): number {
+	return `${left.source}\0${left.name}\0${left.canonicalPath}`.localeCompare(`${right.source}\0${right.name}\0${right.canonicalPath}`);
+}
+
+function compareRegisteredProfiles(left: RegisteredProfile, right: RegisteredProfile): number {
 	return `${left.source}\0${left.name}\0${left.canonicalPath}`.localeCompare(`${right.source}\0${right.name}\0${right.canonicalPath}`);
 }

@@ -5,6 +5,8 @@ import { buildChildPiArgs, type ChildPiArgsOptions, type ChildPiInvocation } fro
 import { reduceChildJsonl, type ChildJsonlSummary } from "./jsonl-monitor.ts";
 import { getBuiltInAgentSpec, isReservedBuiltInAgentName, type AgentSpec } from "./specs.ts";
 import { resolveSpecProfile, type ModelProfileLibrary } from "./profiles.ts";
+import { profileTrustCheck } from "./profile-discovery.ts";
+import type { ProjectAgentRegistry } from "./registry.ts";
 
 export type ChildAgentRunStatus = "completed" | "failed" | "timed-out" | "output-limit-exceeded" | "spawn-error";
 
@@ -50,6 +52,8 @@ export type RunBuiltInChildAgentOptions = ChildPiArgsOptions & {
 	maxResultChars?: number;
 	killSignal?: NodeJS.Signals | string;
 	forceKillAfterMs?: number;
+	projectTrusted?: boolean;
+	projectRegistry?: ProjectAgentRegistry;
 };
 
 export type RunChildAgentOptions = RunBuiltInChildAgentOptions;
@@ -75,6 +79,19 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 		const result = resolveSpecProfile({ model: spec.model, thinking: spec.thinking, profile: spec.profile }, profiles);
 		if (!result.resolved) {
 			return spawnErrorResult(spec.name, buildChildPiArgs(spec, task, options), new Error(result.error.message));
+		}
+		// P3f-3: Profile trust check for project-source profiles
+		if (result.profileSourceOrigin === "project") {
+			const trustCheck = profileTrustCheck(
+				result.profileName!,
+				undefined,
+				"",
+				options.projectRegistry,
+				options.projectTrusted ?? false,
+			);
+			if (!trustCheck.ok) {
+				return spawnErrorResult(spec.name, buildChildPiArgs(spec, task, options), new Error(trustCheck.message));
+			}
 		}
 		resolvedProfile = result.profileName;
 		resolvedModel = result.effectiveModel;
