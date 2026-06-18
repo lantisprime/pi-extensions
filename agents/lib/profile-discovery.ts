@@ -155,6 +155,8 @@ export async function parseProfileFile(
 		...(mergedMetadata.model !== undefined ? { model: mergedMetadata.model as string } : {}),
 		...(mergedMetadata.thinking !== undefined ? { thinking: mergedMetadata.thinking as ModelProfile["thinking"] } : {}),
 		...(mergedMetadata.purpose !== undefined ? { purpose: mergedMetadata.purpose as string } : {}),
+		sourceOrigin: source,
+		rawBytesSha256,
 	};
 
 	return baseResult({ rawBytesSha256, profile, issues, warnings, unknownKeys: rawUnknownKeys });
@@ -306,6 +308,23 @@ export function profileTrustCheck(
 	const profiles = projectRegistry.profiles ?? [];
 	if (!Array.isArray(profiles)) {
 		return { ok: false, code: "profile-registry-corrupt", message: "project registry profiles field is malformed" };
+	}
+
+	// Validate each entry is well-formed
+	for (let i = 0; i < profiles.length; i++) {
+		const entry = profiles[i];
+		if (!entry || typeof entry !== "object") {
+			return { ok: false, code: "profile-registry-corrupt", message: `project registry profile entry ${i} is not an object` };
+		}
+		if (typeof entry.name !== "string" || entry.name.length === 0) {
+			return { ok: false, code: "profile-registry-corrupt", message: `project registry profile entry ${i} has invalid name` };
+		}
+		if (typeof entry.canonicalPath !== "string" || entry.canonicalPath.length === 0) {
+			return { ok: false, code: "profile-registry-corrupt", message: `project registry profile entry ${i} has invalid canonicalPath` };
+		}
+		if (typeof entry.rawBytesSha256 !== "string" || entry.rawBytesSha256.length === 0) {
+			return { ok: false, code: "profile-registry-corrupt", message: `project registry profile entry ${i} has invalid rawBytesSha256` };
+		}
 	}
 
 	// Find matching entry by name + canonicalPath + hash

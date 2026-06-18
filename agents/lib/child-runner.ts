@@ -84,13 +84,25 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 		if (result.profileSourceOrigin === "project") {
 			const trustCheck = profileTrustCheck(
 				result.profileName!,
-				undefined,
-				"",
+				result.profileCanonicalPath,
+				result.profileRawBytesSha256 ?? "",
 				options.projectRegistry,
 				options.projectTrusted ?? false,
 			);
 			if (!trustCheck.ok) {
-				return spawnErrorResult(spec.name, buildChildPiArgs(spec, task, options), new Error(trustCheck.message));
+				// Deny without calling buildChildPiArgs — trust check failed before profile was applied
+				return {
+					agentName: spec.name,
+					status: "spawn-error" as const,
+					durationMs: 0,
+					stdoutBytes: 0,
+					stderrPreview: "",
+					invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin" as const, stdinText: "" } },
+					summary: { summaryText: "", toolCalls: [], errors: [], usage: undefined, cost: undefined, stopReason: undefined, model: undefined, provider: undefined, truncation: {} },
+					timedOut: false,
+					outputLimitExceeded: false,
+					error: trustCheck.message,
+				};
 			}
 		}
 		resolvedProfile = result.profileName;
