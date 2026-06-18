@@ -21,6 +21,7 @@ export type RegisteredAgent = {
 	tools: string[];
 	model?: string;
 	thinking?: ThinkingLevel;
+	profile?: string;
 	evalStatus: AgentEvalStatus;
 	scannerRisk: RiskLevel;
 };
@@ -155,6 +156,7 @@ export function createRegisteredAgent(spec: AgentSpec, options: {
 		tools: [...spec.tools],
 		...(spec.model ? { model: spec.model } : {}),
 		...(spec.thinking ? { thinking: spec.thinking } : {}),
+		...(spec.profile ? { profile: spec.profile } : {}),
 		evalStatus: options.evalStatus ?? evalStatusForSpec(spec),
 		scannerRisk: options.scannerRisk,
 	};

@@ -4,6 +4,7 @@ import { Buffer } from "node:buffer";
 import { buildChildPiArgs, type ChildPiArgsOptions, type ChildPiInvocation } from "./child-args.ts";
 import { reduceChildJsonl, type ChildJsonlSummary } from "./jsonl-monitor.ts";
 import { getBuiltInAgentSpec, isReservedBuiltInAgentName, type AgentSpec } from "./specs.ts";
+import { resolveSpecProfile, type ModelProfileLibrary } from "./profiles.ts";
 
 export type ChildAgentRunStatus = "completed" | "failed" | "timed-out" | "output-limit-exceeded" | "spawn-error";
 
@@ -21,6 +22,9 @@ export type ChildAgentRunResult = {
 	timedOut: boolean;
 	outputLimitExceeded: boolean;
 	error?: string;
+	resolvedProfile?: string;
+	resolvedModel?: string;
+	resolvedThinking?: string;
 };
 
 export type ChildProcessLike = {
@@ -55,15 +59,29 @@ export type ChildAgentRunner = (agent: string | AgentSpec, task: string, options
 const DEFAULT_KILL_SIGNAL: NodeJS.Signals = "SIGTERM";
 const DEFAULT_FORCE_KILL_AFTER_MS = 1_000;
 
-export async function runBuiltInChildAgent(agentName: string, task: string, options: RunBuiltInChildAgentOptions = {}): Promise<ChildAgentRunResult> {
+export async function runBuiltInChildAgent(agentName: string, task: string, options: RunBuiltInChildAgentOptions = {}, profiles?: ModelProfileLibrary): Promise<ChildAgentRunResult> {
 	if (!isReservedBuiltInAgentName(agentName)) throw new Error(`P3c-2 only supports built-in agents: scout, planner, reviewer`);
 	const spec = getBuiltInAgentSpec(agentName);
 	if (!spec || spec.source !== "built-in") throw new Error(`built-in agent '${agentName}' was not found`);
-	return runChildAgent(spec, task, options);
+	return runChildAgent(spec, task, options, profiles);
 }
 
-export async function runChildAgent(spec: AgentSpec, task: string, options: RunChildAgentOptions = {}): Promise<ChildAgentRunResult> {
-	const invocation = buildChildPiArgs(spec, task, options);
+export async function runChildAgent(spec: AgentSpec, task: string, options: RunChildAgentOptions = {}, profiles?: ModelProfileLibrary): Promise<ChildAgentRunResult> {
+	let effectiveSpec = spec;
+	let resolvedProfile: string | undefined;
+	let resolvedModel: string | undefined;
+	let resolvedThinking: string | undefined;
+	if (profiles && spec.profile) {
+		const result = resolveSpecProfile({ model: spec.model, thinking: spec.thinking, profile: spec.profile }, profiles);
+		if (!result.resolved) {
+			return spawnErrorResult(spec.name, buildChildPiArgs(spec, task, options), new Error(result.error.message));
+		}
+		resolvedProfile = result.profileName;
+		resolvedModel = result.effectiveModel;
+		resolvedThinking = result.effectiveThinking;
+		effectiveSpec = { ...spec, model: resolvedModel, thinking: resolvedThinking };
+	}
+	const invocation = buildChildPiArgs(effectiveSpec, task, options);
 	const stdoutLimit = options.maxStdoutBytes ?? spec.limits.maxStdoutBytes;
 	const stderrLimit = options.maxStderrChars ?? spec.limits.maxStderrChars;
 	const timeoutMs = options.timeoutMs ?? spec.limits.timeoutMs;
@@ -76,7 +94,7 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 			await fs.writeFile(invocation.promptTransport.path, invocation.promptTransport.fileText, { mode: 0o600, flag: "wx" });
 			promptFileCreated = true;
 		}
-		return await spawnAndCollect(spec.name, invocation, {
+		return await spawnAndCollect(effectiveSpec.name, invocation, {
 			cwd: options.cwd,
 			env: options.env,
 			spawn: options.spawn ?? defaultSpawner,
@@ -88,6 +106,9 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 			maxResultChars: options.maxResultChars ?? spec.limits.maxResultChars,
 			killSignal,
 			forceKillAfterMs,
+			resolvedProfile,
+			resolvedModel,
+			resolvedThinking,
 		});
 	} finally {
 		if (promptFileCreated && invocation.promptTransport.kind === "private-temp-file" && invocation.promptTransport.cleanup) {
@@ -102,6 +123,7 @@ export function formatChildAgentRunResult(result: ChildAgentRunResult): string {
 		`status: ${result.status}${result.exitCode !== undefined ? ` exit=${result.exitCode}` : ""}${result.signal ? ` signal=${result.signal}` : ""} durationMs=${result.durationMs}`,
 		`command: ${[result.invocation.command, ...result.invocation.argvPreview].join(" ")}`,
 	];
+	if (result.resolvedProfile) lines.push(`resolvedProfile: ${result.resolvedProfile}${result.resolvedModel ? ` model=${result.resolvedModel}` : ""}${result.resolvedThinking ? ` thinking=${result.resolvedThinking}` : ""}`);
 	if (result.error) lines.push(`error: ${result.error}`);
 	if (result.stderrPreview) lines.push(`stderr: ${result.stderrPreview}`);
 	if (result.summary.errors.length > 0) lines.push(`jsonl warnings: ${result.summary.errors.slice(0, 5).join("; ")}`);
@@ -219,6 +241,9 @@ async function spawnAndCollect(agentName: string, invocation: ChildPiInvocation,
 				timedOut,
 				outputLimitExceeded,
 				...(details.error ? { error: details.error } : {}),
+				...(options.resolvedProfile ? { resolvedProfile: options.resolvedProfile } : {}),
+				...(options.resolvedModel ? { resolvedModel: options.resolvedModel } : {}),
+				...(options.resolvedThinking ? { resolvedThinking: options.resolvedThinking } : {}),
 			});
 		};
 		timer = setTimeout(() => {

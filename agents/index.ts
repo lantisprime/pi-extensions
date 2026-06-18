@@ -10,6 +10,7 @@ export * from "./lib/diagnostics.ts";
 export * from "./lib/ephemeral.ts";
 export * from "./lib/jsonl-monitor.ts";
 export * from "./lib/registration.ts";
+export * from "./lib/profiles.ts";
 export { executeChildRun, nextStepForRunBlock, parseRunArgs, resolveRegisteredRunTarget, runAgentCommand, type AgentsContextLike, type RunnableRegisteredRecord } from "./lib/run-resolver.ts";
 
 import { buildProjectAgentRecommendation, collectAgentDiagnostics, formatAgentInspect, formatAgentsConfig, formatAgentsDoctor, formatAgentsList, formatAgentsRegistry, formatAgentsVerify } from "./lib/diagnostics.ts";
@@ -18,8 +19,10 @@ import { registerAgent, registerProjectAgents, unregisterAgent } from "./lib/reg
 import { runAgentCommand } from "./lib/run-resolver.ts";
 import { validateBuiltInAgentSpecs } from "./lib/specs.ts";
 import { registerSubagentTool } from "./lib/subagent-tool.ts";
+import { formatBuiltInProfilesList, toProfileLibrary, type ModelProfileLibrary } from "./lib/profiles.ts";
 
 const shownProjectRecommendationKeys = new Set<string>();
+const profileLibrary = toProfileLibrary();
 
 type AgentsContext = {
 	cwd?: string;
@@ -41,6 +44,7 @@ export default function agentsExtension(pi: ExtensionAPI) {
 	let sessionAgentsCtx: AgentsContext | undefined;
 	eventApi.on?.("session_start", async (_event, ctx) => {
 		sessionAgentsCtx = ctx;
+		ctx.profileLibrary = profileLibrary;
 		if (!ctx.hasUI) return;
 		await maybeNotifyProjectRecommendation(ctx, false);
 	});
@@ -50,7 +54,7 @@ export default function agentsExtension(pi: ExtensionAPI) {
 	pi.registerCommand("agents", {
 		description: "Show P3 agent diagnostics and run built-in or registered agents",
 		getArgumentCompletions: (prefix: string) => {
-			const options = ["list", "built-ins", "config", "inspect", "registry", "verify", "doctor", "register", "register-project", "unregister", "run", "run-temp", "save-temp"];
+			const options = ["list", "built-ins", "config", "inspect", "registry", "verify", "doctor", "register", "register-project", "unregister", "run", "run-temp", "save-temp", "profiles"];
 			const trimmed = prefix.trim();
 			const filtered = options.filter((option) => option.startsWith(trimmed));
 			return filtered.length > 0 ? filtered.map((value) => ({ value, label: value })) : null;
@@ -104,7 +108,11 @@ export default function agentsExtension(pi: ExtensionAPI) {
 				ctx.ui.notify(result.message, result.status === "unregistered" ? "info" : "warning");
 				return;
 			}
-			if (parsed.action === "run") {
+			if (parsed.action === "profiles") {
+				ctx.ui.notify(`Agent profiles:\n${formatBuiltInProfilesList()}`, "info");
+				return;
+			}
+		if (parsed.action === "run") {
 				await runAgentCommand(parsed.rest, ctx, diagnostics);
 				return;
 			}
@@ -120,7 +128,7 @@ export default function agentsExtension(pi: ExtensionAPI) {
 				await saveTempCommand(parsed.rest, ephCtx, { projectTrusted: diagnostics.projectTrusted, userAgentsDir });
 				return;
 			}
-			ctx.ui.notify("Usage: /agents [list|built-ins|config|inspect <name>|registry|verify|doctor|register <path-or-name>|register-project [--all-safe]|unregister <name>|run <agent> <task>|run-temp <scout|planner|reviewer> <task>|save-temp <name>].", "warning");
+			ctx.ui.notify("Usage: /agents [list|built-ins|config|inspect <name>|registry|verify|doctor|register <path-or-name>|register-project [--all-safe]|unregister <name>|run <agent> <task>|run-temp <scout|planner|reviewer> <task>|save-temp <name>|profiles].", "warning");
 		},
 	});
 }
