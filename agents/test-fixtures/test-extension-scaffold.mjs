@@ -9,6 +9,7 @@ const agentsExtension = typeof extensionModule.default === "function" ? extensio
 async function makeHarness() {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "agents-ext-"));
 	const commands = new Map();
+	const tools = new Map();
 	const events = new Map();
 	const notifications = [];
 	const confirmations = [];
@@ -16,6 +17,9 @@ async function makeHarness() {
 	const pi = {
 		registerCommand(name, definition) {
 			commands.set(name, definition);
+		},
+		registerTool(definition) {
+			tools.set(definition.name, definition);
 		},
 		on(name, handler) {
 			events.set(name, handler);
@@ -39,7 +43,7 @@ async function makeHarness() {
 		},
 	};
 	await fs.mkdir(ctx.cwd, { recursive: true });
-	return { commands, events, notifications, confirmations, confirmCalls, pi, ctx, root };
+	return { commands, tools, events, notifications, confirmations, confirmCalls, pi, ctx, root };
 }
 
 async function cleanup(harness) {
@@ -368,8 +372,49 @@ async function testProactiveProjectRecommendationDedupe() {
 	}
 }
 
+async function testSubagentToolIsRegistered() {
+	const harness = await makeHarness();
+	try {
+		agentsExtension(harness.pi);
+		assert.equal(harness.tools.has("run_subagent"), true, "run_subagent tool must be registered via pi.registerTool");
+		const tool = harness.tools.get("run_subagent");
+		assert.equal(tool.name, "run_subagent");
+		assert.ok(tool.description, "tool must have a description");
+		assert.ok(Array.isArray(tool.promptGuidelines) && tool.promptGuidelines.length > 0, "tool must have promptGuidelines");
+		// Schema: only agent + task, no other properties allowed
+		assert.equal(tool.parameters.properties.agent.type, "string");
+		assert.equal(tool.parameters.properties.task.type, "string");
+		assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ["agent", "task"], "schema must only have agent+task");
+		assert.equal(tool.parameters.additionalProperties, false, "schema must reject additional properties");
+	} finally {
+		await cleanup(harness);
+	}
+}
+
+async function testSubagentToolNotReadyWhenSessionContextMissing() {
+	const harness = await makeHarness();
+	try {
+		agentsExtension(harness.pi);
+		// Do NOT fire session_start, so sessionAgentsCtx remains undefined
+		const tool = harness.tools.get("run_subagent");
+		const result = await tool.execute("call-id-1", { agent: "scout", task: "inspect foo" }, undefined, undefined, {
+			cwd: harness.ctx.cwd,
+			hasUI: true,
+			isProjectTrusted: () => false,
+			ui: { notify: () => {} },
+		});
+		assert.equal(result.isError, true);
+		const text = result.content[0].text;
+		assert.match(text, /session context not ready|not-ready/);
+	} finally {
+		await cleanup(harness);
+	}
+}
+
 async function main() {
 	await testCommandRegistrationAndListPath();
+	await testSubagentToolIsRegistered();
+	await testSubagentToolNotReadyWhenSessionContextMissing();
 	await testDiagnosticsCommands();
 	await testVerifyPath();
 	await testRunRejectsUndiscoveredRegisteredAgentWithoutRunner();

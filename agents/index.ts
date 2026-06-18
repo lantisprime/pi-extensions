@@ -10,25 +10,14 @@ export * from "./lib/diagnostics.ts";
 export * from "./lib/ephemeral.ts";
 export * from "./lib/jsonl-monitor.ts";
 export * from "./lib/registration.ts";
+export { executeChildRun, nextStepForRunBlock, parseRunArgs, resolveRegisteredRunTarget, runAgentCommand, type AgentsContextLike, type RunnableRegisteredRecord } from "./lib/run-resolver.ts";
 
-import { parseAgentMarkdownFile } from "./lib/agent-markdown.ts";
-import { canRunAgent } from "./lib/can-run-agent.ts";
-import {
-	buildProjectAgentRecommendation,
-	collectAgentDiagnostics,
-	formatAgentInspect,
-	formatAgentsConfig,
-	formatAgentsDoctor,
-	formatAgentsList,
-	formatAgentsRegistry,
-	formatAgentsVerify,
-	type AgentDiagnosticRecord,
-	type AgentDiagnostics,
-} from "./lib/diagnostics.ts";
-import { formatChildAgentRunResult, runBuiltInChildAgent, runChildAgent, type ChildAgentRunner } from "./lib/child-runner.ts";
+import { buildProjectAgentRecommendation, collectAgentDiagnostics, formatAgentInspect, formatAgentsConfig, formatAgentsDoctor, formatAgentsList, formatAgentsRegistry, formatAgentsVerify } from "./lib/diagnostics.ts";
 import { runEphemeralCommand, saveTempCommand, type EphemeralRunHandlerContext } from "./lib/ephemeral.ts";
 import { registerAgent, registerProjectAgents, unregisterAgent } from "./lib/registration.ts";
-import { isReservedBuiltInAgentName, validateBuiltInAgentSpecs } from "./lib/specs.ts";
+import { runAgentCommand } from "./lib/run-resolver.ts";
+import { validateBuiltInAgentSpecs } from "./lib/specs.ts";
+import { registerSubagentTool } from "./lib/subagent-tool.ts";
 
 const shownProjectRecommendationKeys = new Set<string>();
 
@@ -37,7 +26,7 @@ type AgentsContext = {
 	hasUI?: boolean;
 	agentsHomeDir?: string;
 	agentsPiCommand?: string;
-	agentsChildRunner?: ChildAgentRunner;
+	agentsChildRunner?: import("./lib/child-runner.ts").ChildAgentRunner;
 	agentsLastEphemeralSpec?: { spec: import("./lib/specs.ts").AgentSpec; task: string };
 	isProjectTrusted?: () => boolean;
 	ui: {
@@ -48,10 +37,14 @@ type AgentsContext = {
 
 export default function agentsExtension(pi: ExtensionAPI) {
 	const eventApi = pi as ExtensionAPI & { on?: (name: string, handler: (event: unknown, ctx: AgentsContext) => Promise<void> | void) => void };
+	let sessionAgentsCtx: AgentsContext | undefined;
 	eventApi.on?.("session_start", async (_event, ctx) => {
+		sessionAgentsCtx = ctx;
 		if (!ctx.hasUI) return;
 		await maybeNotifyProjectRecommendation(ctx, false);
 	});
+
+	registerSubagentTool(pi, () => sessionAgentsCtx);
 
 	pi.registerCommand("agents", {
 		description: "Show P3 agent diagnostics and run built-in or registered agents",
@@ -129,101 +122,6 @@ export default function agentsExtension(pi: ExtensionAPI) {
 			ctx.ui.notify("Usage: /agents [list|built-ins|config|inspect <name>|registry|verify|doctor|register <path-or-name>|register-project [--all-safe]|unregister <name>|run <agent> <task>|run-temp <scout|planner|reviewer> <task>|save-temp <name>].", "warning");
 		},
 	});
-}
-
-async function runAgentCommand(input: string, ctx: AgentsContext, diagnostics: AgentDiagnostics): Promise<void> {
-	const parsed = parseRunArgs(input);
-	if (!parsed.ok) {
-		ctx.ui.notify(parsed.message, "warning");
-		return;
-	}
-	if (isReservedBuiltInAgentName(parsed.name)) {
-		ctx.ui.notify(`Running built-in agent '${parsed.name}' with read-only tools.`, "info");
-		await executeChildRun(parsed.name, parsed.task, ctx, "built-in");
-		return;
-	}
-
-	const resolved = await resolveRegisteredRunTarget(parsed.name, diagnostics);
-	if (!resolved.ok) {
-		ctx.ui.notify(resolved.message, "warning");
-		return;
-	}
-	const record = resolved.record;
-	let currentParsed: Awaited<ReturnType<typeof parseAgentMarkdownFile>>;
-	try {
-		currentParsed = await parseAgentMarkdownFile(record.filePath, { source: record.source });
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		ctx.ui.notify(`Agent '${parsed.name}' is not runnable: failed to re-read current spec bytes: ${message}. Next: /agents inspect ${parsed.name}`, "warning");
-		return;
-	}
-	if (!currentParsed.spec || currentParsed.status === "invalid" || currentParsed.status === "dangerous" || currentParsed.status === "shadowed") {
-		ctx.ui.notify(`Agent '${parsed.name}' is not runnable: current spec status=${currentParsed.status}. Next: /agents inspect ${parsed.name}`, "warning");
-		return;
-	}
-	const gate = await canRunAgent(
-		{ parsed: currentParsed, canonicalPath: record.canonicalPath },
-		{ projectTrusted: diagnostics.projectTrusted, projectRoot: diagnostics.projectRoot, userRegistry: diagnostics.userRegistry, projectRegistry: diagnostics.projectRegistry, homeDir: ctx.agentsHomeDir },
-	);
-	if (!gate.ok) {
-		ctx.ui.notify(`Agent '${parsed.name}' is not runnable: ${gate.reason}. Next: ${nextStepForRunBlock(record, gate.code)}`, "warning");
-		return;
-	}
-	ctx.ui.notify(`Running registered ${record.source} agent '${currentParsed.spec.name}' with read-only tools.`, "info");
-	await executeChildRun(currentParsed.spec, parsed.task, ctx, record.source);
-}
-
-async function executeChildRun(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContext, source: string): Promise<void> {
-	try {
-		const result = ctx.agentsChildRunner
-			? await ctx.agentsChildRunner(agent, task, { cwd: ctx.cwd, piCommand: ctx.agentsPiCommand })
-			: typeof agent === "string"
-				? await runBuiltInChildAgent(agent, task, { cwd: ctx.cwd, piCommand: ctx.agentsPiCommand })
-				: await runChildAgent(agent, task, { cwd: ctx.cwd, piCommand: ctx.agentsPiCommand });
-		ctx.ui.notify(formatChildAgentRunResult(result), result.status === "completed" ? "info" : "warning");
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		ctx.ui.notify(`Agent run failed before ${source} child execution completed: ${message}`, "error");
-	}
-}
-
-type RunnableRegisteredRecord = AgentDiagnosticRecord & { source: "user" | "project"; spec: NonNullable<AgentDiagnosticRecord["spec"]>; canonicalPath: string; rawBytesSha256: string; filePath: string };
-
-async function resolveRegisteredRunTarget(name: string, diagnostics: AgentDiagnostics): Promise<{ ok: true; record: RunnableRegisteredRecord } | { ok: false; message: string }> {
-	const matches = diagnostics.records.filter((record) => record.source !== "built-in" && record.name === name);
-	if (matches.length === 0) {
-		const trustHint = diagnostics.projectTrusted ? "" : " If this is a project agent, activate project trust first.";
-		return { ok: false, message: `No discovered registered user/project agent named '${name}'. Next: /agents list or /agents register <name>.${trustHint}` };
-	}
-	if (matches.length > 1) {
-		return { ok: false, message: `Agent name '${name}' is ambiguous across discovered user/project specs. Rename one spec before running.` };
-	}
-	const record = matches[0];
-	if (!record.spec || !record.canonicalPath || !record.rawBytesSha256 || !record.filePath || (record.source !== "user" && record.source !== "project")) {
-		return { ok: false, message: `Agent '${name}' cannot run because its spec or trust material is missing. Next: /agents inspect ${name}` };
-	}
-	if (!record.runnable) {
-		return { ok: false, message: `Agent '${name}' is not runnable: ${record.reason}. Next: ${record.nextStep || `/agents inspect ${name}`}` };
-	}
-	return { ok: true, record: record as RunnableRegisteredRecord };
-}
-
-function nextStepForRunBlock(record: AgentDiagnosticRecord, code: string): string {
-	if (record.nextStep) return record.nextStep;
-	if (code === "project-untrusted") return "Activate project trust, then run /agents register-project";
-	if (code === "project-registry-root-mismatch") return "Run /agents doctor";
-	return `/agents inspect ${record.name}`;
-}
-
-function parseRunArgs(input: string): { ok: true; name: string; task: string } | { ok: false; message: string } {
-	const trimmed = input.trim();
-	if (!trimmed) return { ok: false, message: "Usage: /agents run <agent> <task>" };
-	const match = trimmed.match(/^(\S+)\s+([\s\S]+)$/);
-	if (!match) return { ok: false, message: "Usage: /agents run <agent> <task>" };
-	const name = match[1];
-	const task = match[2].trim();
-	if (!task) return { ok: false, message: "Usage: /agents run <agent> <task>" };
-	return { ok: true, name, task };
 }
 
 function parseAgentsArgs(args: string): { action: string; rest: string } {
