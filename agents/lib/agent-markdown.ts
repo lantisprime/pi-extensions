@@ -16,7 +16,7 @@ import {
 } from "./specs.ts";
 import { scanTextForAgentRisk, type AgentRiskScanResult, type RiskLevel, type ScanProvenance } from "./security-scan.ts";
 
-export const AGENT_MARKDOWN_ACCEPTED_KEYS = ["name", "description", "tools", "model", "thinking"] as const;
+export const AGENT_MARKDOWN_ACCEPTED_KEYS = ["name", "description", "tools", "model", "thinking", "profile"] as const;
 export const DEFAULT_AGENT_PARSER_LIMITS: AgentParserLimits = Object.freeze({
 	maxFileBytes: 64 * 1024,
 	maxFrontmatterBytes: 8 * 1024,
@@ -283,6 +283,9 @@ function buildSpecFromMetadata(metadata: Record<string, unknown>, prompt: string
 	if (metadata.thinking !== undefined && typeof metadata.thinking !== "string") {
 		issues.push({ field: "thinking", code: "thinking-invalid", message: "thinking must be a string when provided" });
 	}
+	if (metadata.profile !== undefined && typeof metadata.profile !== "string") {
+		issues.push({ field: "profile", code: "profile-invalid", message: "profile must be a string when provided" });
+	}
 	if (issues.length > 0) return undefined;
 
 	return {
@@ -292,6 +295,7 @@ function buildSpecFromMetadata(metadata: Record<string, unknown>, prompt: string
 		tools: metadata.tools as string[],
 		...(metadata.model ? { model: metadata.model as string } : {}),
 		...(metadata.thinking ? { thinking: metadata.thinking as AgentSpec["thinking"] } : {}),
+		...(metadata.profile ? { profile: metadata.profile as string } : {}),
 		prompt,
 		inputContract: { ...DEFAULT_INPUT_CONTRACT },
 		outputContract: {

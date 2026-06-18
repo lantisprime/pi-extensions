@@ -258,6 +258,7 @@ export function registerSubagentTool(pi: ExtensionAPI, sessionCtxRef: SessionAge
 				piCommand: sessionCtx.agentsPiCommand,
 				childRunner: sessionCtx.agentsChildRunner,
 				explicitToolContextLoaderPath: sessionCtx.explicitToolContextLoaderPath,
+				profileLibrary: sessionCtx.profileLibrary,
 			};
 
 			const outcome = await executeSubagentRun(agent, task, runCtx);

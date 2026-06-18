@@ -168,6 +168,7 @@ export function formatRegistrationReview(parsed: ParsedAgentMarkdown, canonicalP
 		`Tools: ${spec?.tools.join(", ") ?? "invalid"}`,
 		`Model: ${spec?.model ?? "default"}`,
 		`Thinking: ${spec?.thinking ?? "default"}`,
+		`Profile: ${spec?.profile ?? "none"}`,
 		`Evals: ${record?.evalStatus ?? (spec && spec.evals.length > 0 ? "present" : "missing")}`,
 		`Runnable after approval: ${parsed.status === "eligible" || parsed.scannerRisk === "suspicious" ? "yes" : "no"}`,
 		EXACT_HASH_NOTICE,

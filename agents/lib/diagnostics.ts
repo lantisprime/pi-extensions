@@ -18,6 +18,7 @@ import {
 } from "./registry.ts";
 import { listBuiltInAgentSpecs, type AgentSource, type AgentSpec, type AgentValidationIssue } from "./specs.ts";
 import type { RiskLevel } from "./security-scan.ts";
+import { BUILT_IN_PROFILES } from "./profiles.ts";
 
 export const DEFAULT_DIAGNOSTIC_LIMITS = Object.freeze({
 	maxAgentsPerSource: 50,
@@ -131,7 +132,12 @@ export function formatAgentsList(diagnostics: AgentDiagnostics): string {
 	const lines = [
 		"Agents:",
 		`projectTrust: ${diagnostics.projectTrusted ? "active" : "inactive"}`,
-		...diagnostics.records.map((record) => `- ${record.name} [${record.source}] ${statusLabel(record)}; tools=${record.tools.join(",")}; evals=${record.evalStatus}; risk=${record.scannerRisk}${record.nextStep ? `; next=${record.nextStep}` : ""}`),
+		...diagnostics.records.map((record) => {
+			const modelPart = record.spec?.model ? ` model=${record.spec.model}` : "";
+			const thinkingPart = record.spec?.thinking ? ` thinking=${record.spec.thinking}` : "";
+			const profilePart = record.spec?.profile ? ` profile=${record.spec.profile}` : "";
+			return `- ${record.name} [${record.source}] ${statusLabel(record)}; tools=${record.tools.join(",")}${modelPart}${thinkingPart}${profilePart}; evals=${record.evalStatus}; risk=${record.scannerRisk}${record.nextStep ? `; next=${record.nextStep}` : ""}`;
+		}),
 	];
 	if (!diagnostics.projectTrusted) lines.push("Project agents are not scanned until project trust is active.");
 	return boundLines(lines);
@@ -195,6 +201,9 @@ export function formatAgentInspect(diagnostics: AgentDiagnostics, name: string):
 		if (record.filePath) lines.push(`path: ${record.filePath}`);
 		if (record.rawBytesSha256) lines.push(`sha256: ${record.rawBytesSha256}`);
 		lines.push(`tools: ${record.tools.join(",")}`);
+		if (record.spec?.model) lines.push(`model: ${record.spec.model}`);
+		if (record.spec?.thinking) lines.push(`thinking: ${record.spec.thinking}`);
+		if (record.spec?.profile) lines.push(`profile: ${record.spec.profile}${record.spec.profile && !BUILT_IN_PROFILES[record.spec.profile] ? " (unresolved in built-in profiles)" : ""}`);
 		lines.push(`risk: ${record.scannerRisk}`);
 		lines.push(`evals: ${record.evalStatus}`);
 		lines.push(`registered: ${record.registered ? "yes" : "no"}${record.hashMismatch ? " (hash changed)" : ""}`);
@@ -337,6 +346,9 @@ function diagnosticIssues(diagnostics: AgentDiagnostics): string[] {
 		else if (!record.registered) issues.push(`${record.name} [${record.source}] is unregistered. Next: ${record.nextStep}`);
 		if (record.scannerRisk === "suspicious") issues.push(`${record.name} [${record.source}] is suspicious and will require explicit confirmation during registration.`);
 		if (record.evalStatus === "missing") issues.push(`${record.name} [${record.source}] is missing eval metadata.`);
+		if (record.spec?.profile && !BUILT_IN_PROFILES[record.spec.profile]) {
+			issues.push(`${record.name} [${record.source}] profile '${record.spec.profile}' is not a known built-in profile. The agent will fail at runtime.`);
+		}
 	}
 	for (const entry of diagnostics.registryOnlyEntries) issues.push(`${entry.name} [${entry.source}] registry entry has no matching discovered file: ${entry.canonicalPath}`);
 	if (!diagnostics.projectTrusted) issues.push("Project trust inactive; project-local agent discovery is disabled.");

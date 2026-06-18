@@ -68,6 +68,7 @@ export type AgentSpec = {
 	tools: string[];
 	model?: string;
 	thinking?: ThinkingLevel;
+	profile?: string;
 	prompt: string;
 	inputContract: AgentInputContract;
 	outputContract: AgentOutputContract;
@@ -353,7 +354,8 @@ export function formatBuiltInAgentList(specs: readonly AgentSpec[] = listBuiltIn
 		.map((spec) => {
 			const thinking = spec.thinking ? ` thinking=${spec.thinking}` : "";
 			const model = spec.model ? ` model=${spec.model}` : "";
-			return `${spec.name}: ${spec.description} [tools=${spec.tools.join(",")}${model}${thinking}]`;
+			const profile = spec.profile ? ` profile=${spec.profile}` : "";
+			return `${spec.name}: ${spec.description} [tools=${spec.tools.join(",")}${model}${thinking}${profile}]`;
 		})
 		.join("\n");
 }

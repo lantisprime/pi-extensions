@@ -9,6 +9,7 @@ import {
 } from "./diagnostics.ts";
 import { formatChildAgentRunResult, runBuiltInChildAgent, runChildAgent, type ChildAgentRunner } from "./child-runner.ts";
 import { isReservedBuiltInAgentName } from "./specs.ts";
+import type { ModelProfileLibrary } from "./profiles.ts";
 
 export type AgentsContextLike = {
 	cwd?: string;
@@ -17,6 +18,7 @@ export type AgentsContextLike = {
 	agentsPiCommand?: string;
 	agentsChildRunner?: ChildAgentRunner;
 	explicitToolContextLoaderPath?: string;
+	profileLibrary?: ModelProfileLibrary;
 	isProjectTrusted?: () => boolean;
 	ui: {
 		notify(message: string, level?: "info" | "warning" | "error" | string): void;
@@ -76,11 +78,12 @@ export function nextStepForRunBlock(record: AgentDiagnosticRecord, code: string)
 export async function executeChildRun(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string): Promise<void> {
 	try {
 		const childOptions = buildChildRunOptions(ctx);
+		const profiles = ctx.profileLibrary;
 		const result = ctx.agentsChildRunner
 			? await ctx.agentsChildRunner(agent, task, childOptions)
 			: typeof agent === "string"
-				? await runBuiltInChildAgent(agent, task, childOptions)
-				: await runChildAgent(agent, task, childOptions);
+				? await runBuiltInChildAgent(agent, task, childOptions, profiles)
+				: await runChildAgent(agent, task, childOptions, profiles);
 		ctx.ui.notify(formatChildAgentRunResult(result), result.status === "completed" ? "info" : "warning");
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
