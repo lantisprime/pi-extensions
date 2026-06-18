@@ -5,9 +5,9 @@
 The canonical `pi-extensions` workplan now lives in episodic memory as:
 
 - Project: `pi-extensions`
-- Current episode ID: `20260618-032316-canonical-workplan-p3d-2-p3f-3-both-merg-420b`
-- Tags include: `canonical-workplan`, `workplan`, `roadmap`, `p3d2`, `p3e`, `p3f3`
-- Summary: `Canonical workplan: P3d-2 + P3f-3 both merged; P3e next`
+- Current episode ID: `20260618-053434-canonical-workplan-p3e-merged-pr-38-p3-a-822f`
+- Tags include: `canonical-workplan`, `workplan`, `roadmap`, `p3e`, `p3-complete`
+- Summary: `Canonical workplan: P3e merged (PR 38); P3 agent scaffold complete`
 
 To recall it, use episodic memory search for project `pi-extensions` and tag `canonical-workplan`.
 
