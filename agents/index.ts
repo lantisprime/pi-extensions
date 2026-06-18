@@ -83,7 +83,7 @@ export default function agentsExtension(pi: ExtensionAPI) {
 	pi.registerCommand("agents", {
 		description: "Show P3 agent diagnostics and run built-in or registered agents",
 		getArgumentCompletions: (prefix: string) => {
-			const options = ["list", "built-ins", "config", "inspect", "registry", "verify", "doctor", "register", "register-project", "unregister", "run", "run-temp", "save-temp", "profiles"];
+			const options = ["list", "built-ins", "config", "inspect", "registry", "verify", "doctor", "register", "register-project", "unregister", "run", "chain", "run-temp", "save-temp", "profiles"];
 			const trimmed = prefix.trim();
 			const filtered = options.filter((option) => option.startsWith(trimmed));
 			return filtered.length > 0 ? filtered.map((value) => ({ value, label: value })) : null;
@@ -153,7 +153,11 @@ export default function agentsExtension(pi: ExtensionAPI) {
 				ctx.ui.notify(formatProfileList(ctx, diagnostics), "info");
 				return;
 			}
-		if (parsed.action === "run") {
+		if (parsed.action === "chain") {
+				await runChainCommand(parsed.rest, ctx, diagnostics);
+				return;
+			}
+			if (parsed.action === "run") {
 				await runAgentCommand(parsed.rest, ctx, diagnostics);
 				return;
 			}
@@ -169,7 +173,7 @@ export default function agentsExtension(pi: ExtensionAPI) {
 				await saveTempCommand(parsed.rest, ephCtx, { projectTrusted: diagnostics.projectTrusted, userAgentsDir });
 				return;
 			}
-			ctx.ui.notify("Usage: /agents [list|built-ins|config|inspect <name>|registry|verify|doctor|register <path-or-name>|register-project [--all-safe]|unregister <name>|run <agent> <task>|run-temp <scout|planner|reviewer> <task>|save-temp <name>|profiles].", "warning");
+			ctx.ui.notify("Usage: /agents [list|built-ins|config|inspect <name>|registry|verify|doctor|register <path-or-name>|register-project [--all-safe]|unregister <name>|run <agent> <task>|chain <agent>,<agent>[,<agent>] <task>|run-temp <scout|planner|reviewer> <task>|save-temp <name>|profiles].", "warning");
 		},
 	});
 }
