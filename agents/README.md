@@ -68,7 +68,7 @@ No write, edit, bash, or `run_subagent` tools are allowed by default.
 ```
 
 Profiles carry model/capability hints (`model`, `thinking`) and are resolved with
-agent spec precedence: built-in < user < project. Three built-in profiles ship
+agent spec precedence (higher trumps lower): user > built-in, project > user. Three built-in profiles ship
 with the extension: `fast-local`, `reasoning-deep`, `adversarial-review`.
 
 ## Agent spec format
@@ -121,6 +121,9 @@ Maximum chain length: 3.
   Non-TUI mode is fail-closed (no run).
 - `/agents save-temp` — saves for inspection; does not register.
   Saved specs still require explicit registration before running.
+
+If an agent spec sets both `model` and `profile`, the profile takes precedence
+(profile-as-authority resolution).
 
 ## Model profiles
 
