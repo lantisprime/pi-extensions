@@ -6,6 +6,7 @@
 - [P4_BACKGROUND_AGENTS_PLAN_REVIEW.md](./P4_BACKGROUND_AGENTS_PLAN_REVIEW.md) — planner `openai-codex/gpt-5.5`
 - [P4_BACKGROUND_AGENTS_ADVERSARIAL_REVIEW.md](./P4_BACKGROUND_AGENTS_ADVERSARIAL_REVIEW.md) — adversarial `openrouter/anthropic/claude-opus-4-8`
 **Depends on**: P3 agent scaffold (complete)
+**Split**: Tmux integration moved to [P5_PLUGGABLE_TERMINAL_BACKEND_PLAN.md](./P5_PLUGGABLE_TERMINAL_BACKEND_PLAN.md) — agents defines a `TermBgBackend` interface, tmux-terminal extension implements it
 
 ## Objective
 
@@ -126,19 +127,26 @@ are preserved and readable.
 /agents bg-open <id>                  Switch to tmux window
 ```
 
-### Tmux integration
+### Tmux integration (moved to P5)
 
-The parent constructs a tmux command with **only** trusted paths — the worker
-executable path and the manifest path. No task text, agent names, file paths,
-or argv options in the tmux command string:
+The P4 plan originally contained tmux command construction, window naming,
+and terminal-specific code. These have been split into a separate
+**tmux-terminal** extension that implements the `TermBgBackend` interface
+defined in `agents/lib/bg-terminal.ts`.
+
+The parent constructs a command with **only** trusted paths — the worker
+executable path and the manifest path. The terminal backend handles the
+terminal-specific wrapper (tmux, zellij, etc.):
 
 ```
-tmux new-window -d -n "pi-agent-<shortId>" '<worker> <manifestPath>'
+<terminal-backend-launch> '<worker>' '<manifestPath>'
 ```
 
 - `<worker>`: fixed path to the worker script, set at extension load time
 - `<manifestPath>`: absolute path to manifest (random run ID, no injected data)
-- `<shortId>`: first 8 chars of random run ID, derived from UUID, not agent name
+- Terminal backend responsible for window naming, quoting, and launch mechanics
+
+See [P5_PLUGGABLE_TERMINAL_BACKEND_PLAN.md](./P5_PLUGGABLE_TERMINAL_BACKEND_PLAN.md) for the full terminal backend interface.
 
 ### State directory
 
@@ -256,15 +264,10 @@ shown. Prune `events.jsonl` when the run is deleted.
 - Writes redacted `result.json` atomically, writes `done` sentinel
 - **New file only**
 
-### P4-4: bg-tmux.ts — Tmux integration (~80 lines)
+### P4-4: agents/lib/bg-terminal.ts — Backend interface (~30 lines)
 
-- `spawnBgAgent(runId, manifestPath)` → launches tmux window
-- `spawnBgChain(runIds[], manifestPaths[])` → sequential bg chain coordinator
-- Tmux command construction: fixed paths only, no interpolation
-- Fake tmux adapter for tests
-- `killBgAgent(id)` — SIGTERM + `tmux kill-window` fallback
-- `getBgResult(id)` — reads result.json from state dir
-- Completion polling via done sentinel
+- `TermBgBackend` interface: `launch`, `kill`, `isAlive`, `list`
+- `registerBgTerminalBackend(backend)` / `getBgTerminalBackend()` registry
 - **New file only**
 
 ### P4-5: index.ts — Command wiring (~80 lines)
@@ -363,7 +366,7 @@ shown. Prune `events.jsonl` when the run is deleted.
 - [ ] Result redacted via `formatChildAgentRunResult` before write
 - [ ] `events.jsonl` never surfaced raw by any command
 - [ ] State dir 0700, sensitive files 0600
-- [ ] Tmux command contains only trusted paths (no task/name/path interpolation)
+- [ ] Tmux command contains only trusted paths (no task/name/path interpolation) — enforced by TermBgBackend interface
 - [ ] Tmux window name sanitized (`pi-agent-<shortId>`, from UUID)
 - [ ] No cross-agent state leakage
 - [ ] Max concurrent runs enforced with atomic reservation
