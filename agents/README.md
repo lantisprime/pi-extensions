@@ -1,7 +1,9 @@
 # P3 Agents
 
 A Pi extension for defining, registering, vetting, and running constrained
-child agents. Read-only by default. No write, edit, bash, or `run_subagent` in
+child agents. Read-only by default.
+
+> **User Manual**: See [../../docs/USER_MANUAL.md](../../docs/USER_MANUAL.md#registered-custom-agents) for scenario guides. No write, edit, bash, or `run_subagent` in
 child tools unless the spec explicitly re-requests them.
 
 ## Quick smoke

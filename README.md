@@ -2,6 +2,8 @@
 
 This project contains custom [Pi](https://pi.dev) extensions.
 
+> **User Manual**: See [docs/USER_MANUAL.md](docs/USER_MANUAL.md) for scenario-driven guides covering all extensions.
+
 ## Shared scanner packaging approach
 
 The repo has a shared deterministic agent-risk scanner source:
@@ -375,6 +377,17 @@ Commands:
 ```
 
 See [`tool-context-loader/README.md`](tool-context-loader/README.md) for details.
+
+## How they work together
+
+| Scenario | Extensions | Quick start |
+|---|---|---|
+| Defense in depth | Prompt Shield, Permission Policy | `/prompt-shield mode block-dangerous` + `/permissions mode ask` |
+| Custom agents | P3 Agents | Write spec → `/agents register <path>` → `/agents run <agent>` |
+| Review pipeline | P3 Agents (chain) | `/agents chain scout,planner,reviewer <task>` |
+| Safe web research | Web Search | Use `secure_web_search` tool (no raw `curl`) |
+| Command guidance | Tool Context Loader | Drop a `.pi/runbooks/*.md` file → `/tool-context-loader rescan` |
+| Full safety stack | All five | Load all extensions → see [docs/USER_MANUAL.md](docs/USER_MANUAL.md) |
 
 ## Installing extensions globally
 
