@@ -1,6 +1,8 @@
 import { spawn as nodeSpawn } from "node:child_process";
-import { promises as fs } from "node:fs";
+import { promises as fs, createWriteStream, type WriteStream } from "node:fs";
 import { Buffer } from "node:buffer";
+import path from "node:path";
+import os from "node:os";
 import { buildChildPiArgs, type ChildPiArgsOptions, type ChildPiInvocation } from "./child-args.ts";
 import { reduceChildJsonl, type ChildJsonlSummary } from "./jsonl-monitor.ts";
 import { getBuiltInAgentSpec, isReservedBuiltInAgentName, type AgentSpec } from "./specs.ts";
@@ -8,7 +10,7 @@ import { resolveSpecProfile, type ModelProfileLibrary } from "./profiles.ts";
 import { profileTrustCheck } from "./profile-discovery.ts";
 import type { ProjectAgentRegistry } from "./registry.ts";
 
-export type ChildAgentRunStatus = "completed" | "failed" | "timed-out" | "output-limit-exceeded" | "spawn-error";
+export type ChildAgentRunStatus = "completed" | "failed" | "timed-out" | "output-limit-exceeded" | "spawn-error" | "spill-error";
 
 export type ChildAgentRunResult = {
 	agentName: string;
@@ -23,6 +25,10 @@ export type ChildAgentRunResult = {
 	summary: ChildJsonlSummary;
 	timedOut: boolean;
 	outputLimitExceeded: boolean;
+	/** P3f-4: spill write stream errored mid-run (disjoint from outputLimitExceeded). */
+	spillWriteError?: boolean;
+	/** P3f-4: path to the kept spill file (only when non-completed). */
+	stdoutTmpPath?: string;
 	error?: string;
 	resolvedProfile?: string;
 	resolvedModel?: string;
@@ -54,6 +60,10 @@ export type RunBuiltInChildAgentOptions = ChildPiArgsOptions & {
 	forceKillAfterMs?: number;
 	projectTrusted?: boolean;
 	projectRegistry?: ProjectAgentRegistry;
+	/** P3f-4: override the spill temp directory (default os.tmpdir()). */
+	stdoutTmpDir?: string;
+	/** P3f-4: runtime profile override (used when no positional profileOverride is passed). */
+	profileOverride?: string;
 };
 
 export type RunChildAgentOptions = RunBuiltInChildAgentOptions;
@@ -63,20 +73,25 @@ export type ChildAgentRunner = (agent: string | AgentSpec, task: string, options
 const DEFAULT_KILL_SIGNAL: NodeJS.Signals = "SIGTERM";
 const DEFAULT_FORCE_KILL_AFTER_MS = 1_000;
 
-export async function runBuiltInChildAgent(agentName: string, task: string, options: RunBuiltInChildAgentOptions = {}, profiles?: ModelProfileLibrary): Promise<ChildAgentRunResult> {
+export async function runBuiltInChildAgent(agentName: string, task: string, options: RunBuiltInChildAgentOptions = {}, profiles?: ModelProfileLibrary, profileOverride?: string): Promise<ChildAgentRunResult> {
 	if (!isReservedBuiltInAgentName(agentName)) throw new Error(`P3c-2 only supports built-in agents: scout, planner, reviewer`);
 	const spec = getBuiltInAgentSpec(agentName);
 	if (!spec || spec.source !== "built-in") throw new Error(`built-in agent '${agentName}' was not found`);
-	return runChildAgent(spec, task, options, profiles);
+	return runChildAgent(spec, task, options, profiles, profileOverride);
 }
 
-export async function runChildAgent(spec: AgentSpec, task: string, options: RunChildAgentOptions = {}, profiles?: ModelProfileLibrary): Promise<ChildAgentRunResult> {
-	let effectiveSpec = spec;
+export async function runChildAgent(spec: AgentSpec, task: string, options: RunChildAgentOptions = {}, profiles?: ModelProfileLibrary, profileOverride?: string): Promise<ChildAgentRunResult> {
 	let resolvedProfile: string | undefined;
 	let resolvedModel: string | undefined;
 	let resolvedThinking: string | undefined;
-	if (profiles && spec.profile) {
-		const result = resolveSpecProfile({ model: spec.model, thinking: spec.thinking, profile: spec.profile }, profiles);
+	// P3f-4: positional profileOverride wins; fall back to options.profileOverride (custom-runner path)
+	const effectiveProfile = profileOverride ?? options.profileOverride ?? spec.profile;
+	if (effectiveProfile) {
+		// Fail-closed: profile requested but no library available to resolve it
+		if (!profiles || !Array.isArray(profiles.profiles) || profiles.profiles.length === 0) {
+			return spawnErrorResult(spec.name, buildChildPiArgs(spec, task, options), new Error(`profile '${effectiveProfile}' requested but no profile library is available`));
+		}
+		const result = resolveSpecProfile({ model: spec.model, thinking: spec.thinking, profile: effectiveProfile }, profiles);
 		if (!result.resolved) {
 			return spawnErrorResult(spec.name, buildChildPiArgs(spec, task, options), new Error(result.error.message));
 		}
@@ -119,9 +134,12 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 		resolvedProfile = result.profileName;
 		resolvedModel = result.effectiveModel;
 		resolvedThinking = result.effectiveThinking;
-		effectiveSpec = { ...spec, model: resolvedModel, thinking: resolvedThinking };
 	}
-	const invocation = buildChildPiArgs(effectiveSpec, task, options);
+	// childArgSpec omits the profile field: the resolved model/thinking are applied,
+	// but the profile NAME never reaches buildChildPiArgs or child argv.
+	const childArgSpec: AgentSpec = { ...spec, model: resolvedModel ?? spec.model, thinking: resolvedThinking ?? spec.thinking };
+	delete (childArgSpec as { profile?: string }).profile;
+	const invocation = buildChildPiArgs(childArgSpec, task, options);
 	const stdoutLimit = options.maxStdoutBytes ?? spec.limits.maxStdoutBytes;
 	const stderrLimit = options.maxStderrChars ?? spec.limits.maxStderrChars;
 	const timeoutMs = options.timeoutMs ?? spec.limits.timeoutMs;
@@ -134,7 +152,7 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 			await fs.writeFile(invocation.promptTransport.path, invocation.promptTransport.fileText, { mode: 0o600, flag: "wx" });
 			promptFileCreated = true;
 		}
-		return await spawnAndCollect(effectiveSpec.name, invocation, {
+		return await spawnAndCollect(spec.name, invocation, {
 			cwd: options.cwd,
 			env: options.env,
 			spawn: options.spawn ?? defaultSpawner,
@@ -149,6 +167,7 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 			resolvedProfile,
 			resolvedModel,
 			resolvedThinking,
+			stdoutTmpDir: options.stdoutTmpDir,
 		});
 	} finally {
 		if (promptFileCreated && invocation.promptTransport.kind === "private-temp-file" && invocation.promptTransport.cleanup) {
@@ -196,23 +215,70 @@ async function spawnAndCollect(agentName: string, invocation: ChildPiInvocation,
 	maxResultChars: number;
 	killSignal: NodeJS.Signals | string;
 	forceKillAfterMs: number;
+	stdoutTmpDir?: string;
 }): Promise<ChildAgentRunResult> {
-	validatePositiveInteger("maxStdoutBytes", options.stdoutLimit);
-	validatePositiveInteger("maxStderrChars", options.stderrLimit);
-	validatePositiveInteger("timeoutMs", options.timeoutMs);
-	validatePositiveInteger("maxJsonLineBytes", options.maxJsonLineBytes);
-	validatePositiveInteger("maxResultChars", options.maxResultChars);
-	validatePositiveInteger("forceKillAfterMs", options.forceKillAfterMs);
+	// P3f-4: validate limits are finite positive integers (reject NaN/Infinity/non-positive)
+	const validateFinitePositive = (name: string, value: number) => {
+		if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+			throw new Error(`${name} must be a finite positive integer`);
+		}
+	};
+	validateFinitePositive("maxStdoutBytes", options.stdoutLimit);
+	validateFinitePositive("maxStderrChars", options.stderrLimit);
+	validateFinitePositive("timeoutMs", options.timeoutMs);
+	validateFinitePositive("maxJsonLineBytes", options.maxJsonLineBytes);
+	validateFinitePositive("maxResultChars", options.maxResultChars);
+	validateFinitePositive("forceKillAfterMs", options.forceKillAfterMs);
+
+	// P3f-4: safety watermark — 50× stdoutLimit, clamped to a global max (256 MB)
+	const STDOUT_SAFETY_MULTIPLIER = 50;
+	const STDOUT_SAFETY_GLOBAL_MAX = 256 * 1024 * 1024;
+	const stdoutSafetyBytes = Math.min(options.stdoutLimit * STDOUT_SAFETY_MULTIPLIER, STDOUT_SAFETY_GLOBAL_MAX);
+	const tmpDir = options.stdoutTmpDir ?? os.tmpdir();
 
 	const startedAt = options.now();
+	let spillWriteError = false;
+
+	// P3f-4: create secure spill file via mkdtemp (dir 0700) + stdout.jsonl (wx, 0600).
+	// We await the stream's 'open' event so the file is confirmed open (and exclusive-create
+	// enforced) BEFORE we spawn the child. The error listener is attached synchronously so
+	// async open/write errors never crash the parent.
+	let spillDir: string | undefined;
+	let spillFilePath: string | undefined;
+	let spillStream: WriteStream | undefined;
+	try {
+		spillDir = await fs.mkdtemp(path.join(tmpDir, "pi-agent-"));
+		await fs.chmod(spillDir, 0o700);
+		spillFilePath = path.join(spillDir, "stdout.jsonl");
+		// Exclusive open (wx) refuses to overwrite a preexisting file/symlink.
+		spillStream = createWriteStream(spillFilePath, { flags: "wx", mode: 0o600 });
+		// Attach error listener immediately so async write errors never crash the parent.
+		spillStream.on("error", () => { spillWriteError = true; });
+		// Await the open so a failure here (EACCES, EEXIST, ENOSPC) is caught before spawn.
+		await new Promise<void>((resolveOpen, rejectOpen) => {
+			spillStream!.once("open", () => resolveOpen());
+			spillStream!.once("error", (err) => rejectOpen(err));
+		});
+	} catch (error) {
+		// Fail-closed: cannot open spill → do not spawn. Clean up any partial dir.
+		if (spillStream) spillStream.destroy();
+		if (spillDir) await cleanupSpill(spillDir, spillFilePath ?? "").catch(() => {});
+		const message = error instanceof Error ? error.message : String(error);
+		return spawnErrorResult(agentName, invocation, new Error(`spill file setup failed: ${message}`));
+	}
+	const spillStreamFinal: WriteStream = spillStream;
+	const spillDirFinal: string = spillDir!;
+	const spillFilePathFinal: string = spillFilePath!;
+
 	let child: ChildProcessLike;
 	try {
 		child = options.spawn(invocation.command, invocation.argv, { cwd: options.cwd, env: options.env, stdio: ["pipe", "pipe", "pipe"] });
 	} catch (error) {
+		spillStreamFinal.destroy();
+		await cleanupSpill(spillDirFinal, spillFilePathFinal);
 		return spawnErrorResult(agentName, invocation, error);
 	}
 
-	const stdoutChunks: Buffer[] = [];
 	let stdoutBytes = 0;
 	let stderrPreview = "";
 	let timedOut = false;
@@ -243,9 +309,12 @@ async function spawnAndCollect(agentName: string, invocation: ChildPiInvocation,
 	child.stdout?.on("data", (chunk) => {
 		const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
 		stdoutBytes += buffer.length;
-		const remaining = options.stdoutLimit - byteLength(stdoutChunks);
-		if (remaining > 0) stdoutChunks.push(buffer.subarray(0, remaining));
-		if (stdoutBytes > options.stdoutLimit) {
+		// P3f-4: spill to file (best-effort)
+		if (!spillStreamFinal.destroyed && !spillStreamFinal.writableEnded && !closed) {
+			spillStreamFinal.write(buffer);
+		}
+		// Safety watermark: kill runaway at stdoutSafetyBytes (50× limit, clamped to 256MB)
+		if (stdoutBytes > stdoutSafetyBytes) {
 			outputLimitExceeded = true;
 			killChild();
 		}
@@ -255,21 +324,49 @@ async function spawnAndCollect(agentName: string, invocation: ChildPiInvocation,
 		if (stderrPreview.length < options.stderrLimit) stderrPreview = `${stderrPreview}${text}`.slice(0, options.stderrLimit);
 	});
 	return await new Promise<ChildAgentRunResult>((resolve) => {
-		const finish = (status: ChildAgentRunStatus, details: { code?: number | null; signal?: string | null; error?: string } = {}) => {
+		const finish = async (status: ChildAgentRunStatus, details: { code?: number | null; signal?: string | null; error?: string } = {}) => {
 			if (closed) return;
 			closed = true;
 			if (timer) clearTimeout(timer);
 			if (forceKillTimer) clearTimeout(forceKillTimer);
-			const stdoutText = Buffer.concat(stdoutChunks).toString("utf8");
+			// P3f-4: end the spill stream and await its finish/close before reading
+			await new Promise<void>((resolveStream) => {
+				if (spillStreamFinal.destroyed) { resolveStream(); return; }
+				let done = false;
+				let safetyTimer: ReturnType<typeof setTimeout> | undefined;
+				const finish = () => { if (!done) { done = true; if (safetyTimer) clearTimeout(safetyTimer); resolveStream(); } };
+				spillStreamFinal.once("finish", finish);
+				spillStreamFinal.once("close", finish);
+				spillStreamFinal.once("error", finish);
+				try { spillStreamFinal.end(); } catch { finish(); }
+				// Safety: do not hang forever waiting on the stream. unref so it never keeps the process alive.
+				safetyTimer = setTimeout(finish, 5000);
+				safetyTimer.unref?.();
+			});
+			// Read spill file as the sole source of truth for summarization
+			let stdoutText = "";
+			try {
+				stdoutText = await fs.readFile(spillFilePathFinal, "utf8");
+			} catch {
+				// Spill read failed — treat as spill write error
+				spillWriteError = true;
+			}
 			const summary = reduceChildJsonl(stdoutText, {
 				maxStdoutBytes: options.stdoutLimit,
 				maxJsonLineBytes: options.maxJsonLineBytes,
 				maxSummaryChars: options.maxResultChars,
 			});
 			if (outputLimitExceeded) summary.truncation.stdoutBytesTruncated = true;
+			// P3f-4: cleanup temp file+dir on success (completed, no spill error); keep otherwise
+			const keepSpill = status !== "completed" || spillWriteError;
+			if (!keepSpill) {
+				await cleanupSpill(spillDirFinal, spillFilePathFinal).catch(() => {});
+			}
+			// P3f-4: spillWriteError forces non-completed status in ALL paths (no false success)
+			const finalStatus: ChildAgentRunStatus = spillWriteError ? "spill-error" : status;
 			resolve({
 				agentName,
-				status,
+				status: finalStatus,
 				...(details.code !== undefined ? { exitCode: details.code } : {}),
 				...(details.signal !== undefined ? { signal: details.signal } : {}),
 				...(child.pid !== undefined ? { pid: child.pid } : {}),
@@ -280,6 +377,8 @@ async function spawnAndCollect(agentName: string, invocation: ChildPiInvocation,
 				summary,
 				timedOut,
 				outputLimitExceeded,
+				...(spillWriteError ? { spillWriteError: true } : {}),
+				...(keepSpill || spillWriteError ? { stdoutTmpPath: spillFilePathFinal } : {}),
 				...(details.error ? { error: details.error } : {}),
 				...(options.resolvedProfile ? { resolvedProfile: options.resolvedProfile } : {}),
 				...(options.resolvedModel ? { resolvedModel: options.resolvedModel } : {}),
@@ -320,12 +419,10 @@ function spawnErrorResult(agentName: string, invocation: ChildPiInvocation, erro
 	};
 }
 
-function byteLength(buffers: readonly Buffer[]): number {
-	return buffers.reduce((total, buffer) => total + buffer.length, 0);
-}
-
-function validatePositiveInteger(name: string, value: number): void {
-	if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
+/** P3f-4: remove the spill file and its mkdtemp directory (best-effort). */
+async function cleanupSpill(spillDir: string, spillFilePath: string): Promise<void> {
+	try { await fs.unlink(spillFilePath); } catch { /* best-effort */ }
+	try { await fs.rmdir(spillDir); } catch { /* best-effort */ }
 }
 
 function hasTruncation(summary: ChildJsonlSummary): boolean {

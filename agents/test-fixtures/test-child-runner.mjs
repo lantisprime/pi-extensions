@@ -189,13 +189,15 @@ async function testTimeoutKillsChild() {
 }
 
 async function testOutputLimitKillsChildAndBoundsStdout() {
+	// P3f-4: stdout no longer kills at maxStdoutBytes; it spills to a temp file and
+	// only kills at the safety watermark (50× maxStdoutBytes). Emit enough to exceed it.
 	let child;
 	const result = await runBuiltInChildAgent("scout", "task", {
-		maxStdoutBytes: 30,
+		maxStdoutBytes: 30, // safety watermark = 50 * 30 = 1500
 		spawn: () => {
 			child = new FakeChild();
 			queueMicrotask(() => {
-				child.stdout.emit("data", Buffer.from("x".repeat(80)));
+				child.stdout.emit("data", Buffer.from("x".repeat(1600))); // exceeds 1500
 			});
 			return child;
 		},
@@ -204,6 +206,29 @@ async function testOutputLimitKillsChildAndBoundsStdout() {
 	assert.equal(result.outputLimitExceeded, true);
 	assert.equal(result.summary.truncation.stdoutBytesTruncated, true);
 	assert.deepEqual(child.kills, ["SIGTERM"]);
+	// P3f-4: temp file is kept on safety-kill and path is surfaced
+	assert.ok(result.stdoutTmpPath, "spill path should be surfaced on safety kill");
+}
+
+async function testStdoutBelowSafetyWatermarkDoesNotKill() {
+	// P3f-4: stdout between maxStdoutBytes and the safety watermark must NOT kill.
+	// The process completes normally; the spill file captures the full stdout.
+	let child;
+	const result = await runBuiltInChildAgent("scout", "task", {
+		maxStdoutBytes: 30, // safety watermark = 1500
+		spawn: () => {
+			child = new FakeChild();
+			queueMicrotask(() => {
+				child.stdout.emit("data", Buffer.from("x".repeat(80))); // below 1500
+				child.close(0, null);
+			});
+			return child;
+		},
+	});
+	assert.equal(result.status, "completed");
+	assert.equal(result.outputLimitExceeded, false);
+	assert.deepEqual(child.kills, []);
+	assert.equal(result.stdoutTmpPath, undefined, "spill file cleaned up on success");
 }
 
 async function testSpawnErrorAndInvalidLimits() {
@@ -214,8 +239,8 @@ async function testSpawnErrorAndInvalidLimits() {
 	});
 	assert.equal(result.status, "spawn-error");
 	assert.match(result.error, /missing pi/);
-	await assert.rejects(() => runBuiltInChildAgent("scout", "task", { timeoutMs: 0, spawn: () => new FakeChild() }), /timeoutMs must be a positive integer/);
-	await assert.rejects(() => runBuiltInChildAgent("scout", "task", { forceKillAfterMs: 0, spawn: () => new FakeChild() }), /forceKillAfterMs must be a positive integer/);
+	await assert.rejects(() => runBuiltInChildAgent("scout", "task", { timeoutMs: 0, spawn: () => new FakeChild() }), /timeoutMs must be a finite positive integer/);
+	await assert.rejects(() => runBuiltInChildAgent("scout", "task", { forceKillAfterMs: 0, spawn: () => new FakeChild() }), /forceKillAfterMs must be a finite positive integer/);
 }
 
 async function main() {
@@ -227,6 +252,7 @@ async function main() {
 	await testNonZeroExitIsFailedAndFormatsCompactResult();
 	await testTimeoutKillsChild();
 	await testOutputLimitKillsChildAndBoundsStdout();
+	await testStdoutBelowSafetyWatermarkDoesNotKill();
 	await testSpawnErrorAndInvalidLimits();
 	console.log("agents child runner tests passed");
 }

@@ -68,6 +68,10 @@ export type ResolvedProfile = {
   profileProvidedThinking: boolean;
   /** P3f-3: Which source the resolved profile came from. Used for trust check. */
   profileSourceOrigin?: "built-in" | "user" | "project";
+  /** P3f-4: Canonical file path of the resolved profile (project/user profiles only). Used for trust check. */
+  profileCanonicalPath?: string;
+  /** P3f-4: Raw bytes SHA-256 of the resolved profile file. Used for trust check. */
+  profileRawBytesSha256?: string;
 };
 
 /** Discriminated union: resolution succeeds (resolved: true) or fails (resolved: false). */
@@ -317,6 +321,8 @@ export function resolveSpecProfile(
     profileProvidedModel: profileHasModel,
     profileProvidedThinking: profileHasThinking,
     profileSourceOrigin: profile.sourceOrigin,
+    profileCanonicalPath: (profile as { canonicalPath?: string }).canonicalPath,
+    profileRawBytesSha256: (profile as { rawBytesSha256?: string }).rawBytesSha256,
   };
 }
 
