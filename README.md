@@ -4,6 +4,60 @@ This project contains custom [Pi](https://pi.dev) extensions.
 
 > **User Manual**: See [docs/USER_MANUAL.md](docs/USER_MANUAL.md) for scenario-driven guides covering all extensions.
 
+## Contents
+
+- [How they work together](#how-they-work-together)
+- [Installing extensions globally](#installing-extensions-globally)
+- [Shared scanner packaging](#shared-scanner-packaging-approach)
+- [Extensions](#extensions)
+  - [Permission Policy](#permission-policy)
+  - [Prompt Shield](#prompt-shield)
+  - [Secure Web Search](#secure-web-search)
+  - [P3 Agents](#p3-agents)
+  - [Tool Context Loader](#tool-context-loader)
+
+## How they work together
+
+| Scenario | Extensions | Quick start |
+|---|---|---|
+| Defense in depth | Prompt Shield, Permission Policy | `/prompt-shield mode block-dangerous` + `/permissions mode ask` |
+| Custom agents | P3 Agents | Write spec → `/agents register <path>` → `/agents run <agent>` |
+| Review pipeline | P3 Agents (chain) | `/agents chain scout,planner,reviewer <task>` |
+| Safe web research | Web Search | Use `secure_web_search` tool (no raw `curl`) |
+| Command guidance | Tool Context Loader | Drop a `.pi/runbooks/*.md` file → `/tool-context-loader rescan` |
+| Full safety stack | All five | Load all extensions → see [docs/USER_MANUAL.md](docs/USER_MANUAL.md) |
+
+## Installing extensions globally
+
+From this project root:
+
+```bash
+mkdir -p ~/.pi/agent/extensions/permission-policy
+cp permission-policy/index.ts ~/.pi/agent/extensions/permission-policy/index.ts
+
+mkdir -p ~/.pi/agent/extensions/web-search
+cp web-search/index.ts ~/.pi/agent/extensions/web-search/index.ts
+cp -R web-search/lib ~/.pi/agent/extensions/web-search/lib
+
+mkdir -p ~/.pi/agent/extensions/prompt-shield
+cp prompt-shield/index.ts ~/.pi/agent/extensions/prompt-shield/index.ts
+cp -R prompt-shield/lib ~/.pi/agent/extensions/prompt-shield/lib
+
+mkdir -p ~/.pi/agent/extensions/agents
+cp -R agents/index.ts agents/lib ~/.pi/agent/extensions/agents/
+
+mkdir -p ~/.pi/agent/extensions/tool-context-loader
+cp tool-context-loader/index.ts ~/.pi/agent/extensions/tool-context-loader/index.ts
+```
+
+Then in Pi:
+
+```text
+/reload
+```
+
+or restart Pi.
+
 ## Shared scanner packaging approach
 
 The repo has a shared deterministic agent-risk scanner source:
@@ -377,45 +431,3 @@ Commands:
 ```
 
 See [`tool-context-loader/README.md`](tool-context-loader/README.md) for details.
-
-## How they work together
-
-| Scenario | Extensions | Quick start |
-|---|---|---|
-| Defense in depth | Prompt Shield, Permission Policy | `/prompt-shield mode block-dangerous` + `/permissions mode ask` |
-| Custom agents | P3 Agents | Write spec → `/agents register <path>` → `/agents run <agent>` |
-| Review pipeline | P3 Agents (chain) | `/agents chain scout,planner,reviewer <task>` |
-| Safe web research | Web Search | Use `secure_web_search` tool (no raw `curl`) |
-| Command guidance | Tool Context Loader | Drop a `.pi/runbooks/*.md` file → `/tool-context-loader rescan` |
-| Full safety stack | All five | Load all extensions → see [docs/USER_MANUAL.md](docs/USER_MANUAL.md) |
-
-## Installing extensions globally
-
-From this project root:
-
-```bash
-mkdir -p ~/.pi/agent/extensions/permission-policy
-cp permission-policy/index.ts ~/.pi/agent/extensions/permission-policy/index.ts
-
-mkdir -p ~/.pi/agent/extensions/web-search
-cp web-search/index.ts ~/.pi/agent/extensions/web-search/index.ts
-cp -R web-search/lib ~/.pi/agent/extensions/web-search/lib
-
-mkdir -p ~/.pi/agent/extensions/prompt-shield
-cp prompt-shield/index.ts ~/.pi/agent/extensions/prompt-shield/index.ts
-cp -R prompt-shield/lib ~/.pi/agent/extensions/prompt-shield/lib
-
-mkdir -p ~/.pi/agent/extensions/agents
-cp -R agents/index.ts agents/lib ~/.pi/agent/extensions/agents/
-
-mkdir -p ~/.pi/agent/extensions/tool-context-loader
-cp tool-context-loader/index.ts ~/.pi/agent/extensions/tool-context-loader/index.ts
-```
-
-Then in Pi:
-
-```text
-/reload
-```
-
-or restart Pi.

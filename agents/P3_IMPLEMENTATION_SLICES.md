@@ -30,7 +30,9 @@ Completed and merged:
 
 Current slice:
 
-- P3e: docs, local eval command, smoke
+- P3e: docs, README, user manual, smoke, PR #38, commit `04695e6`
+
+P3 agent scaffold complete. No remaining slices.
 
 ## Slice Rules
 
