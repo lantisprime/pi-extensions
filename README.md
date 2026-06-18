@@ -281,6 +281,62 @@ See [`web-search/README.md`](web-search/README.md) for details.
 
 ---
 
+### P3 Agents
+
+Path:
+
+```text
+agents/index.ts
+```
+
+Global install location:
+
+```text
+~/.pi/agent/extensions/agents/index.ts
+```
+
+Defines, registers, vets, and runs constrained child Pi agents.
+
+Features:
+
+- Three built-in agents: `scout`, `planner`, `reviewer` — all read-only (`read`, `grep`, `find`, `ls`)
+- `run_subagent` LLM-callable tool for single read-only child runs
+- User/project agent registration with Markdown frontmatter specs
+- Deterministic security scanner: safe/suspicious/dangerous classification; dangerous specs never register
+- Raw-byte SHA-256 hash registration with runtime mismatch detection (fail-closed)
+- `canRunAgent` runtime gate before child argv construction
+- Project trust required for project agents
+- Ephemeral one-shot agents via `/agents run-temp` (non-TUI fail-closed)
+- Command-only chain mode via `/agents chain scout,planner <task>` (max 3 agents)
+- Model profiles with capability hints (`model`, `thinking`) and hash-registered trust
+- Child argv safety: task text via stdin, `--no-approve` by default, forbidden tools blocked
+
+Commands:
+
+```text
+/agents list
+/agents built-ins
+/agents config
+/agents inspect <name>
+/agents registry
+/agents verify
+/agents doctor
+/agents register <path-or-name>
+/agents register-project [--all-safe]
+/agents unregister <name>
+/agents run <agent> <task>
+/agents chain <agent>,<agent>[,<agent>] <task>
+/agents run-temp <scout|planner|reviewer> <task>
+/agents save-temp <name>
+/agents profiles
+/agents profiles register <path>
+/agents profiles unregister <name>
+```
+
+See [`agents/README.md`](agents/README.md) for details.
+
+---
+
 ### Tool Context Loader
 
 Path:
@@ -335,6 +391,9 @@ cp -R web-search/lib ~/.pi/agent/extensions/web-search/lib
 mkdir -p ~/.pi/agent/extensions/prompt-shield
 cp prompt-shield/index.ts ~/.pi/agent/extensions/prompt-shield/index.ts
 cp -R prompt-shield/lib ~/.pi/agent/extensions/prompt-shield/lib
+
+mkdir -p ~/.pi/agent/extensions/agents
+cp -R agents/index.ts agents/lib ~/.pi/agent/extensions/agents/
 
 mkdir -p ~/.pi/agent/extensions/tool-context-loader
 cp tool-context-loader/index.ts ~/.pi/agent/extensions/tool-context-loader/index.ts
