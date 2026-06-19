@@ -2,14 +2,12 @@
 
 `WORKPLAN.md` is no longer the source of truth. Do not use this file for planning or status.
 
-The canonical `pi-extensions` workplan now lives in episodic memory as:
+The canonical `pi-extensions` workplan now lives in episodic memory.
 
-- Project: `pi-extensions`
-- Current episode ID: `20260619-212230-canonical-workplan-p4-1-merged-pr-44-p4r-0782`
-- Tags include: `canonical-workplan`, `workplan`, `roadmap`, `p4`, `p4r`, `background-agents`
-- Summary: `Canonical workplan: P4-1 merged (PR 44); P4R remediation plan GO (gates P4-2/P4-3) is next`
-
-To recall it, use episodic memory search for project `pi-extensions` and tag `canonical-workplan`.
+**To recall it:** episodic memory search for project `pi-extensions`, tag
+`canonical-workplan`, and take the single `active` episode (the chain head). Do
+NOT hardcode an episode ID here — it drifts on every revision. The active head is
+the source of truth; older entries in the chain are `superseded`.
 
 ## Active design docs (P4 background agents)
 
