@@ -8,6 +8,16 @@
 **Split**: Tmux backend interface is [P5_PLUGGABLE_TERMINAL_BACKEND.md](./P5_PLUGGABLE_TERMINAL_BACKEND.md)
 **Depends on**: P3 agent scaffold (complete)
 
+> ⚠️ **Partially superseded re: authority roots.** A critical review found this
+> plan's "manifest is identity, not authority" claim to be **false** as written —
+> the manifest carries `cwd`/`homeDir`, which are authority roots (the registry
+> and MAC key are located via `homeDir`), making the MAC circular. The corrected
+> design (trusted-runtime roots via `os.userInfo().homedir`, no-kill reaper,
+> user-agents-first scope) lives in
+> [**P4_REMEDIATION_PLAN.md**](./P4_REMEDIATION_PLAN.md) (status: GO). Build P4-2/P4-3
+> against the remediation plan, not the security claims below. This plan is
+> formally corrected in remediation slice P4R-6.
+
 ## Objective
 
 Extend P3 agents to support non-blocking background agent execution in tmux
@@ -18,6 +28,14 @@ security invariants must be preserved.
 ## Design
 
 ### Manifest is identity, not authority
+
+> ⚠️ **Corrected by [P4_REMEDIATION_PLAN.md](./P4_REMEDIATION_PLAN.md).** This
+> section is wrong: the manifest below carries `options.cwd`/`homeDir`, and the
+> worker locates the registry and MAC key via `homeDir` — so a manifest-supplied
+> `homeDir` makes the MAC circular (the verifying key sits in the attacker-pointed
+> store). The remediation rebinds all roots to `os.userInfo().homedir` and treats
+> manifest `homeDir` as identity verified against trusted runtime (reject on
+> mismatch). Read the remediation plan for the authoritative design.
 
 The manifest carries only identity — agent name, canonical path, expected hash —
 plus the task text. It does **not** carry execution authority. A separate
