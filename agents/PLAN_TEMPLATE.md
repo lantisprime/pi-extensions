@@ -227,3 +227,51 @@ Concrete file-level implementation plan.
 | Risk | Mitigation |
 |---|---|
 | ... | ... |
+
+## Appendix B: Mechanical Execution Spec (for a low-capability executor)
+
+Include this appendix when the plan may be implemented by a **lower-capability
+model with limited reasoning** (e.g. a cheaper sub-agent). Its job is to remove
+every design decision from the build path: exact signatures, exact edit anchors,
+and a verify command per step. If the plan will only ever be implemented by a
+high-capability model, you may delete this appendix — but prefer keeping it.
+
+**Rule of thumb:** if any implementation step contains the words "decide",
+"choose", "figure out", "as appropriate", or "if needed", it is NOT executor-ready
+— resolve the decision in the plan body and restate the step as a concrete action.
+
+### Executor contract (copy verbatim into the plan)
+
+1. Do the steps **in numeric order**. Do not skip, reorder, or batch.
+2. Each step says exactly which file, what to add/change, and how to verify.
+3. **Make no design decisions.** If a step is ambiguous or the anchor text is not
+   found verbatim, **STOP and ask** — do not guess or invent an alternative.
+4. Run the verify command after each step. If it fails, fix only that step; do
+   not proceed until green.
+5. Slice test command: `<exact command>`.
+6. Do not edit any file not named in the step. Read-only references: `<list>`.
+7. One slice = one commit, message `<ID>-<n>: <slice title>`, with the required
+   `Co-Authored-By` trailer.
+
+### Shared constants / types (add once)
+
+```ts
+// Exact constants/types the steps below reference, with values — no placeholders.
+```
+
+### `<SLICE-ID>` — `<slice title>` (REQ-x/y)
+
+| Step | File | Exact action (signature + anchor + literal change) | Verify |
+|---|---|---|---|
+| n.1 | `path/to/file.ts` | Add exported `fnName(args): RetType`. Body: `<exact behavior, including exact error strings>`. | `<grep/test command that proves it landed>` |
+| n.2 | `path/to/test.mjs` | Add `testName`: `<exact arrange/act/assert, including the regex asserted>`. Register in `main()`. | `<test command>` green |
+
+Repeat one sub-table per slice. Every step MUST have: (a) a named file, (b) an
+exact signature or literal anchor text, (c) the exact change (error strings,
+field names, numeric bounds spelled out), and (d) a runnable verify command.
+
+### Definition of done (whole plan)
+
+`<exact command(s)>` print all `<N>` tests passing, `<load/smoke command>`
+succeeds, and `<an invariant grep that proves the security/contract boundary>`
+shows the expected result.
