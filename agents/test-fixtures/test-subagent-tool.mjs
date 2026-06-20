@@ -732,7 +732,7 @@ async function testDenialReturnsIsErrorTrueWithCode() {
 
 async function testResultDetailsContainOnlyAllowlistedFields() {
 	const result = await executeSubagentRun("scout", "x", baseCtx({
-		childRunner: async () => ({ agentName: "scout", status: "completed", durationMs: 1, stdoutBytes: 0, stderrPreview: "leaked stderr", invocation: { command: "pi", argv: ["/tmp/secret-prompt.md"], argvPreview: ["@<prompt-file>"], promptTransport: { kind: "private-temp-file", path: "/tmp/leaked-path.md", fileText: "secret prompt", cleanup: true } }, summary: { toolCalls: [], summaryText: "ok", truncation: {} }, timedOut: false, outputLimitExceeded: false }),
+		childRunner: async () => ({ agentName: "scout", status: "completed", durationMs: 1, stdoutBytes: 0, stderrPreview: "leaked stderr", invocation: { command: "pi", argv: ["--append-system-prompt", "/tmp/leaked-path.md"], argvPreview: ["<system-prompt-file>"], promptTransport: { kind: "stdin", stdinText: "secret task" }, systemPromptFile: { path: "/tmp/leaked-path.md", fileText: "secret role prompt" } }, summary: { toolCalls: [], summaryText: "ok", truncation: {} }, timedOut: false, outputLimitExceeded: false }),
 	}));
 	const allowedKeys = new Set(["agentName", "status", "durationMs", "exitCode", "invocation"]);
 	for (const key of Object.keys(result.details)) {
@@ -742,8 +742,9 @@ async function testResultDetailsContainOnlyAllowlistedFields() {
 	// invocation fields should be exposed.
 	if (result.details.invocation) {
 		assert.deepEqual(Object.keys(result.details.invocation).sort(), ["argv"], "details.invocation must only expose redacted argv");
-		assert.deepEqual(result.details.invocation.argv, ["@<prompt-file>"], "details.invocation.argv must use argvPreview (redacted)");
+		assert.deepEqual(result.details.invocation.argv, ["<system-prompt-file>"], "details.invocation.argv must use argvPreview (redacted)");
 		assert.equal(result.details.invocation.promptTransport, undefined, "details must not include raw prompt transport path");
+		assert.equal(result.details.invocation.systemPromptFile, undefined, "details must not include the system-prompt file or its role content");
 		assert.equal(result.details.invocation.command, undefined, "details must not include pi command path");
 		assert.equal(result.details.invocation.argvPreview, undefined, "details must not duplicate argvPreview");
 	}
