@@ -4,13 +4,14 @@
 
 **TOP PRIORITY** (canonical workplan, 2026-06-20 — ahead of the P4R background-agents track).
 
-**Revised after four review passes (claude-subagent — pass 1: conditional-go, 3B+5H+6M;
+**Revised after five review passes (claude-subagent — pass 1: conditional-go, 3B+5H+6M;
 pass 2: conditional-go, 2B+3H+4M+1 ratify; pass 3: focused P6-0b transport review, 4B+2M+2m;
-pass 3b: independent second opinion on the re-spec, NO-GO 4B+1M+2m — all resolved below).**
+pass 3b: independent second opinion on the re-spec, NO-GO 4B+1M+2m;
+pass 3c: per-slice anchor-fidelity sweep across P6-0a/1/2/3a-3b/4, 14B+~12M — all resolved below).**
 Rule 18 step 4: this is the final plan, awaiting approval. Do not implement until approved.
-The P6-0b focused transport review **and** its independent second opinion are **complete**
-(Pass-3/3b); their blockers re-specced the slice (new `systemPromptFile` channel, 18 anchored
-steps) — see Appendix B + the Pass-3 / Pass-3b tables.
+Every slice has now passed a source-grounded anchor-fidelity review (Pass-3/3b for P6-0b, Pass-3c
+for the rest); all blockers were folded as **6 separate per-slice commits** — see Appendix B and the
+Pass-3 / Pass-3b / Pass-3c tables.
 
 **Post-review additions (parent, after pass 1):** (a) classifier-model decision resolved
 (`--thinking off` + child-default model + model-only override — see REQ-5 / Open Decisions);
@@ -462,6 +463,7 @@ All MUST requirements passing = done for first merge.
 | 2 | claude-subagent (adversarial, P6-0 + classifier focus) | Opus 4.8 | 2 blockers + 3 high + 4 medium + 1 ratify | conditional-go |
 | 3 | claude (focused P6-0b transport review) | Opus 4.8 | 4 blockers + 2 major + 2 minor | conditional-go (P6-0b re-specced; build still gated) |
 | 3b | claude-subagent (independent second opinion on the re-spec) | Opus 4.8 | 4 blockers + 1 major + 2 minor (NO-GO) | all resolved → executor-ready; build still gated |
+| 3c | 5 parallel claude-subagents (per-slice anchor-fidelity: P6-0a/1/2/3a-3b/4) | Opus 4.8 | 14 blockers + ~12 major across all slices | all resolved (6 per-slice commits) → executor-ready; build still gated |
 
 ### Pass-2 resolved (B-1xx/R-1xx/M-1xx)
 
@@ -511,6 +513,24 @@ fix" failure modes a low-capability executor cannot recover from.
 
 (Pass-3b n1 — secrecy — was a **REJECT**: role in a `0600` file inside a `0700` `mkdtemp` dir is
 stricter than the old argv exposure, and the task-not-in-argv invariant is preserved.)
+
+### Pass-3c resolved (per-slice anchor-fidelity sweep — 5 parallel reviewers)
+
+Five independent claude-subagents re-checked P6-0a/P6-1/P6-2/P6-3a-3b/P6-4 against source; every
+slice came back NO-GO/CONDITIONAL. All findings folded as **6 separate per-slice commits**. The
+recurring pattern: the *easy* steps (CREATE/APPEND new files) were specified; every step touching an
+*integration seam* was prose. Headline fixes by slice:
+
+| Slice | Key blockers resolved |
+|---|---|
+| P6-0a | `getPiInvocation` read `process.argv[1]`/`execPath` as globals (untestable) → `env` injection seam; missing 4th REQ-16 test added |
+| P6-1 | `parseClassifierOutput` top-level-JSON extraction had no algorithm → spelled out (fence pass + brace-depth/string-aware scan); heuristic matcher/`signals` scope defined; now hosts `profileEffect`/`CLASSIFIER_LIMITS` |
+| P6-2 | bounded limits had no home → `CLASSIFIER_LIMITS` + `collectChildProcess` self-defaults spawn/now; `command:"pi"` (no argv desync); model-only override; missing imports + `noSession` test |
+| P6-3a/3b | `runIntentCommand`/`parseDoArgs` were prose → full exact bodies; run-resolver imports; verify pointed at tests that actually drive the run path; extraction substitutions made explicit |
+| P6-4 | three REQ-12/13/14 **display** edits existed only in prose → real anchored steps; `formatProfileList` is in `index.ts`; step 4.3 re-anchored to the correct `else` branch |
+
+Micro-decisions ratified: (1) `profileEffect` in P6-1 shared block (kills the false P6-4-parallel
+edge); (2) `getPiInvocation` `env` seam; (3) `CLASSIFIER_LIMITS` const.
 
 ### Resolved blockers / high-risk
 
