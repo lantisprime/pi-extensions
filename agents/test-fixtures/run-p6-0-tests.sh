@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+npx --yes tsx agents/test-fixtures/test-pi-invocation.mjs
+npx --yes tsx agents/test-fixtures/test-child-args-jsonl.mjs
+npx --yes tsx agents/test-fixtures/test-child-runner.mjs

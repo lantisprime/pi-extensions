@@ -1,24 +1,22 @@
 import { P3_FORBIDDEN_TOOLS, type AgentSpec } from "./specs.ts";
-
-export type PromptTransportKind = "stdin" | "private-temp-file";
+import { existsSync } from "node:fs";
+import path from "node:path";
 
 export type ChildPiArgsOptions = {
 	piCommand?: string;
-	promptTransport?: PromptTransportKind;
-	tempPromptPath?: string;
+	systemPromptPath?: string;
 	explicitToolContextLoaderPath?: string;
 	disableContextFiles?: boolean;
 	disableResourceDiscovery?: boolean;
 };
 
-export type ChildPromptTransport =
-	| { kind: "stdin"; stdinText: string }
-	| { kind: "private-temp-file"; path: string; fileText: string; cleanup: true };
+export type ChildPromptTransport = { kind: "stdin"; stdinText: string };
 
 export type ChildPiInvocation = {
 	command: string;
 	argv: string[];
 	promptTransport: ChildPromptTransport;
+	systemPromptFile?: { path: string; fileText: string };
 	argvPreview: string[];
 };
 
@@ -27,7 +25,7 @@ const DEFAULT_PI_COMMAND = "pi";
 
 export function buildChildPiArgs(spec: AgentSpec, task: string, options: ChildPiArgsOptions = {}): ChildPiInvocation {
 	validateChildArgInputs(spec, task, options);
-	const promptText = buildChildPromptText(spec, task);
+	const systemText = buildChildSystemText(spec);
 	const command = options.piCommand ?? DEFAULT_PI_COMMAND;
 	const argv = ["--mode", "json", "--no-session"];
 	if (options.disableResourceDiscovery !== false) argv.push("--no-approve", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes");
@@ -36,15 +34,14 @@ export function buildChildPiArgs(spec: AgentSpec, task: string, options: ChildPi
 	if (spec.thinking) argv.push("--thinking", spec.thinking);
 	if (options.explicitToolContextLoaderPath) argv.push("-e", options.explicitToolContextLoaderPath);
 	argv.push("--tools", spec.tools.join(","));
-
-	const promptTransport = buildPromptTransport(promptText, options);
+	argv.push("--append-system-prompt", options.systemPromptPath!);
 	argv.push("-p");
-	if (promptTransport.kind === "private-temp-file") argv.push(`@${promptTransport.path}`);
-	return { command, argv, promptTransport, argvPreview: redactChildPiArgv(argv) };
+	const promptTransport = { kind: "stdin" as const, stdinText: task.trim() };
+	const systemPromptFile = { path: options.systemPromptPath!, fileText: systemText };
+	return { command, argv, promptTransport, systemPromptFile, argvPreview: redactChildPiArgv(argv) };
 }
 
-export function buildChildPromptText(spec: AgentSpec, task: string): string {
-	const trimmedTask = task.trim();
+export function buildChildSystemText(spec: AgentSpec): string {
 	return [
 		`Agent: ${spec.name}`,
 		`Source: ${spec.source}`,
@@ -59,26 +56,14 @@ export function buildChildPromptText(spec: AgentSpec, task: string): string {
 		`Required sections: ${spec.outputContract.requiredSections.join(", ")}`,
 		`Maximum summary characters: ${spec.outputContract.maxSummaryChars}`,
 		spec.outputContract.verdicts ? `Allowed verdicts: ${spec.outputContract.verdicts.join(", ")}` : undefined,
-		"",
-		"Delegated task:",
-		trimmedTask,
 	].filter((line): line is string => line !== undefined).join("\n");
 }
 
 export function redactChildPiArgv(argv: readonly string[]): string[] {
-	return argv.map((arg) => arg.startsWith("@") ? "@<prompt-file>" : arg);
+	return argv.map((arg, i) => argv[i - 1] === "--append-system-prompt" ? "<system-prompt-file>" : arg);
 }
 
-function buildPromptTransport(promptText: string, options: ChildPiArgsOptions): ChildPromptTransport {
-	const kind = options.promptTransport ?? "stdin";
-	if (kind === "stdin") return { kind, stdinText: promptText };
-	if (kind !== "private-temp-file") throw new Error(`unsupported promptTransport '${String(kind)}'`);
-	if (!options.tempPromptPath || options.tempPromptPath.trim().length === 0) {
-		throw new Error("tempPromptPath is required when promptTransport is private-temp-file");
-	}
-	if (hasUnsafePathControlChar(options.tempPromptPath)) throw new Error("tempPromptPath must not contain NUL or newline characters");
-	return { kind, path: options.tempPromptPath, fileText: promptText, cleanup: true };
-}
+
 
 function validateChildArgInputs(spec: AgentSpec, task: string, options: ChildPiArgsOptions): void {
 	if (!spec || typeof spec !== "object") throw new Error("agent spec is required");
@@ -99,8 +84,23 @@ function validateChildArgInputs(spec: AgentSpec, task: string, options: ChildPiA
 		if (options.explicitToolContextLoaderPath.trim().length === 0) throw new Error("explicitToolContextLoaderPath must be non-empty when provided");
 		if (hasUnsafePathControlChar(options.explicitToolContextLoaderPath)) throw new Error("explicitToolContextLoaderPath must not contain NUL or newline characters");
 	}
+	if (options.systemPromptPath !== undefined) {
+		if (options.systemPromptPath.trim().length === 0) throw new Error("systemPromptPath is required when provided");
+		if (hasUnsafePathControlChar(options.systemPromptPath)) throw new Error("systemPromptPath must not contain NUL or newline characters");
+	}
 }
 
 function hasUnsafePathControlChar(value: string): boolean {
 	return /[\0\r\n]/.test(value);
+}
+
+export function getPiInvocation(args: string[], piCommandOverride?: string, env?: { argv1?: string; execPath?: string }): { command: string; args: string[] } {
+	if (piCommandOverride) return { command: piCommandOverride, args };
+	const currentScript = env?.argv1 ?? process.argv[1];
+	const execPath = env?.execPath ?? process.execPath;
+	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
+	if (currentScript && !isBunVirtualScript && existsSync(currentScript)) return { command: execPath, args: [currentScript, ...args] };
+	const execName = path.basename(execPath).toLowerCase();
+	if (!/^(node|bun)(\.exe)?$/.test(execName)) return { command: execPath, args };
+	return { command: DEFAULT_PI_COMMAND, args };
 }

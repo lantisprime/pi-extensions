@@ -3,7 +3,7 @@ import { promises as fs, createWriteStream, type WriteStream } from "node:fs";
 import { Buffer } from "node:buffer";
 import path from "node:path";
 import os from "node:os";
-import { buildChildPiArgs, type ChildPiArgsOptions, type ChildPiInvocation } from "./child-args.ts";
+import { buildChildPiArgs, getPiInvocation, type ChildPiArgsOptions, type ChildPiInvocation } from "./child-args.ts";
 import { reduceChildJsonl, type ChildJsonlSummary } from "./jsonl-monitor.ts";
 import { getBuiltInAgentSpec, isReservedBuiltInAgentName, type AgentSpec } from "./specs.ts";
 import { resolveSpecProfile, type ModelProfileLibrary } from "./profiles.ts";
@@ -89,11 +89,11 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 	if (effectiveProfile) {
 		// Fail-closed: profile requested but no library available to resolve it
 		if (!profiles || !Array.isArray(profiles.profiles) || profiles.profiles.length === 0) {
-			return spawnErrorResult(spec.name, buildChildPiArgs(spec, task, options), new Error(`profile '${effectiveProfile}' requested but no profile library is available`));
+			return spawnErrorResult(spec.name, { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin" as const, stdinText: "" } }, new Error(`profile '${effectiveProfile}' requested but no profile library is available`));
 		}
 		const result = resolveSpecProfile({ model: spec.model, thinking: spec.thinking, profile: effectiveProfile }, profiles);
 		if (!result.resolved) {
-			return spawnErrorResult(spec.name, buildChildPiArgs(spec, task, options), new Error(result.error.message));
+			return spawnErrorResult(spec.name, { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin" as const, stdinText: "" } }, new Error(result.error.message));
 		}
 		// P3f-3: Profile trust check for project-source profiles
 		if (result.profileSourceOrigin === "project") {
@@ -139,18 +139,19 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 	// but the profile NAME never reaches buildChildPiArgs or child argv.
 	const childArgSpec: AgentSpec = { ...spec, model: resolvedModel ?? spec.model, thinking: resolvedThinking ?? spec.thinking };
 	delete (childArgSpec as { profile?: string }).profile;
-	const invocation = buildChildPiArgs(childArgSpec, task, options);
-	const stdoutLimit = options.maxStdoutBytes ?? spec.limits.maxStdoutBytes;
-	const stderrLimit = options.maxStderrChars ?? spec.limits.maxStderrChars;
-	const timeoutMs = options.timeoutMs ?? spec.limits.timeoutMs;
-	const killSignal = options.killSignal ?? DEFAULT_KILL_SIGNAL;
-	const forceKillAfterMs = options.forceKillAfterMs ?? DEFAULT_FORCE_KILL_AFTER_MS;
-	let promptFileCreated = false;
-
+	let sysDir: string | undefined;
 	try {
-		if (invocation.promptTransport.kind === "private-temp-file") {
-			await fs.writeFile(invocation.promptTransport.path, invocation.promptTransport.fileText, { mode: 0o600, flag: "wx" });
-			promptFileCreated = true;
+		sysDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agent-sys-"));
+		await fs.chmod(sysDir, 0o700);
+		const systemPromptPath = path.join(sysDir, "system.md");
+		const invocation = buildChildPiArgs(childArgSpec, task, { ...options, systemPromptPath });
+		const stdoutLimit = options.maxStdoutBytes ?? spec.limits.maxStdoutBytes;
+		const stderrLimit = options.maxStderrChars ?? spec.limits.maxStderrChars;
+		const timeoutMs = options.timeoutMs ?? spec.limits.timeoutMs;
+		const killSignal = options.killSignal ?? DEFAULT_KILL_SIGNAL;
+		const forceKillAfterMs = options.forceKillAfterMs ?? DEFAULT_FORCE_KILL_AFTER_MS;
+		if (invocation.systemPromptFile) {
+			await fs.writeFile(invocation.systemPromptFile.path, invocation.systemPromptFile.fileText, { mode: 0o600, flag: "wx" });
 		}
 		return await spawnAndCollect(spec.name, invocation, {
 			cwd: options.cwd,
@@ -170,9 +171,7 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 			stdoutTmpDir: options.stdoutTmpDir,
 		});
 	} finally {
-		if (promptFileCreated && invocation.promptTransport.kind === "private-temp-file" && invocation.promptTransport.cleanup) {
-			await fs.rm(invocation.promptTransport.path, { force: true });
-		}
+		if (sysDir) await fs.rm(sysDir, { recursive: true, force: true });
 	}
 }
 
@@ -394,13 +393,13 @@ async function spawnAndCollect(agentName: string, invocation: ChildPiInvocation,
 			const status = timedOut ? "timed-out" : outputLimitExceeded ? "output-limit-exceeded" : code === 0 ? "completed" : "failed";
 			finish(status, { code, signal });
 		});
-		if (invocation.promptTransport.kind === "stdin") child.stdin?.end(invocation.promptTransport.stdinText);
-		else child.stdin?.end();
+		child.stdin?.end(invocation.promptTransport.stdinText);
 	});
 }
 
 function defaultSpawner(command: string, argv: readonly string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; stdio: ["pipe", "pipe", "pipe"] }): ChildProcessLike {
-	return nodeSpawn(command, [...argv], options);
+	const inv = command === "pi" ? getPiInvocation([...argv]) : { command, args: [...argv] };
+	return nodeSpawn(inv.command, inv.args, options);
 }
 
 function spawnErrorResult(agentName: string, invocation: ChildPiInvocation, error: unknown): ChildAgentRunResult {

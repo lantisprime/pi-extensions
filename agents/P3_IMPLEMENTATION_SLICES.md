@@ -32,7 +32,16 @@ Current slices:
 
 - P3e: docs, README, user manual, smoke, PR #38, commit `04695e6`
 - P3f-4: runtime profile override + stdout spill, PR #41, commit `4473431`
+
+**P6 Intent Routing** (in progress on `feat/p6-intent-routing`, PR #50):
+- P6-1: intent router core, commit `51a6851` (all new files, 22 tests)
+- P6-0a: getPiInvocation, commit `8eacb5a` (4 tests, all regressions green)
+- P6-0b: role→system-prompt transport, commit `c7ac50d` — APPROVED (4-round review, episode `20260620-103000`)
+- P6-2 through P6-4: pending (see agents/docs/P6_INTENT_ROUTING_PLAN.md)
+
+Track 2 (planning only):
 - P4: background agents (planning — agents/docs/P4_BACKGROUND_AGENTS_PLAN.md)
+- P4R: remediation plan GO — agents/docs/P4_REMEDIATION_PLAN.md
 - P5: pluggable terminal backend (planning — agents/docs/P5_PLUGGABLE_TERMINAL_BACKEND.md)
 
 ## Slice Rules
@@ -64,6 +73,13 @@ Current slices:
 | P3d-1 | `run_subagent` single-run tool ✅ | tool registration/tests | Model-callable single read-only run; same gate; child excludes `run_subagent`; no prompt override; redacted tool result details | Tool schema/gate/recursion/redaction tests; P3c regressions; opus-4.8 review `go` | No chain/parallel/write/bash |
 | P3d-2 | Command-only chain mode | chain handler/tests | `/agents chain`; max length 3; preflight all agents; bounded prior-summary handoff | Chain preflight failure tests; handoff bounds tests | No chain via `run_subagent` |
 | P3e | Docs, local eval command, smoke | `agents/README.md`, eval docs/tests | README; local eval command docs; smoke commands; validation notes | `pi --no-extensions -e ./agents/index.ts --list-models`; local eval command | No new runtime capabilities |
+| P6-1 | Intent router core (pure helpers) ✅ | `agents/lib/intent-router.ts`, `agents/test-fixtures/test-intent-router.mjs` | classifyIntentHeuristic, parseClassifierOutput, profileEffect, CLASSIFIER_LIMITS, shared types/constants | 22 tests (8 heuristic + 8 parser + 6 constants); zero blast radius | No existing-file changes |
+| P6-0a | Child pi binary resolution ✅ | `agents/lib/child-args.ts`, `agents/lib/child-runner.ts`, `agents/test-fixtures/test-pi-invocation.mjs` | getPiInvocation() with env? test-seam; wired into defaultSpawner | 4 REQ-16 tests; existing child-runner/args/subagent-tool regressions green | No transport changes |
+| P6-0b | Role→system-prompt transport | `agents/lib/child-args.ts`, `agents/lib/child-runner.ts`, 5 test fixtures | systemPromptFile channel; --append-system-prompt; remove -p @file; bare-task stdin | 5-test fixture-change ledger + smoke (REQ-17/17b/18) | Focused review before build; changes ALL child runs |
+| P6-2 | LLM classifier spawn + fallback | `agents/lib/intent-router.ts`, `agents/lib/child-runner.ts` | buildClassifierPiArgs, resolveRunIntent, collectChildProcess wrapper | 11 tests (REQ-4/5); classifier never gets --tools | No existing child-runner refactor |
+| P6-3a | Pure runResolvedTarget extraction | `agents/lib/run-resolver.ts` | Extract registered-run tail into reusable function | existing /agents run tests + added TOCTOU coverage | Zero behavior change |
+| P6-3b | /agents do wiring | `agents/index.ts`, `agents/lib/run-resolver.ts` | runIntentCommand, parseDoArgs, REQ-6/7/8/9/10/11/15 | 12 command tests; must not bypass canRunAgent for registered | No chain/parallel/write/bash |
+| P6-4 | Disambiguation hardening | `agents/lib/diagnostics.ts`, `agents/index.ts` | Agent/profile collision doctor warning; no-op profile labels; misplaced --profile warning | 5 tests (REQ-12/13/14) | Parallel after P6-1; imports profileEffect from intent-router.ts |
 
 ## Recommended Slice Ladder
 

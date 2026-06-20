@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { buildChildPiArgs, buildChildPromptText, redactChildPiArgv } from "../lib/child-args.ts";
+import { buildChildPiArgs, buildChildSystemText, redactChildPiArgv } from "../lib/child-args.ts";
 import { parseChildJsonlLine, reduceChildJsonl } from "../lib/jsonl-monitor.ts";
 import { getBuiltInAgentSpec } from "../lib/specs.ts";
 
@@ -11,7 +11,7 @@ function argvText(invocation) {
 }
 
 function testChildArgsDefaultStdinTransport() {
-	const invocation = buildChildPiArgs(scout, secretTask);
+	const invocation = buildChildPiArgs(scout, secretTask, { systemPromptPath: "/private/tmp/pi-agent-x/system.md" });
 	assert.equal(invocation.command, "pi");
 	assert.deepEqual(invocation.argv.slice(0, 3), ["--mode", "json", "--no-session"]);
 	assert.equal(invocation.argv.includes("--no-approve"), true);
@@ -21,11 +21,11 @@ function testChildArgsDefaultStdinTransport() {
 	assert.equal(invocation.argv.includes("--no-themes"), true);
 	assert.equal(invocation.argv.includes("--tools"), true);
 	assert.equal(invocation.argv[invocation.argv.indexOf("--tools") + 1], "read,grep,find,ls");
+	assert.equal(invocation.argv.includes("--append-system-prompt"), true);
 	assert.equal(invocation.argv.includes("-p"), true);
 	assert.equal(invocation.promptTransport.kind, "stdin");
-	assert.match(invocation.promptTransport.stdinText, /Role prompt:/);
-	assert.match(invocation.promptTransport.stdinText, /Delegated task:/);
-	assert.match(invocation.promptTransport.stdinText, /FULL_DELEGATED_PROMPT/);
+	assert.equal(invocation.promptTransport.stdinText, secretTask);
+	assert.match(invocation.systemPromptFile.fileText, /Role prompt:/);
 	assert.equal(argvText(invocation).includes("FULL_DELEGATED_PROMPT"), false, "delegated task must not appear in argv");
 	assert.equal(argvText(invocation).includes(scout.prompt.slice(0, 30)), false, "role prompt must not appear in argv");
 	assert.equal(invocation.argv.includes("--approve"), false);
@@ -33,24 +33,24 @@ function testChildArgsDefaultStdinTransport() {
 	assert.equal(invocation.argv.join(",").includes("run_subagent"), false);
 }
 
-function testChildArgsPrivateTempTransportAndPreview() {
+function testChildArgs_systemPromptFileChannelAndPreview() {
 	const invocation = buildChildPiArgs(scout, secretTask, {
-		promptTransport: "private-temp-file",
-		tempPromptPath: "/private/tmp/pi-agent-abc/prompt.md",
+		systemPromptPath: "/private/tmp/pi-agent-abc/system.md",
 		explicitToolContextLoaderPath: "/Users/test/.pi/agent/extensions/tool-context-loader/index.ts",
 		disableContextFiles: true,
 	});
-	assert.equal(invocation.promptTransport.kind, "private-temp-file");
-	assert.equal(invocation.promptTransport.cleanup, true);
-	assert.match(invocation.promptTransport.fileText, /FULL_DELEGATED_PROMPT/);
-	assert.equal(invocation.argv.includes("@/private/tmp/pi-agent-abc/prompt.md"), true);
+	assert.equal(invocation.systemPromptFile.path, "/private/tmp/pi-agent-abc/system.md");
+	assert.match(invocation.systemPromptFile.fileText, /Role prompt:/);
+	assert.equal(invocation.systemPromptFile.fileText.includes("FULL_DELEGATED_PROMPT"), false, "task must not be in the role file");
+	assert.equal(invocation.argv.includes("--append-system-prompt"), true);
+	assert.equal(invocation.argv.includes("@/private/tmp/pi-agent-abc/system.md"), false, "no @-arg");
+	assert.ok(redactChildPiArgv(invocation.argv).includes("<system-prompt-file>"));
 	assert.equal(argvText(invocation).includes("FULL_DELEGATED_PROMPT"), false);
-	assert.deepEqual(redactChildPiArgv(invocation.argv).filter((arg) => arg.startsWith("@")), ["@<prompt-file>"]);
 	assert.equal(invocation.argv.filter((arg) => arg === "-e").length, 1);
 	assert.equal(invocation.argv[invocation.argv.indexOf("-e") + 1], "/Users/test/.pi/agent/extensions/tool-context-loader/index.ts");
 	assert.equal(invocation.argv.includes("--no-extensions"), true, "explicit loader path must not re-enable broad extension discovery");
 	assert.equal(invocation.argv.includes("--no-context-files"), true);
-	assert.equal(buildChildPiArgs(scout, secretTask, { disableResourceDiscovery: false }).argv.includes("--no-extensions"), false);
+	assert.equal(buildChildPiArgs(scout, secretTask, { systemPromptPath: "/t/sys.md", disableResourceDiscovery: false }).argv.includes("--no-extensions"), false);
 }
 
 function testChildArgsRejectsUnsafeInputs() {
@@ -60,17 +60,16 @@ function testChildArgsRejectsUnsafeInputs() {
 	assert.throws(() => buildChildPiArgs({ ...scout, tools: ["read", "bash"] }, "task"), /forbidden child tool 'bash'/);
 	assert.throws(() => buildChildPiArgs({ ...scout, tools: ["read files"] }, "task"), /unsafe tool name/);
 	assert.throws(() => buildChildPiArgs({ ...scout, model: "bad model" }, "task"), /model must be a safe argv token/);
-	assert.throws(() => buildChildPiArgs(scout, "task", { promptTransport: "private-temp-file" }), /tempPromptPath is required/);
-	assert.throws(() => buildChildPiArgs(scout, "task", { promptTransport: "bogus" }), /unsupported promptTransport/);
-	assert.throws(() => buildChildPiArgs(scout, "task", { promptTransport: "private-temp-file", tempPromptPath: "/tmp/bad\npath.md" }), /tempPromptPath must not contain/);
+	assert.throws(() => buildChildPiArgs(scout, "task", { systemPromptPath: "/tmp/bad\npath.md" }), /systemPromptPath must not contain/);
+	assert.throws(() => buildChildPiArgs(scout, "task", { systemPromptPath: "   " }), /systemPromptPath is required when provided/);
 	assert.throws(() => buildChildPiArgs(scout, "task", { explicitToolContextLoaderPath: "/tmp/bad\npath.ts" }), /explicitToolContextLoaderPath must not contain/);
 }
 
-function testPromptTextIsDeterministicAndBoundedByTaskValidation() {
-	const prompt = buildChildPromptText(scout, "Inspect only README.");
+function testSystemTextIsDeterministic() {
+	const prompt = buildChildSystemText(scout);
 	assert.match(prompt, /^Agent: scout/);
 	assert.match(prompt, /Required sections: Files\/paths inspected, Concise findings, Unknowns\/follow-up questions/);
-	assert.match(prompt, /Delegated task:\nInspect only README\./);
+	assert.equal(prompt.includes("Delegated task:"), false);
 }
 
 function fakeLine(event) {
@@ -150,9 +149,9 @@ function testParseLine() {
 
 function main() {
 	testChildArgsDefaultStdinTransport();
-	testChildArgsPrivateTempTransportAndPreview();
+	testChildArgs_systemPromptFileChannelAndPreview();
 	testChildArgsRejectsUnsafeInputs();
-	testPromptTextIsDeterministicAndBoundedByTaskValidation();
+	testSystemTextIsDeterministic();
 	testJsonlReductionExtractsSummaryToolsAndMetadata();
 	testJsonlReductionHandlesMalformedOversizedAndFallback();
 	testJsonlReductionRejectsInvalidLimits();

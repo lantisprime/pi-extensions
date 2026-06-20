@@ -125,9 +125,9 @@ async function testGenericRegisteredRunUsesSpecPromptAndLimits() {
 			return child;
 		},
 	});
-	assert.equal(child.stdinText.includes("Agent: user-helper"), true);
-	assert.equal(child.stdinText.includes("Source: user"), true);
-	assert.equal(child.stdinText.includes("inspect registered files"), true);
+	assert.equal(child.stdinText, "inspect registered files");
+	assert.match(result.invocation.systemPromptFile.fileText, /Agent: user-helper/);
+	assert.match(result.invocation.systemPromptFile.fileText, /Source: user/);
 	assert.equal(result.agentName, "user-helper");
 	assert.equal(result.status, "completed");
 }
