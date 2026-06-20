@@ -208,10 +208,10 @@ export const ROLE_DEFAULT_PROFILE = Object.freeze({
   invocation with `--mode json --no-session --no-extensions --no-skills --no-prompt-templates
   --no-themes --no-tools`, prompt via stdin (no `AgentSpec`, no `--tools`). Prompt lists each
   candidate `name: description` and demands a single JSON object reply.
-- `child-runner.ts` exports a thin `collectChildProcess(invocation, limits, deps)` core;
-  existing `spawnAndCollect` is refactored to call it (existing child-runner tests stay green —
-  Rule 15). The classifier uses `collectChildProcess` directly, so `spawnAndCollect` is **not**
-  forked.
+- `child-runner.ts` APPENDs a thin exported `collectChildProcess(invocation, limits)` wrapper
+  that calls the **unchanged** private `spawnAndCollect` (no refactor, lowest blast radius — the
+  existing child-runner tests stay green). It injects `defaultSpawner`/`Date.now` internally so the
+  classifier caller passes only `CLASSIFIER_LIMITS`.
 
 ## Existing Hook Points
 
@@ -225,7 +225,7 @@ export const ROLE_DEFAULT_PROFILE = Object.freeze({
 | `agents/lib/can-run-agent.ts` | L60 | `canRunAgent` | Unchanged; authority for registered picks |
 | `agents/lib/child-args.ts` | L26 | `DEFAULT_PI_COMMAND = "pi"` hardcoded | REQ-16: port `getPiInvocation()` binary resolution |
 | `agents/lib/child-args.ts` | L33-42 | argv build: `--tools`, `-p @file`/stdin transport | REQ-17: role → `--append-system-prompt`, task → user prompt; remove `-p @file` |
-| `agents/lib/child-runner.ts` | L206 | `spawnAndCollect` (private) | Refactor: extract exported `collectChildProcess` core |
+| `agents/lib/child-runner.ts` | L206 | `spawnAndCollect` (private) | APPEND exported `collectChildProcess` wrapper (no refactor) |
 | `agents/lib/diagnostics.ts` | L31-52 | `AgentDiagnosticRecord` (has `spec`, `runnable`) | Candidate source (REQ-7); add R-004 collision finding (REQ-12) |
 | `agents/lib/profiles.ts` | L338 | `BUILT_IN_PROFILE_DEFS` (no-op `fast-local`) | Add `profileEffect()` (REQ-13); role-default source |
 | `agents/lib/specs.ts` | L3,L101 | `RESERVED_BUILT_IN_AGENT_NAMES`, name regex | Role enumeration; collision basis |
@@ -255,11 +255,12 @@ P6-0a is foundational: both the target-agent spawn **and** the new classifier sp
 benefit from correct binary resolution, so it lands first. P6-0b (transport layering) is
 independent of routing but shares files — sequence it before P6-2 to avoid churn.
 
-**M-104 (slice coupling):** P6-2 extracts `collectChildProcess` from the **post-P6-0b**
-`spawnAndCollect`, i.e. *after* the transport change has landed (the stdin/task handoff at
-`child-runner.ts:397` is what P6-0b edits and what the extraction wraps). So P6-2's extraction
-depends on P6-0b being final; the classifier path uses the same stdin contract REQ-17 settles.
-If P6-0b is cut (Cut Order #3), P6-2 extracts from the *unchanged* `spawnAndCollect` instead.
+**M-104 (slice coupling — corrected by Pass-3c):** P6-2's `collectChildProcess` is a thin wrapper
+over `spawnAndCollect`, which **P6-0b does NOT modify** (P6-0b edits the `runChildAgent` line-142
+region and the stdin handoff at `child-runner.ts:397` is left byte-identical). So the wrapper is
+**P6-0b-independent** — it works whether or not P6-0b has landed. The only real coupling is the
+*task-on-stdin contract* the classifier relies on, which REQ-17 settles; that is a soft, not hard,
+dependency. (Earlier drafts wrongly said P6-2 "extracts from post-P6-0b `spawnAndCollect`.")
 
 ## Cut Order
 
@@ -347,7 +348,7 @@ Group 2: classifier-output validation (8)
   testParse_nonJsonRejected, testParse_confidenceClamped, testParse_extraKeysRejected,
   testParse_multipleJsonObjectsRejected, testParse_jsonEmbeddedInProseRejected
 
-Group 3: classifier args + fallback (10)
+Group 3: classifier args + fallback (11)
   testClassifierArgs_emitsNoTools, testClassifierArgs_omitsToolsFlag,
   testClassifierArgs_noSession, testClassifierArgs_thinkingOff, testClassifierArgs_boundedLimits,
   testClassifierArgs_overrideModelOnly, testClassifierArgs_overrideThinkingIgnoredWithWarning,
@@ -536,7 +537,7 @@ stricter than the old argv exposure, and the task-not-in-argv invariant is prese
 | File | Change |
 |---|---|
 | `agents/lib/child-args.ts` | P6-0a: `getPiInvocation()` binary resolution (REQ-16). P6-0b: role → `--append-system-prompt`, task → user prompt, remove `-p @file` (REQ-17). |
-| `agents/lib/child-runner.ts` | P6-0b: thread the transport change through the prompt-file write. P6-2: extract exported `collectChildProcess(invocation, limits, deps)`; refactor `spawnAndCollect` to call it (tests green). |
+| `agents/lib/child-runner.ts` | P6-0b: thread the transport change through the prompt-file write. P6-2: APPEND exported `collectChildProcess(invocation, limits)` thin wrapper over the **unchanged** `spawnAndCollect` (no refactor; tests green). |
 | `agents/index.ts` | Add `"do"` action/completions; dispatch → `runIntentCommand`. |
 | `agents/lib/run-resolver.ts` | Extract `runResolvedTarget` (P6-3a); add `runIntentCommand`, `parseDoArgs`; REQ-14 warning. |
 | `agents/lib/diagnostics.ts` | Candidate enumeration helper; R-004 collision finding. |
@@ -739,11 +740,12 @@ valid as written.)
 
 | Step | File | Surgical action | Verify |
 |---|---|---|---|
-| 2.1 | `agents/lib/child-runner.ts` | **APPEND.** `export function collectChildProcess(invocation: ChildPiInvocation, options: Parameters<typeof spawnAndCollect>[2]): Promise<ChildAgentRunResult> { return spawnAndCollect("intent-classifier", invocation, options); }` | `grep -n 'export function collectChildProcess' agents/lib/child-runner.ts` |
-| 2.2 | `agents/lib/intent-router.ts` | **APPEND.** `export function buildClassifierPiArgs(task: string, candidates: IntentCandidate[], piCommand?: string): ChildPiInvocation` — argv `["--mode","json","--no-session","--no-extensions","--no-skills","--no-prompt-templates","--no-themes","--no-tools","--thinking","off","-p"]`; if `piCommand` override profile has a model, splice `"--model", model` before `-p`; `command` from `getPiInvocation([...argv], piCommand)`; `promptTransport={kind:"stdin", stdinText: <CLASSIFIER_PROMPT>}`. `CLASSIFIER_PROMPT` = exact template: header `You are an intent classifier...`, the candidate list `- <name>: <description>` lines, the reply contract `Reply with ONLY one JSON object: {"agent":"<name>","confidence":<0..1>,"reason":"<short>"}`, then `Task:\n<task>`. | `grep -n 'no-tools' agents/lib/intent-router.ts` AND `grep -c '\-\-tools' agents/lib/intent-router.ts` == 0 |
-| 2.3 | `agents/lib/intent-router.ts` | **APPEND.** `export async function resolveRunIntent(task, candidates, deps): Promise<IntentDecision>` — call `deps.runClassifier(buildClassifierPiArgs(task, candidates, deps.piCommand))` (injected; prod = `collectChildProcess`); on resolve, `parseClassifierOutput(result.summary.summaryText, candidates.map(c=>c.name))`; `ok` → its decision; on throw / `!ok` → `classifyIntentHeuristic(task, candidates.map(c=>c.name))`. Never throws. | (covered by 2.4) |
-| 2.4 | `agents/test-fixtures/test-intent-classifier.mjs` | **CREATE.** Group 3 tests with injected `runClassifier` stub: `testClassifierArgs_emitsNoTools`, `testClassifierArgs_omitsToolsFlag`, `testClassifierArgs_thinkingOff`, `testClassifierArgs_boundedLimits`, `testClassifierArgs_overrideModelOnly`, `testClassifierArgs_overrideThinkingIgnoredWithWarning`, `testResolve_llmPrimary`, `testResolve_fallbackOnSpawnError`, `testResolve_fallbackOnBadJson`, `testResolve_fallbackOnUnknownAgent`. | `node agents/test-fixtures/test-intent-classifier.mjs` exits 0 |
-| 2.5 | `agents/test-fixtures/run-p6-2-tests.sh` | **CREATE.** runs `test-intent-classifier.mjs`. | `bash agents/test-fixtures/run-p6-2-tests.sh` exits 0 |
+| 2.1 | `agents/lib/child-runner.ts` | **APPEND (B1 — owns the spawn/now defaults so callers pass only limits).** `export function collectChildProcess(invocation: ChildPiInvocation, limits: Omit<Parameters<typeof spawnAndCollect>[2], "spawn" \| "now" \| "cwd" \| "env" \| "stdoutTmpDir">): Promise<ChildAgentRunResult> { return spawnAndCollect("intent-classifier", invocation, { ...limits, spawn: defaultSpawner, now: Date.now }); }` (`defaultSpawner` is in-file; `Date.now` is the real clock — the classifier never needs an injected spawner in prod). | `grep -n 'export function collectChildProcess' agents/lib/child-runner.ts` |
+| 2.2 | `agents/lib/intent-router.ts` | **APPEND (B4 — imports the new file never had).** Add at top (after a blank line below the constants block): `import { redactChildPiArgv, type ChildPiInvocation } from "./child-args.ts";` and `import type { ChildAgentRunResult } from "./child-runner.ts";` (type-only — no runtime cycle: child-runner imports child-args, never intent-router). | `grep -n 'type ChildPiInvocation' agents/lib/intent-router.ts` |
+| 2.3 | `agents/lib/intent-router.ts` | **APPEND (B2 command, B3 override).** `export function buildClassifierPiArgs(task: string, candidates: IntentCandidate[], opts: { piCommand?: string; overrideModel?: string; overrideThinking?: string } = {}): { invocation: ChildPiInvocation; warnings: string[] }`. Build `const argv = ["--mode","json","--no-session","--no-extensions","--no-skills","--no-prompt-templates","--no-themes","--no-tools","--thinking","off"]`; **if `opts.overrideModel`** `argv.push("--model", opts.overrideModel)`; then `argv.push("-p")`. **`command = opts.piCommand ?? "pi"`** — do NOT call `getPiInvocation` here (B2: keep `"pi"` so `defaultSpawner` resolves the binary at spawn time exactly like `buildChildPiArgs`; a desynced `command`+bare-argv would spawn `node` with no pi script). `const warnings: string[] = []; if (opts.overrideThinking) warnings.push("intent-classifier: profile thinking ignored (forced off)")` (B3 / R-101). `const invocation = { command, argv, promptTransport: { kind: "stdin" as const, stdinText: CLASSIFIER_PROMPT }, argvPreview: redactChildPiArgv(argv) }`. `CLASSIFIER_PROMPT` = exact template: header `You are an intent classifier. Choose the single best agent for the task.`, the candidate list `- <name>: <description>` lines, the reply contract `Reply with ONLY one JSON object: {"agent":"<name>","confidence":<0..1>,"reason":"<short>"}`, then `Task:\n<task>`. (No `systemPromptFile` — the classifier has no role file.) | `grep -q 'no-tools' agents/lib/intent-router.ts && test $(grep -c '\-\-tools' agents/lib/intent-router.ts) -eq 0` |
+| 2.4 | `agents/lib/intent-router.ts` | **APPEND (B1 limits, n1).** `export async function resolveRunIntent(task: string, candidates: IntentCandidate[], deps: { runClassifier: (invocation: ChildPiInvocation, limits: typeof CLASSIFIER_LIMITS) => Promise<ChildAgentRunResult>; piCommand?: string; overrideModel?: string; overrideThinking?: string }): Promise<IntentDecision>` — `const names = candidates.map(c => c.name); const { invocation } = buildClassifierPiArgs(task, candidates, { piCommand: deps.piCommand, overrideModel: deps.overrideModel, overrideThinking: deps.overrideThinking }); try { const result = await deps.runClassifier(invocation, CLASSIFIER_LIMITS); const parsed = parseClassifierOutput(result.summary.summaryText, names); return parsed.ok ? parsed.decision : classifyIntentHeuristic(task, names); } catch { return classifyIntentHeuristic(task, names); }`. Prod `runClassifier` = `collectChildProcess`. **Given a non-empty `task` (guaranteed by `parseDoArgs`), never throws on classifier failure** (n1). | (covered by 2.5) |
+| 2.5 | `agents/test-fixtures/test-intent-classifier.mjs` | **CREATE.** Group 3 — **all 11 tests** — with an injected `runClassifier` stub that captures `(invocation, limits)`: `testClassifierArgs_emitsNoTools`, `testClassifierArgs_omitsToolsFlag`, `testClassifierArgs_noSession` (M2 — was missing; assert argv includes `--no-session`), `testClassifierArgs_thinkingOff`, `testClassifierArgs_boundedLimits` (assert the captured `limits.timeoutMs===20000`, `limits.stdoutLimit===65536`, `limits.maxResultChars===512`), `testClassifierArgs_overrideModelOnly` (`overrideModel:"x"` → argv has `--model x`, no extra `--thinking`), `testClassifierArgs_overrideThinkingIgnoredWithWarning` (`overrideThinking:"high"` → `warnings.length===1`, argv `--thinking off` unchanged), `testResolve_llmPrimary`, `testResolve_fallbackOnSpawnError`, `testResolve_fallbackOnBadJson`, `testResolve_fallbackOnUnknownAgent`. | `node agents/test-fixtures/test-intent-classifier.mjs` exits 0 |
+| 2.6 | `agents/test-fixtures/run-p6-2-tests.sh` | **CREATE.** runs `test-intent-classifier.mjs`. | `bash agents/test-fixtures/run-p6-2-tests.sh` exits 0 |
 
 ### `P6-3a` — pure `runResolvedTarget` extraction (REQ-6) — commit `P6-3a: extract runResolvedTarget`
 
