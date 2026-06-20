@@ -337,10 +337,10 @@ Group 0: run-path hardening — P6-0 (4 new + 5 ledger-edited + smoke)
     + test-child-runner.mjs:128-130 (bare-task stdin + role in --append-system-prompt file)
   smoke (manual gate, not CI): run-p6-smoke.sh (real pi; skips when absent → exit 2)
 
-Group 1: heuristic (7)
+Group 1: heuristic (8)
   testHeuristic_reviewVerbs, testHeuristic_planVerbs, testHeuristic_scoutVerbs,
   testHeuristic_deterministic, testHeuristic_clamp, testHeuristic_emptyRejected,
-  testHeuristic_ambiguousDefault  (+ testHeuristic_tieBreakDeterministic)
+  testHeuristic_ambiguousDefault, testHeuristic_tieBreakDeterministic
 
 Group 2: classifier-output validation (8)
   testParse_validJson, testParse_jsonInCodeFence, testParse_unknownAgentRejected,
@@ -610,6 +610,19 @@ export const ROLE_KEYWORDS = Object.freeze({
   planner:  { plan: 3, design: 3, "break down": 3, roadmap: 2, steps: 2, architecture: 2, approach: 2 },
   scout:    { find: 2, where: 2, locate: 2, explore: 2, recon: 2, inspect: 2, search: 2, "which files": 2 },
 }) as Readonly<Record<string, Readonly<Record<string, number>>>>;
+// profileEffect: defined HERE (P6-1) — not in P6-4 — so BOTH P6-3b (runIntentCommand role-default
+// guard) and P6-4 (display labels) import it from intent-router.ts. Structural param (no profiles.ts
+// import); only reads truthiness, so a ModelProfile (thinking?: ThinkingLevel ⊆ string) is assignable.
+export function profileEffect(p: { model?: string; thinking?: string }): "none" | "model" | "thinking" | "both" {
+  const m = !!p.model, t = !!p.thinking;
+  return m && t ? "both" : m ? "model" : t ? "thinking" : "none";
+}
+// CLASSIFIER_LIMITS: the bounded spawnAndCollect options the classifier child runs under (REQ-5).
+// P6-2 builds the options object from these + the injected spawn/now. Values are concrete, not knobs.
+export const CLASSIFIER_LIMITS = Object.freeze({
+  stdoutLimit: 65_536, stderrLimit: 4_096, timeoutMs: 20_000,
+  maxJsonLineBytes: 65_536, maxResultChars: 512, killSignal: "SIGTERM", forceKillAfterMs: 1_000,
+});
 export type IntentDecision = { agent: string; confidence: number; reason: string;
   engine: "llm" | "heuristic-fallback"; signals?: string[] };
 export type IntentCandidate = { name: string; source: "built-in" | "user" | "project";
@@ -626,10 +639,10 @@ All P6-1 steps are `CREATE` or `APPEND` to brand-new files — **no existing cod
 
 | Step | File | Exact action (one file) | Verify |
 |---|---|---|---|
-| 1.1 | `agents/lib/intent-router.ts` | **CREATE** (Write). Full contents = the Shared constants/types block above verbatim. | `grep -c "HEURISTIC_SATURATION\|ROLE_KEYWORDS\|AMBIGUOUS_DEFAULT" agents/lib/intent-router.ts` == 3 |
-| 1.2 | `agents/lib/intent-router.ts` | **APPEND** at end of file. Add `export function classifyIntentHeuristic(task: string, candidates: string[]): IntentDecision`. Body: if `task.trim()===""` `throw new Error("task must be non-empty")`. Lowercase task. For each role in `ROLE_KEYWORDS`, sum the weight of every keyword whose whole-word/phrase occurs in the task; collect matched keywords as `signals`. Pick the highest-weight role; break ties by first occurrence in `TIE_ORDER`; if total weight 0 → return `{...AMBIGUOUS_DEFAULT, reason:"no intent keywords matched", engine:"heuristic-fallback", signals:[]}`. Else `confidence = Math.min(1, weight / HEURISTIC_SATURATION)`, `reason = \`matched: ${signals.join(", ")}\``, `engine:"heuristic-fallback"`. | (covered by 1.4) |
-| 1.3 | `agents/lib/intent-router.ts` | **APPEND** at end of file. Add `export function parseClassifierOutput(raw: string, candidateNames: string[]): {ok:true; decision:IntentDecision} | {ok:false; reason:string}`. Implement States A–H from the Contracts section with EXACT reason strings `"non-json"`,`"multiple-objects"`,`"embedded"`,`"unknown-agent"`,`"bad-confidence"`,`"bad-shape"`; extract the last top-level `{…}` or a single ```json fence; require keys exactly `{agent,confidence,reason}`; `agent ∈ candidateNames`; `confidence` finite → `Math.max(0, Math.min(1, confidence))`; on success `engine:"llm"`. | (covered by 1.5) |
-| 1.4 | `agents/test-fixtures/test-intent-router.mjs` | **CREATE** (Write). Group 1 + Group 2 tests with the exact asserts named in the Test Case Catalog (e.g. `testHeuristic_reviewVerbs`: `classifyIntentHeuristic("review this for bugs", ["reviewer","planner","scout"]).agent === "reviewer"`; `testParse_multipleJsonObjectsRejected`: two `{…}` → `{ok:false, reason:"multiple-objects"}`). Self-run `main()` exiting non-zero on failure. | `node agents/test-fixtures/test-intent-router.mjs` exits 0 |
+| 1.1 | `agents/lib/intent-router.ts` | **CREATE** (Write). Full contents = the Shared constants/types block above verbatim (now also includes `profileEffect` and `CLASSIFIER_LIMITS`). | `grep -q 'export const HEURISTIC_SATURATION' f && grep -q 'export function profileEffect' f && grep -q 'export const CLASSIFIER_LIMITS' f && grep -q 'export const ROLE_KEYWORDS' f` (with `f=agents/lib/intent-router.ts`) |
+| 1.2 | `agents/lib/intent-router.ts` | **APPEND** at end of file. Add `export function classifyIntentHeuristic(task: string, candidates: string[]): IntentDecision`. Body: if `task.trim()===""` `throw new Error("task must be non-empty")`. **Matcher (exact):** for each keyword `kw`, build `new RegExp("\\b" + kw.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&") + "\\b", "i")` and test it against the raw `task` (the `\b` word boundaries handle whole-word **and** internal-space phrases like `"break down"`); a keyword counts at most once. For each role in `ROLE_KEYWORDS`, `weight` = sum of matched keyword weights. **`signals` scope (exact):** after picking the winning role, set `signals` to **only the winning role's** matched keywords (not other roles'). Pick the highest-`weight` role; break ties by first occurrence in `TIE_ORDER`; if total weight 0 → `{ ...AMBIGUOUS_DEFAULT, reason:"no intent keywords matched", engine:"heuristic-fallback", signals:[] }` — but if `AMBIGUOUS_DEFAULT.agent` (`"scout"`) `∉ candidates`, use `candidates[0]` as the agent (n1 guard). Else `confidence = Math.min(1, weight / HEURISTIC_SATURATION)`, `reason = \`matched: ${signals.join(", ")}\``, `engine:"heuristic-fallback"`. | (covered by 1.4) |
+| 1.3 | `agents/lib/intent-router.ts` | **APPEND** at end of file. Add `export function parseClassifierOutput(raw: string, candidateNames: string[]): {ok:true; decision:IntentDecision} | {ok:false; reason:string}`. **Algorithm (exact, no decisions):** (a) **fence pass** — `const fences = [...raw.matchAll(/```json\s*([\s\S]*?)```/g)]`; if `fences.length > 1` → `{ok:false, reason:"multiple-objects"}`; `const fenced = fences.length === 1`; `const candidate = fenced ? fences[0][1] : raw`. (b) **top-level object scan** of `candidate` — walk chars tracking brace `depth`, counting `{`/`}` ONLY when not inside a double-quoted string (toggle `inStr` on unescaped `"`, honor `\\` escape); record each maximal `[start,end]` run that opens at depth 0 on `{` and returns to depth 0 on `}`. (c) `runs.length === 0` → `"non-json"`; `runs.length > 1` → `"multiple-objects"`. (d) exactly one run `[s,e]`: if `!fenced && (candidate.slice(0,s).trim() !== "" || candidate.slice(e+1).trim() !== "")` → `"embedded"`. (e) `JSON.parse(candidate.slice(s,e+1))` in try/catch (catch → `"non-json"`). (f) keys must be EXACTLY `{agent,confidence,reason}` (no more/less) else `"bad-shape"`; `typeof confidence !== "number" || !Number.isFinite(confidence)` → `"bad-confidence"`; `!candidateNames.includes(agent)` → `"unknown-agent"`. (g) success → `{ok:true, decision:{ agent, confidence: Math.max(0, Math.min(1, confidence)), reason: String(reason), engine:"llm" }}`. | (covered by 1.4) |
+| 1.4 | `agents/test-fixtures/test-intent-router.mjs` | **CREATE** (Write). Group 1 (8 tests, incl. `testHeuristic_tieBreakDeterministic`) + Group 2 (8) with the exact asserts from the Catalog. Specified inputs: `testHeuristic_reviewVerbs("review this for bugs") → "reviewer"`; `testHeuristic_clamp("review audit bug critique") → confidence === 1` (weight 3+3+2+3=11 > 6); `testHeuristic_deterministic` = call twice with the same input, `assert.deepEqual` the two results; `testHeuristic_tieBreakDeterministic("plan the review", …) → "reviewer"` (reviewer before planner in `TIE_ORDER`); `testParse_multipleJsonObjectsRejected` two `{…}` → `{ok:false, reason:"multiple-objects"}`; `testParse_jsonEmbeddedInProseRejected("here is {\"agent\":\"scout\",…} ok") → "embedded"`. Self-run `main()` exiting non-zero on failure. | `node agents/test-fixtures/test-intent-router.mjs` exits 0 |
 | 1.5 | `agents/test-fixtures/run-p6-1-tests.sh` | **CREATE** (Write). Contents: `#!/usr/bin/env bash`, `set -euo pipefail`, `node "$(dirname "$0")/test-intent-router.mjs"`. `chmod +x`. | `bash agents/test-fixtures/run-p6-1-tests.sh` exits 0 |
 
 ### `P6-0a` — child `pi` binary resolution (REQ-16) — commit `P6-0a: getPiInvocation binary resolution`
