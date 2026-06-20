@@ -402,7 +402,32 @@ These keep the diff small and the existing suite green — derived from real sli
   test* are a planning bug: they make the positive case indistinguishable from the negative
   one, so a perfect assertion still proves nothing. (This is the hole behind the real
   `--append-system-prompt /dev/null` miss — the assertion fired, but the input could not
-  exercise the behavior.)
+  exercise the behavior.) The positive case must be both discriminating **and reliable** —
+  see "Deterministic / portable signal" when the signal is non-deterministic.
+- **Deterministic / portable signal (non-deterministic guards).** When a guard's
+  observable signal depends on **non-deterministic behavior** (an LLM's output, a race,
+  wall-clock, network ordering), a green run on the author's machine does **not** prove the
+  guard — it may be red on another model/provider/OS. (Real case: a smoke asserting an LLM
+  emits a sentinel passed for the author and failed 4/4 for the reviewer.) Such a guard MUST:
+  1. **Assert at the most deterministic observable point that actually exists — and verify
+     it exists, don't assume.** Before asserting on model behavior, look for a mechanical
+     channel carrying the guarantee (a structured `--mode json` event, an exit code, a
+     written file, a log line emitted by the *code*, not the model); assert there if present.
+     (Verified example: pi's `--mode json` stream does **not** echo the resolved system
+     prompt in any event, so "did the appended system prompt reach the child" has *no*
+     mechanical channel and falls to clause 3 — confirm such absence by inspection, never
+     presume a channel.)
+  2. **No self-defeating fixture.** The task/input MUST NOT constrain output in a way that
+     fights the asserted signal — a task saying "reply with *just* X / nothing else" cannot
+     coexist with a role saying "always emit `<SENTINEL>`." Mechanically reviewable: flag any
+     fixture whose input contains "just / only / nothing else / exactly" while a sentinel is
+     asserted in the output.
+  3. **If behavioral compliance is unavoidable, make it near-deterministic and prove
+     stability.** Use a minimal, unambiguous instruction (`Always begin every reply with the
+     exact token <SENTINEL> on its own line`) and a neutral task that does not compete; the
+     `Verify` MUST run the guard **green ≥3× consecutively** (one pass is not portable). If
+     the outcome still varies by model/provider/env, tag the row `UNGUARDED-IN-CI` and name
+     the residual + the manual check that covers it.
 
 ### Definition of done (whole plan)
 
