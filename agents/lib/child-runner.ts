@@ -139,17 +139,17 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 	// but the profile NAME never reaches buildChildPiArgs or child argv.
 	const childArgSpec: AgentSpec = { ...spec, model: resolvedModel ?? spec.model, thinking: resolvedThinking ?? spec.thinking };
 	delete (childArgSpec as { profile?: string }).profile;
-	const sysDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agent-sys-"));
-	await fs.chmod(sysDir, 0o700);
-	const systemPromptPath = path.join(sysDir, "system.md");
-	const invocation = buildChildPiArgs(childArgSpec, task, { ...options, systemPromptPath });
-	const stdoutLimit = options.maxStdoutBytes ?? spec.limits.maxStdoutBytes;
-	const stderrLimit = options.maxStderrChars ?? spec.limits.maxStderrChars;
-	const timeoutMs = options.timeoutMs ?? spec.limits.timeoutMs;
-	const killSignal = options.killSignal ?? DEFAULT_KILL_SIGNAL;
-	const forceKillAfterMs = options.forceKillAfterMs ?? DEFAULT_FORCE_KILL_AFTER_MS;
-
+	let sysDir: string | undefined;
 	try {
+		sysDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agent-sys-"));
+		await fs.chmod(sysDir, 0o700);
+		const systemPromptPath = path.join(sysDir, "system.md");
+		const invocation = buildChildPiArgs(childArgSpec, task, { ...options, systemPromptPath });
+		const stdoutLimit = options.maxStdoutBytes ?? spec.limits.maxStdoutBytes;
+		const stderrLimit = options.maxStderrChars ?? spec.limits.maxStderrChars;
+		const timeoutMs = options.timeoutMs ?? spec.limits.timeoutMs;
+		const killSignal = options.killSignal ?? DEFAULT_KILL_SIGNAL;
+		const forceKillAfterMs = options.forceKillAfterMs ?? DEFAULT_FORCE_KILL_AFTER_MS;
 		if (invocation.systemPromptFile) {
 			await fs.writeFile(invocation.systemPromptFile.path, invocation.systemPromptFile.fileText, { mode: 0o600, flag: "wx" });
 		}
@@ -171,7 +171,7 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 			stdoutTmpDir: options.stdoutTmpDir,
 		});
 	} finally {
-		await fs.rm(sysDir, { recursive: true, force: true });
+		await fs.rm(sysDir!, { recursive: true, force: true });
 	}
 }
 
@@ -393,8 +393,7 @@ async function spawnAndCollect(agentName: string, invocation: ChildPiInvocation,
 			const status = timedOut ? "timed-out" : outputLimitExceeded ? "output-limit-exceeded" : code === 0 ? "completed" : "failed";
 			finish(status, { code, signal });
 		});
-		if (invocation.promptTransport.kind === "stdin") child.stdin?.end(invocation.promptTransport.stdinText);
-		else child.stdin?.end();
+		child.stdin?.end(invocation.promptTransport.stdinText);
 	});
 }
 
