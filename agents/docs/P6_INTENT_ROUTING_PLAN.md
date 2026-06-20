@@ -4,10 +4,14 @@
 
 **TOP PRIORITY** (canonical workplan, 2026-06-20 — ahead of the P4R background-agents track).
 
-**Revised after two adversarial-review passes (claude-subagent — pass 1: conditional-go, 3B+5H+6M;
-pass 2: conditional-go, 2B+3H+4M+1 ratify — all resolved below).** Rule 18 step 4: this is the
-final plan, awaiting approval. Do not implement until approved (one focused review of the P6-0b
-transport change still pending).
+**Revised after five review passes (claude-subagent — pass 1: conditional-go, 3B+5H+6M;
+pass 2: conditional-go, 2B+3H+4M+1 ratify; pass 3: focused P6-0b transport review, 4B+2M+2m;
+pass 3b: independent second opinion on the re-spec, NO-GO 4B+1M+2m;
+pass 3c: per-slice anchor-fidelity sweep across P6-0a/1/2/3a-3b/4, 14B+~12M — all resolved below).**
+Rule 18 step 4: this is the final plan, awaiting approval. Do not implement until approved.
+Every slice has now passed a source-grounded anchor-fidelity review (Pass-3/3b for P6-0b, Pass-3c
+for the rest); all blockers were folded as **6 separate per-slice commits** — see Appendix B and the
+Pass-3 / Pass-3b / Pass-3c tables.
 
 **Post-review additions (parent, after pass 1):** (a) classifier-model decision resolved
 (`--thinking off` + child-default model + model-only override — see REQ-5 / Open Decisions);
@@ -96,8 +100,8 @@ Intent routing removes the taxonomy burden; the disambiguation fixes remove the 
 | REQ-14 | `parseRunArgs` warns (does not silently drop) when a `--profile` token appears in the task position rather than right after the agent name; `parseDoArgs` extracts a leading `--profile <name>` for `/agents do` | `testParseRun_warnsMisplacedProfile`, `testDo_profileFlagParsing` | SHOULD | Fixes defect #3; `parseDoArgs` (M-003) |
 | REQ-15 | Routing metadata (engine, agent, confidence, reason, applied profile rendered with **effective** model/thinking, fallback flag) is surfaced bounded; raw classifier prompt/output is not persisted | `testDo_emitsRoutingMetadata`, `testDo_metadataShowsEffectiveModel`, `testDo_doesNotPersistClassifierRaw` | SHOULD | Honest metadata (R-005); metadata-first observability |
 | REQ-16 | Child `pi` binary is resolved like the upstream reference `getPiInvocation()`: `process.execPath` + `process.argv[1]` when argv[1] is a real (non-`/$bunfs/root/`) script, else `process.execPath` for non-generic runtimes, else `"pi"` (or explicit `piCommand`). Used by both the target-agent spawn and the classifier spawn | `testPiInvocation_realScript`, `testPiInvocation_bunVirtualFallback`, `testPiInvocation_genericRuntimeFallsBackToPath`, `testPiInvocation_explicitCommandWins` | MUST | Analysis finding #1: hardcoded `"pi"` breaks bun-single-file/npx/non-PATH installs (`child-args.ts:26`) |
-| REQ-17 | **Exact transport contract** (B-101): argv keeps `-p` with **no positional**; the **role block** (Agent/Source/Role prompt/Allowed tools/Output contract) moves to the **system-prompt layer** via `--append-system-prompt <file>` (file path, written 0600 like the current temp-prompt); the **delegated task alone** is delivered on **stdin** (`stdio[0]="pipe"`, unchanged), so `pi -p` reads it as the user prompt. `-p @file` is **not** used. `buildChildPromptText` splits into `buildChildSystemText` (role block) + the bare task. Diverges intentionally from the reference's *positional* task — stdin is the extension's verified-working channel (`pi -p` reads stdin with no positional) | `testChildArgs_rolePromptToSystemLayer`, `testChildArgs_taskOnlyOnStdin`, `testChildArgs_keepsDashP_noPositional`, `testChildArgs_noBareAtFilePromptArg` | SHOULD | Findings #2/#3 |
-| REQ-17b | **Fixture-change ledger** (B-102 — "tests stay green" was false): REQ-17 **edits** the existing transport assertions. Enumerated: `test-child-args-jsonl.mjs:26-28` (`stdinText` matched `/Role prompt:/`,`/Delegated task:/`,task → becomes: `stdinText` is the bare task; new asserts on the `--append-system-prompt` file content for the role block) and `test-child-runner.mjs:73,128-130` (`stdinText.includes("Agent:"/"Source:"/task)` → role asserts move to the system-text helper, task stays on stdin). The Output-Contract block (`requiredSections`/`maxSummaryChars`/`verdicts`) moves **with the role** into the system layer | `testChildArgs_outputContractInSystemLayer`, updated `test-child-args-jsonl.mjs`, updated `test-child-runner.mjs` | SHOULD | Behavior change to ALL child runs → **focused review before P6-0b**; fixtures change deliberately, not silently |
+| REQ-17 | **Exact transport contract** (B-101; transport model resolved Pass-3 B1/B2): argv keeps `-p` with **no positional**; the **role block** (Agent/Source/Role prompt/Allowed tools/Output contract) moves to the **system-prompt layer** via `--append-system-prompt <raw-path>` carried on a **new independent `ChildPiInvocation.systemPromptFile` channel** (orthogonal to `promptTransport`; the runner `mkdtemp`s a 0700 dir and writes the file 0600/`wx`; `buildChildPiArgs` **requires** `options.systemPromptPath`). `promptTransport` collapses to **stdin-only** and carries the **delegated task alone** (`stdio[0]="pipe"`), so `pi -p` reads it as the user prompt. `-p @file`, the `private-temp-file` task arm, and `buildPromptTransport` are **removed**. `buildChildPromptText` → `buildChildSystemText` (role block, no task). Diverges intentionally from the reference's *positional* task — stdin keeps the task out of argv (`test-child-args-jsonl.mjs:29` invariant) | `testChildArgsDefaultStdinTransport` (bare-task stdin + no `@`-arg), `testChildArgs_systemPromptFileChannelAndPreview`, `testSystemTextIsDeterministic`, `testChildArgsRejectsUnsafeInputs` | SHOULD | Findings #2/#3 |
+| REQ-17b | **Fixture-change ledger** (B-102 — "tests stay green" was false; **widened Pass-3 B3**): REQ-17 **edits four** `test-child-args-jsonl.mjs` tests + one runner test, each an anchored P6-0b ledger step. Enumerated: (1) `testChildArgsDefaultStdinTransport` (lines 24-30) → system-file channel + bare-task stdin; (2) `testChildArgsPrivateTempTransportAndPreview` (36-54) → renamed `testChildArgs_systemPromptFileChannelAndPreview` (asserts `systemPromptFile` + `<system-prompt-file>` redaction, no `@`-arg); (3) `testChildArgsRejectsUnsafeInputs` (63-66) → `systemPromptPath` required / control-char throws; (4) `testPromptTextIsDeterministicAndBoundedByTaskValidation` (69-74) → `buildChildSystemText`, no `Delegated task:` line; (5) `test-child-runner.mjs:128-130` → bare-task stdin + role asserted on the surviving `result.invocation.systemPromptFile.fileText` (not the rm'd temp path); plus (6) the **import line** `test-child-args-jsonl.mjs:2` (renamed export) and (7) `test-subagent-tool.mjs:735` redaction fixture (old shape → `stdin` + `systemPromptFile`, and a new assert that `details.invocation.systemPromptFile === undefined`). The Output-Contract block (`requiredSections`/`maxSummaryChars`/`verdicts`) moves **with the role** into the system layer | updated `test-child-args-jsonl.mjs` (import + 4 tests), updated `test-child-runner.mjs`, updated `test-subagent-tool.mjs` | SHOULD | Behavior change to ALL child runs → **focused review before P6-0b**; fixtures change deliberately, not silently |
 | REQ-18 | A real-`pi` smoke test spawns an actual child via the run path and asserts (a) read-only, (b) parseable `--mode json` JSONL, (c) role in the system prompt. Skips when `pi` absent — but skip is a **visible non-pass signal** (not silent green): documented as a **local pre-merge manual gate**, optionally a nightly job with `pi` installed. It is NOT counted as CI coverage | `manual gate: run-p6-smoke.sh` | SHOULD | R-103: `pi` is absent in CI, so an in-CI smoke test is always-skipped assurance theater |
 | REQ-19 | **CI runs the agents/ unit suite.** A `.github/workflows/ci.yml` step invokes the P6 runners (`run-p6-0-tests.sh`…`run-p6-4-tests.sh`); the smoke test is excluded (no `pi` in CI). Flags the **pre-existing gap**: no `agents/` step exists today (`ci.yml` runs only web-search/tool-context-loader/permission-policy) — the P3/P4 suites also don't run in CI (DEFER backfilling those, but call it out) | `manual: ci.yml step present`, `git grep run-p6 .github/workflows` | MUST | R-103 + Rule 13 (enforce in CI, not just docs) — P6 unit tests are worthless if CI never runs them |
 | REQ-20 | **E2E runs ACTUAL agents.** `run-p6-e2e.sh` spawns real `pi` subagents end-to-end against a disposable fixture repo + temp `HOME`/`PI` dirs (no pollution of the user's `~/.pi`). Scenarios E2E-1…E2E-7 below assert real built-in runs honor their output contract, `/agents do` actually classifies→routes→runs, a registered agent auto-runs at high confidence, and **no file mutation occurs** (fixture `git status` stays clean). Skips with a visible non-pass when `pi` absent; manual/nightly gate, not CI | `e2e gate: run-p6-e2e.sh` (E2E-1…E2E-7) | SHOULD | User request: prove the feature with real agent runs, not just mocks + a single smoke |
@@ -205,10 +209,10 @@ export const ROLE_DEFAULT_PROFILE = Object.freeze({
   invocation with `--mode json --no-session --no-extensions --no-skills --no-prompt-templates
   --no-themes --no-tools`, prompt via stdin (no `AgentSpec`, no `--tools`). Prompt lists each
   candidate `name: description` and demands a single JSON object reply.
-- `child-runner.ts` exports a thin `collectChildProcess(invocation, limits, deps)` core;
-  existing `spawnAndCollect` is refactored to call it (existing child-runner tests stay green —
-  Rule 15). The classifier uses `collectChildProcess` directly, so `spawnAndCollect` is **not**
-  forked.
+- `child-runner.ts` APPENDs a thin exported `collectChildProcess(invocation, limits)` wrapper
+  that calls the **unchanged** private `spawnAndCollect` (no refactor, lowest blast radius — the
+  existing child-runner tests stay green). It injects `defaultSpawner`/`Date.now` internally so the
+  classifier caller passes only `CLASSIFIER_LIMITS`.
 
 ## Existing Hook Points
 
@@ -222,9 +226,9 @@ export const ROLE_DEFAULT_PROFILE = Object.freeze({
 | `agents/lib/can-run-agent.ts` | L60 | `canRunAgent` | Unchanged; authority for registered picks |
 | `agents/lib/child-args.ts` | L26 | `DEFAULT_PI_COMMAND = "pi"` hardcoded | REQ-16: port `getPiInvocation()` binary resolution |
 | `agents/lib/child-args.ts` | L33-42 | argv build: `--tools`, `-p @file`/stdin transport | REQ-17: role → `--append-system-prompt`, task → user prompt; remove `-p @file` |
-| `agents/lib/child-runner.ts` | L206 | `spawnAndCollect` (private) | Refactor: extract exported `collectChildProcess` core |
+| `agents/lib/child-runner.ts` | L206 | `spawnAndCollect` (private) | APPEND exported `collectChildProcess` wrapper (no refactor) |
 | `agents/lib/diagnostics.ts` | L31-52 | `AgentDiagnosticRecord` (has `spec`, `runnable`) | Candidate source (REQ-7); add R-004 collision finding (REQ-12) |
-| `agents/lib/profiles.ts` | L338 | `BUILT_IN_PROFILE_DEFS` (no-op `fast-local`) | Add `profileEffect()` (REQ-13); role-default source |
+| `agents/lib/profiles.ts` | L338 | `BUILT_IN_PROFILE_DEFS` (no-op `fast-local`) | Role-default source; `profileEffect()` now lives in P6-1 `intent-router.ts`, not here |
 | `agents/lib/specs.ts` | L3,L101 | `RESERVED_BUILT_IN_AGENT_NAMES`, name regex | Role enumeration; collision basis |
 
 ## Slice Ladder
@@ -232,31 +236,39 @@ export const ROLE_DEFAULT_PROFILE = Object.freeze({
 | Slice | Objective | Primary files | Tests | Hard stops |
 |---|---|---|---|---|
 | `P6-0a` | Child `pi` binary resolution | `lib/child-args.ts` | REQ-16 | Port reference `getPiInvocation`; existing child-runner/args tests green |
-| `P6-0b` | Role→system-prompt layering + `-p @file` fix + smoke test | `lib/child-args.ts`, `lib/child-runner.ts`, **new** `run-p6-smoke.sh` | REQ-17,18 | Behavior change to ALL child runs → **focused review first**; existing run tests green |
+| `P6-0b` | New `systemPromptFile` channel (role→`--append-system-prompt`) + remove `-p @file` + smoke test | `lib/child-args.ts`, `lib/child-runner.ts`, fixtures, **new** `run-p6-smoke.sh` | REQ-17,17b,18 | Behavior change to ALL child runs → **focused review first**; 4-test+runner ledger; existing run tests green |
 | `P6-1` | Pure router core | **new** `lib/intent-router.ts`, `test-fixtures/test-intent-router.mjs` | REQ-1,2,3 + map/const | **No** existing-file changes |
 | `P6-2` | Classifier spawn + fallback | `lib/intent-router.ts`, `lib/child-runner.ts` (export `collectChildProcess`) | REQ-4,5 | Classifier never gets `--tools`; existing child-runner tests green |
 | `P6-3a` | Pure `runResolvedTarget` extraction | `lib/run-resolver.ts` | existing `/agents run` tests + added TOCTOU/per-`gate.code` coverage | **Zero behavior change** |
 | `P6-3b` | `/agents do` wiring | `index.ts`, `lib/run-resolver.ts` | REQ-6,7,8,9,10,11,15 | Must not bypass `canRunAgent` for registered |
-| `P6-4` | Disambiguation hardening | `lib/diagnostics.ts`, `lib/profiles.ts`, `lib/run-resolver.ts` | REQ-12,13,14 | Independent; may land first |
+| `P6-4` | Disambiguation hardening | `lib/diagnostics.ts`, `lib/run-resolver.ts`, `index.ts` | REQ-12,13,14 | Independent (needs P6-1's `profileEffect`); may land any time after P6-1 |
 
 ### Dependency graph
 
 ```text
 P6-0a ── P6-0b ─┐
                 ├─ P6-2 (classifier reuses getPiInvocation + collectChildProcess)
-P6-1 ───────────┘     └─ P6-3a ── P6-3b
+P6-1 ───────────┤     └─ P6-3a ── P6-3b
+   (shared:     │
+    profileEffect,
+    CLASSIFIER_LIMITS)
 P6-4 (independent — can land before or in parallel)
 ```
 
 P6-0a is foundational: both the target-agent spawn **and** the new classifier spawn (P6-2)
 benefit from correct binary resolution, so it lands first. P6-0b (transport layering) is
 independent of routing but shares files — sequence it before P6-2 to avoid churn.
+**P6-1 is a hard predecessor of P6-3b and P6-4** because it now owns `profileEffect`,
+`CLASSIFIER_LIMITS`, `ROLE_DEFAULT_PROFILE`, and the `IntentCandidate`/`IntentDecision` types
+(Pass-3c micro-decision #1). With `profileEffect` in P6-1, **P6-4 is genuinely parallel** — it no
+longer defines a symbol P6-3b imports (the earlier false "parallel" edge is removed).
 
-**M-104 (slice coupling):** P6-2 extracts `collectChildProcess` from the **post-P6-0b**
-`spawnAndCollect`, i.e. *after* the transport change has landed (the stdin/task handoff at
-`child-runner.ts:397` is what P6-0b edits and what the extraction wraps). So P6-2's extraction
-depends on P6-0b being final; the classifier path uses the same stdin contract REQ-17 settles.
-If P6-0b is cut (Cut Order #3), P6-2 extracts from the *unchanged* `spawnAndCollect` instead.
+**M-104 (slice coupling — corrected by Pass-3c):** P6-2's `collectChildProcess` is a thin wrapper
+over `spawnAndCollect`, which **P6-0b does NOT modify** (P6-0b edits the `runChildAgent` line-142
+region and the stdin handoff at `child-runner.ts:397` is left byte-identical). So the wrapper is
+**P6-0b-independent** — it works whether or not P6-0b has landed. The only real coupling is the
+*task-on-stdin contract* the classifier relies on, which REQ-17 settles; that is a soft, not hard,
+dependency. (Earlier drafts wrongly said P6-2 "extracts from post-P6-0b `spawnAndCollect`.")
 
 ## Cut Order
 
@@ -325,26 +337,26 @@ the task. A `--profile` later in the task warns (REQ-14). Empty task → usage.
 ## Test Case Catalog
 
 ```text
-Group 0: run-path hardening — P6-0 (11 + smoke)
+Group 0: run-path hardening — P6-0 (4 new + 5 ledger-edited + smoke)
   testPiInvocation_realScript, testPiInvocation_bunVirtualFallback,
   testPiInvocation_genericRuntimeFallsBackToPath, testPiInvocation_explicitCommandWins,
-  testChildArgs_rolePromptToSystemLayer, testChildArgs_taskOnlyOnStdin,
-  testChildArgs_keepsDashP_noPositional, testChildArgs_noBareAtFilePromptArg,
-  testChildArgs_outputContractInSystemLayer,
-  updated test-child-args-jsonl.mjs, updated test-child-runner.mjs   (REQ-17b ledger)
-  smoke (manual gate, not CI): run-p6-smoke.sh (real pi; skips when absent)
+  ledger-edited (REQ-17b): testChildArgsDefaultStdinTransport,
+    testChildArgs_systemPromptFileChannelAndPreview, testChildArgsRejectsUnsafeInputs,
+    testSystemTextIsDeterministic   (test-child-args-jsonl.mjs)
+    + test-child-runner.mjs:128-130 (bare-task stdin + role in --append-system-prompt file)
+  smoke (manual gate, not CI): run-p6-smoke.sh (real pi; skips when absent → exit 2)
 
-Group 1: heuristic (7)
+Group 1: heuristic (8)
   testHeuristic_reviewVerbs, testHeuristic_planVerbs, testHeuristic_scoutVerbs,
   testHeuristic_deterministic, testHeuristic_clamp, testHeuristic_emptyRejected,
-  testHeuristic_ambiguousDefault  (+ testHeuristic_tieBreakDeterministic)
+  testHeuristic_ambiguousDefault, testHeuristic_tieBreakDeterministic
 
 Group 2: classifier-output validation (8)
   testParse_validJson, testParse_jsonInCodeFence, testParse_unknownAgentRejected,
   testParse_nonJsonRejected, testParse_confidenceClamped, testParse_extraKeysRejected,
   testParse_multipleJsonObjectsRejected, testParse_jsonEmbeddedInProseRejected
 
-Group 3: classifier args + fallback (10)
+Group 3: classifier args + fallback (11)
   testClassifierArgs_emitsNoTools, testClassifierArgs_omitsToolsFlag,
   testClassifierArgs_noSession, testClassifierArgs_thinkingOff, testClassifierArgs_boundedLimits,
   testClassifierArgs_overrideModelOnly, testClassifierArgs_overrideThinkingIgnoredWithWarning,
@@ -412,7 +424,8 @@ test's superset and the primary defense against Pi CLI/JSONL drift.
 | Heuristic keyword list rots / English-only | Low | Pure + table-driven fallback; LLM covers messy prompts |
 | Classifier latency/cost | Low | `--thinking off` + 20s/512-char bounds; heuristic-only cut exists; child default model (model-only override for cheaper pin) |
 | CI never runs the `agents/` suite, so P6 unit tests don't execute (R-103) | Medium | REQ-19 adds a `ci.yml` step for the P6 runners; smoke test is a manual gate, not CI |
-| P6-0b transport change regresses ALL existing child runs (role now in system layer) | Medium | Focused review before P6-0b; keep every existing run/child-runner test green; `run-p6-smoke.sh` proves real-`pi` behavior; P6-0b is independently revertable |
+| P6-0b transport change regresses ALL existing child runs (role now in system layer) | Medium | New `systemPromptFile` channel keeps role+task orthogonal (no single-channel overload, Pass-3 B1); runner owns mkdtemp/0600/cleanup (B2); **4-test + runner ledger** edits the contract explicitly, never silently (B3); `run-p6-smoke.sh` proves real-`pi` role-takes-effect (M1); `<system-prompt-file>` redaction (M2); P6-0b is independently revertable |
+| `--append-system-prompt` is read as literal text (not a file) by the installed `pi` | Low | Raw-path read confirmed against upstream reference (`index.ts:327`); `run-p6-smoke.sh` is the per-version guard (output-contract sections present ⇒ role took effect) |
 | `getPiInvocation` mis-resolves in an exotic runtime | Low | Mirror the upstream reference exactly; explicit `piCommand`/`agentsPiCommand` override remains the escape hatch |
 
 ## Open Decisions
@@ -448,7 +461,9 @@ All MUST requirements passing = done for first merge.
 |---|---|---|---|---|
 | 1 | claude-subagent (adversarial) | Opus 4.8 | 3 blockers + 5 high + 6 medium | conditional-go |
 | 2 | claude-subagent (adversarial, P6-0 + classifier focus) | Opus 4.8 | 2 blockers + 3 high + 4 medium + 1 ratify | conditional-go |
-| 3 | (pending — focused review of P6-0b transport, then approval) | | | |
+| 3 | claude (focused P6-0b transport review) | Opus 4.8 | 4 blockers + 2 major + 2 minor | conditional-go (P6-0b re-specced; build still gated) |
+| 3b | claude-subagent (independent second opinion on the re-spec) | Opus 4.8 | 4 blockers + 1 major + 2 minor (NO-GO) | all resolved → executor-ready; build still gated |
+| 3c | 5 parallel claude-subagents (per-slice anchor-fidelity: P6-0a/1/2/3a-3b/4) | Opus 4.8 | 14 blockers + ~12 major across all slices | all resolved (6 per-slice commits) → executor-ready; build still gated |
 
 ### Pass-2 resolved (B-1xx/R-1xx/M-1xx)
 
@@ -464,6 +479,58 @@ All MUST requirements passing = done for first merge.
 | M-103 | Cut Order omitted P6-0 | Added: P6-0b cuttable (hardening), P6-0a + REQ-19 non-cuttable |
 | M-104 | `collectChildProcess` slice-ownership coupling | Note added: P6-2 extracts from post-P6-0b `spawnAndCollect` |
 | A-101 | registered-always-confirm narrowed the locked "confirm-unless-high-confidence" | **User ratified the OTHER way:** registered picks **do** auto-run at ≥0.8. Reinstated uniform auto-run; safety preserved by a **read-only-tools rail** (no-op in P3, future-proof) + `canRunAgent`. REQ-8/Safety/flow/invariants updated |
+
+### Pass-3 resolved (P6-0b focused transport review)
+
+All findings folded into the re-specced `P6-0b` (Appendix B), REQ-17/17b, and the Risk table.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| B1 | Blocker | `ChildPromptTransport` is single-channel; the old steps made `promptTransport` both `stdin` (task) and `private-temp-file` (role) at once — impossible, so either the system file was never written or the task never reached stdin | Added an **independent** `ChildPiInvocation.systemPromptFile` channel; `promptTransport` collapses to stdin-only carrying the bare task (0b.1/0b.3/0b.4) |
+| B2 | Blocker | Plan said "reuse the existing temp-file write" — but production never allocated it (private-temp path is test-only); `buildChildPiArgs` is pure and cannot `mkdtemp` | Runner allocates `mkdtemp` 0700 + writes 0600/`wx` + `rm -rf` in `finally`, passes `systemPromptPath` into `buildChildPiArgs` (0b.8), mirroring the spill-file lifecycle |
+| B3 | Blocker | Ledger covered 2 assertions; removing `-p @file` + the task temp transport actually breaks **4** `test-child-args-jsonl.mjs` tests + the runner test | REQ-17b widened; ledger steps 0b.9–0b.13 enumerate all five |
+| B4 | Blocker | `run-p6-smoke.sh` named in the ladder/risk table but no Appendix step created it | Added create step 0b.14 (visible non-pass `exit 2` when `pi` absent) |
+| M1 | Major | `--append-system-prompt` raw-path read + the behavior change (role now augments pi's full system prompt) had no automated guard | Raw-path confirmed vs upstream `index.ts:327`; 0b.14 smoke asserts role-takes-effect (output-contract sections present); new Risk row |
+| M2 | Major | `redactChildPiArgv` only redacted `@`-args → the raw system temp path leaked into `argvPreview`/displayed command | Step 0b.7 redacts the token after `--append-system-prompt` to `<system-prompt-file>` |
+| m1 | Minor | stdin-vs-positional divergence from upstream undocumented | Rationale added to REQ-17 + 0b design (keeps task out of argv) |
+| m2 | Minor | `finally` cleanup still targeted the removed `promptTransport.path` | 0b.8 cleans the new `sysDir` (file + dir) and on spawn-error |
+
+### Pass-3b resolved (independent second opinion on the P6-0b re-spec)
+
+A fresh claude-subagent adversarially re-checked the Pass-3 re-spec against source and returned
+**NO-GO**; all findings folded into the steps above. These are exactly the "phantom anchor / hidden
+fix" failure modes a low-capability executor cannot recover from.
+
+| # | Severity | Finding (verified file:line) | Resolution |
+|---|---|---|---|
+| 3b-B1 | Blocker | `test-child-args-jsonl.mjs:2` imports `buildChildPromptText`; 0b.2 renames the export but no step fixed the import → whole fixture fails to load | New step **0b.10** edits the import to `buildChildSystemText` |
+| 3b-B2 | Blocker | 0b.6 anchored on "`tempPromptPath` checks in `validateChildArgInputs`" — none exist there (they live in the deleted `buildPromptTransport`, `child-args.ts:76-79`) → phantom anchor, executor STOPs | 0b.6 re-anchored verbatim on the `explicitToolContextLoaderPath` guard; `systemPromptPath` guard appended |
+| 3b-B3 | Blocker | 0b.11 range "63-66" swept in line 66, a **kept** `explicitToolContextLoaderPath` throw | 0b.13 pinned to exactly the three lines 63-65; line 66 explicitly preserved |
+| 3b-B4 | Blocker | `test-subagent-tool.mjs:735` hand-builds the removed `private-temp-file` shape and is unlisted; its `fileText` carries role content that must stay stripped | New steps **0b.16/0b.16b**: migrate the fixture to `stdin` + `systemPromptFile`, assert `details.invocation.systemPromptFile === undefined` |
+| 3b-M3 | Major | `child-runner.ts:92,96` call `buildChildPiArgs(spec, task, options)` **before** the line-142 allocation → throw once 0b.6 requires `systemPromptPath`, regressing the profile-fail-closed contract | New step **0b.8** converts both to the inline spawn-error stub (`:105-106` idiom); `buildChildPiArgs` now called only at line 142 |
+| 3b-m1 | Minor | 0b.13 (old) asserted by re-reading the `--append-system-prompt` file, but `finally` `rm -rf`s it before the await resolves → ENOENT | 0b.15 asserts on the surviving `result.invocation.systemPromptFile.fileText` |
+| 3b-m2 | Minor | Line-pinned anchors had drifted (e.g. `testChildArgsDefaultStdinTransport` is 13-34, not 24-30) | All ledger anchors re-pinned to **verbatim function-name / quoted-line** anchors; embedded line numbers are now navigational only |
+
+(Pass-3b n1 — secrecy — was a **REJECT**: role in a `0600` file inside a `0700` `mkdtemp` dir is
+stricter than the old argv exposure, and the task-not-in-argv invariant is preserved.)
+
+### Pass-3c resolved (per-slice anchor-fidelity sweep — 5 parallel reviewers)
+
+Five independent claude-subagents re-checked P6-0a/P6-1/P6-2/P6-3a-3b/P6-4 against source; every
+slice came back NO-GO/CONDITIONAL. All findings folded as **6 separate per-slice commits**. The
+recurring pattern: the *easy* steps (CREATE/APPEND new files) were specified; every step touching an
+*integration seam* was prose. Headline fixes by slice:
+
+| Slice | Key blockers resolved |
+|---|---|
+| P6-0a | `getPiInvocation` read `process.argv[1]`/`execPath` as globals (untestable) → `env` injection seam; missing 4th REQ-16 test added |
+| P6-1 | `parseClassifierOutput` top-level-JSON extraction had no algorithm → spelled out (fence pass + brace-depth/string-aware scan); heuristic matcher/`signals` scope defined; now hosts `profileEffect`/`CLASSIFIER_LIMITS` |
+| P6-2 | bounded limits had no home → `CLASSIFIER_LIMITS` + `collectChildProcess` self-defaults spawn/now; `command:"pi"` (no argv desync); model-only override; missing imports + `noSession` test |
+| P6-3a/3b | `runIntentCommand`/`parseDoArgs` were prose → full exact bodies; run-resolver imports; verify pointed at tests that actually drive the run path; extraction substitutions made explicit |
+| P6-4 | three REQ-12/13/14 **display** edits existed only in prose → real anchored steps; `formatProfileList` is in `index.ts`; step 4.3 re-anchored to the correct `else` branch |
+
+Micro-decisions ratified: (1) `profileEffect` in P6-1 shared block (kills the false P6-4-parallel
+edge); (2) `getPiInvocation` `env` seam; (3) `CLASSIFIER_LIMITS` const.
 
 ### Resolved blockers / high-risk
 
@@ -497,11 +564,11 @@ All MUST requirements passing = done for first merge.
 | File | Change |
 |---|---|
 | `agents/lib/child-args.ts` | P6-0a: `getPiInvocation()` binary resolution (REQ-16). P6-0b: role → `--append-system-prompt`, task → user prompt, remove `-p @file` (REQ-17). |
-| `agents/lib/child-runner.ts` | P6-0b: thread the transport change through the prompt-file write. P6-2: extract exported `collectChildProcess(invocation, limits, deps)`; refactor `spawnAndCollect` to call it (tests green). |
+| `agents/lib/child-runner.ts` | P6-0b: thread the transport change through the prompt-file write. P6-2: APPEND exported `collectChildProcess(invocation, limits)` thin wrapper over the **unchanged** `spawnAndCollect` (no refactor; tests green). |
 | `agents/index.ts` | Add `"do"` action/completions; dispatch → `runIntentCommand`. |
 | `agents/lib/run-resolver.ts` | Extract `runResolvedTarget` (P6-3a); add `runIntentCommand`, `parseDoArgs`; REQ-14 warning. |
 | `agents/lib/diagnostics.ts` | Candidate enumeration helper; R-004 collision finding. |
-| `agents/lib/profiles.ts` | `profileEffect()` helper. |
+| `agents/lib/profiles.ts` | No P6 change (role-default source only; `profileEffect()` lives in P6-1 `intent-router.ts`). |
 | `.github/workflows/ci.yml` | REQ-19: add a step running the P6 unit runners (`run-p6-*-tests.sh`); excludes smoke/E2E (no `pi` in CI). |
 | `agents/README.md` / `docs/USER_MANUAL.md` | Document `/agents do` (propose-first per Rule 1). |
 
@@ -571,6 +638,19 @@ export const ROLE_KEYWORDS = Object.freeze({
   planner:  { plan: 3, design: 3, "break down": 3, roadmap: 2, steps: 2, architecture: 2, approach: 2 },
   scout:    { find: 2, where: 2, locate: 2, explore: 2, recon: 2, inspect: 2, search: 2, "which files": 2 },
 }) as Readonly<Record<string, Readonly<Record<string, number>>>>;
+// profileEffect: defined HERE (P6-1) — not in P6-4 — so BOTH P6-3b (runIntentCommand role-default
+// guard) and P6-4 (display labels) import it from intent-router.ts. Structural param (no profiles.ts
+// import); only reads truthiness, so a ModelProfile (thinking?: ThinkingLevel ⊆ string) is assignable.
+export function profileEffect(p: { model?: string; thinking?: string }): "none" | "model" | "thinking" | "both" {
+  const m = !!p.model, t = !!p.thinking;
+  return m && t ? "both" : m ? "model" : t ? "thinking" : "none";
+}
+// CLASSIFIER_LIMITS: the bounded spawnAndCollect options the classifier child runs under (REQ-5).
+// P6-2 builds the options object from these + the injected spawn/now. Values are concrete, not knobs.
+export const CLASSIFIER_LIMITS = Object.freeze({
+  stdoutLimit: 65_536, stderrLimit: 4_096, timeoutMs: 20_000,
+  maxJsonLineBytes: 65_536, maxResultChars: 512, killSignal: "SIGTERM", forceKillAfterMs: 1_000,
+});
 export type IntentDecision = { agent: string; confidence: number; reason: string;
   engine: "llm" | "heuristic-fallback"; signals?: string[] };
 export type IntentCandidate = { name: string; source: "built-in" | "user" | "project";
@@ -587,10 +667,10 @@ All P6-1 steps are `CREATE` or `APPEND` to brand-new files — **no existing cod
 
 | Step | File | Exact action (one file) | Verify |
 |---|---|---|---|
-| 1.1 | `agents/lib/intent-router.ts` | **CREATE** (Write). Full contents = the Shared constants/types block above verbatim. | `grep -c "HEURISTIC_SATURATION\|ROLE_KEYWORDS\|AMBIGUOUS_DEFAULT" agents/lib/intent-router.ts` == 3 |
-| 1.2 | `agents/lib/intent-router.ts` | **APPEND** at end of file. Add `export function classifyIntentHeuristic(task: string, candidates: string[]): IntentDecision`. Body: if `task.trim()===""` `throw new Error("task must be non-empty")`. Lowercase task. For each role in `ROLE_KEYWORDS`, sum the weight of every keyword whose whole-word/phrase occurs in the task; collect matched keywords as `signals`. Pick the highest-weight role; break ties by first occurrence in `TIE_ORDER`; if total weight 0 → return `{...AMBIGUOUS_DEFAULT, reason:"no intent keywords matched", engine:"heuristic-fallback", signals:[]}`. Else `confidence = Math.min(1, weight / HEURISTIC_SATURATION)`, `reason = \`matched: ${signals.join(", ")}\``, `engine:"heuristic-fallback"`. | (covered by 1.4) |
-| 1.3 | `agents/lib/intent-router.ts` | **APPEND** at end of file. Add `export function parseClassifierOutput(raw: string, candidateNames: string[]): {ok:true; decision:IntentDecision} | {ok:false; reason:string}`. Implement States A–H from the Contracts section with EXACT reason strings `"non-json"`,`"multiple-objects"`,`"embedded"`,`"unknown-agent"`,`"bad-confidence"`,`"bad-shape"`; extract the last top-level `{…}` or a single ```json fence; require keys exactly `{agent,confidence,reason}`; `agent ∈ candidateNames`; `confidence` finite → `Math.max(0, Math.min(1, confidence))`; on success `engine:"llm"`. | (covered by 1.5) |
-| 1.4 | `agents/test-fixtures/test-intent-router.mjs` | **CREATE** (Write). Group 1 + Group 2 tests with the exact asserts named in the Test Case Catalog (e.g. `testHeuristic_reviewVerbs`: `classifyIntentHeuristic("review this for bugs", ["reviewer","planner","scout"]).agent === "reviewer"`; `testParse_multipleJsonObjectsRejected`: two `{…}` → `{ok:false, reason:"multiple-objects"}`). Self-run `main()` exiting non-zero on failure. | `node agents/test-fixtures/test-intent-router.mjs` exits 0 |
+| 1.1 | `agents/lib/intent-router.ts` | **CREATE** (Write). Full contents = the Shared constants/types block above verbatim (now also includes `profileEffect` and `CLASSIFIER_LIMITS`). | `grep -q 'export const HEURISTIC_SATURATION' f && grep -q 'export function profileEffect' f && grep -q 'export const CLASSIFIER_LIMITS' f && grep -q 'export const ROLE_KEYWORDS' f` (with `f=agents/lib/intent-router.ts`) |
+| 1.2 | `agents/lib/intent-router.ts` | **APPEND** at end of file. Add `export function classifyIntentHeuristic(task: string, candidates: string[]): IntentDecision`. Body: if `task.trim()===""` `throw new Error("task must be non-empty")`. **Matcher (exact):** for each keyword `kw`, build `new RegExp("\\b" + kw.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&") + "\\b", "i")` and test it against the raw `task` (the `\b` word boundaries handle whole-word **and** internal-space phrases like `"break down"`); a keyword counts at most once. For each role in `ROLE_KEYWORDS`, `weight` = sum of matched keyword weights. **`signals` scope (exact):** after picking the winning role, set `signals` to **only the winning role's** matched keywords (not other roles'). Pick the highest-`weight` role; break ties by first occurrence in `TIE_ORDER`; if total weight 0 → `{ ...AMBIGUOUS_DEFAULT, reason:"no intent keywords matched", engine:"heuristic-fallback", signals:[] }` — but if `AMBIGUOUS_DEFAULT.agent` (`"scout"`) `∉ candidates`, use `candidates[0]` as the agent (n1 guard). Else `confidence = Math.min(1, weight / HEURISTIC_SATURATION)`, `reason = \`matched: ${signals.join(", ")}\``, `engine:"heuristic-fallback"`. | (covered by 1.4) |
+| 1.3 | `agents/lib/intent-router.ts` | **APPEND** at end of file. Add `export function parseClassifierOutput(raw: string, candidateNames: string[]): {ok:true; decision:IntentDecision} | {ok:false; reason:string}`. **Algorithm (exact, no decisions):** (a) **fence pass** — `const fences = [...raw.matchAll(/```json\s*([\s\S]*?)```/g)]`; if `fences.length > 1` → `{ok:false, reason:"multiple-objects"}`; `const fenced = fences.length === 1`; `const candidate = fenced ? fences[0][1] : raw`. (b) **top-level object scan** of `candidate` — walk chars tracking brace `depth`, counting `{`/`}` ONLY when not inside a double-quoted string (toggle `inStr` on unescaped `"`, honor `\\` escape); record each maximal `[start,end]` run that opens at depth 0 on `{` and returns to depth 0 on `}`. (c) `runs.length === 0` → `"non-json"`; `runs.length > 1` → `"multiple-objects"`. (d) exactly one run `[s,e]`: if `!fenced && (candidate.slice(0,s).trim() !== "" || candidate.slice(e+1).trim() !== "")` → `"embedded"`. (e) `JSON.parse(candidate.slice(s,e+1))` in try/catch (catch → `"non-json"`). (f) keys must be EXACTLY `{agent,confidence,reason}` (no more/less) else `"bad-shape"`; `typeof confidence !== "number" || !Number.isFinite(confidence)` → `"bad-confidence"`; `!candidateNames.includes(agent)` → `"unknown-agent"`. (g) success → `{ok:true, decision:{ agent, confidence: Math.max(0, Math.min(1, confidence)), reason: String(reason), engine:"llm" }}`. | (covered by 1.4) |
+| 1.4 | `agents/test-fixtures/test-intent-router.mjs` | **CREATE** (Write). Group 1 (8 tests, incl. `testHeuristic_tieBreakDeterministic`) + Group 2 (8) with the exact asserts from the Catalog. Specified inputs: `testHeuristic_reviewVerbs("review this for bugs") → "reviewer"`; `testHeuristic_clamp("review audit bug critique") → confidence === 1` (weight 3+3+2+3=11 > 6); `testHeuristic_deterministic` = call twice with the same input, `assert.deepEqual` the two results; `testHeuristic_tieBreakDeterministic("plan the review", …) → "reviewer"` (reviewer before planner in `TIE_ORDER`); `testParse_multipleJsonObjectsRejected` two `{…}` → `{ok:false, reason:"multiple-objects"}`; `testParse_jsonEmbeddedInProseRejected("here is {\"agent\":\"scout\",…} ok") → "embedded"`. Self-run `main()` exiting non-zero on failure. | `node agents/test-fixtures/test-intent-router.mjs` exits 0 |
 | 1.5 | `agents/test-fixtures/run-p6-1-tests.sh` | **CREATE** (Write). Contents: `#!/usr/bin/env bash`, `set -euo pipefail`, `node "$(dirname "$0")/test-intent-router.mjs"`. `chmod +x`. | `bash agents/test-fixtures/run-p6-1-tests.sh` exits 0 |
 
 ### `P6-0a` — child `pi` binary resolution (REQ-16) — commit `P6-0a: getPiInvocation binary resolution`
@@ -602,31 +682,83 @@ it, and `buildChildPiArgs` still returns `command:"pi"`, so `test-child-args-jso
 
 | Step | File | Surgical action | Verify |
 |---|---|---|---|
-| 0a.1 | `agents/lib/child-args.ts` | **EDIT.** `ANCHOR:` `import { P3_FORBIDDEN_TOOLS, type AgentSpec } from "./specs.ts";` → `REPLACE:` same line + two new lines below: `import { existsSync } from "node:fs";` and `import path from "node:path";` | `grep -n 'node:fs' agents/lib/child-args.ts` |
-| 0a.2 | `agents/lib/child-args.ts` | **APPEND** at end of file. Add `export function getPiInvocation(args: string[], piCommandOverride?: string): { command: string; args: string[] } {` body: if `piCommandOverride` return `{command:piCommandOverride, args}`; `const currentScript = process.argv[1];` `const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");` if `currentScript && !isBunVirtualScript && existsSync(currentScript)` return `{command: process.execPath, args: [currentScript, ...args]}`; `const execName = path.basename(process.execPath).toLowerCase();` if `!/^(node|bun)(\.exe)?$/.test(execName)` return `{command: process.execPath, args}`; return `{command: DEFAULT_PI_COMMAND, args}`. | `grep -n 'export function getPiInvocation' agents/lib/child-args.ts` |
+| 0a.1 | `agents/lib/child-args.ts` | **EDIT.** `ANCHOR:` `import { P3_FORBIDDEN_TOOLS, type AgentSpec } from "./specs.ts";` → `REPLACE:` same line + two new lines below: `import { existsSync } from "node:fs";` and `import path from "node:path";` | `grep -q 'node:fs' agents/lib/child-args.ts && grep -q 'node:path' agents/lib/child-args.ts` (both imports landed — m2) |
+| 0a.2 | `agents/lib/child-args.ts` | **APPEND** at end of file. Add `export function getPiInvocation(args: string[], piCommandOverride?: string, env?: { argv1?: string; execPath?: string }): { command: string; args: string[] } {`. **`env` is a testability seam** (default to the real globals) so the bun-virtual / generic-runtime branches are reachable without mutating `process`. Body: if `piCommandOverride` return `{command:piCommandOverride, args}`; `const currentScript = env?.argv1 ?? process.argv[1];` `const execPath = env?.execPath ?? process.execPath;` `const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");` if `currentScript && !isBunVirtualScript && existsSync(currentScript)` return `{command: execPath, args: [currentScript, ...args]}`; `const execName = path.basename(execPath).toLowerCase();` if `!/^(node|bun)(\.exe)?$/.test(execName)` return `{command: execPath, args}`; return `{command: DEFAULT_PI_COMMAND, args}`. (`piCommandOverride` is dead in P6-0a's own wiring — it is consumed by **P6-2** step 2.2's classifier spawn, M1.) | `grep -n 'export function getPiInvocation' agents/lib/child-args.ts` |
 | 0a.3 | `agents/lib/child-runner.ts` | **EDIT.** `ANCHOR:` `import { buildChildPiArgs, type ChildPiArgsOptions, type ChildPiInvocation } from "./child-args.ts";` → `REPLACE:` add `getPiInvocation, ` after `buildChildPiArgs, `. | `grep -n getPiInvocation agents/lib/child-runner.ts` |
 | 0a.4 | `agents/lib/child-runner.ts` | **EDIT.** `ANCHOR:` `	return nodeSpawn(command, [...argv], options);` → `REPLACE:` `	const inv = command === "pi" ? getPiInvocation([...argv]) : { command, args: [...argv] };` newline `	return nodeSpawn(inv.command, inv.args, options);` | `node agents/test-fixtures/test-child-runner.mjs` exits 0 |
-| 0a.5 | `agents/test-fixtures/test-pi-invocation.mjs` | **CREATE.** Tests: `testPiInvocation_explicitCommandWins` (`getPiInvocation(["-p"], "pi-x").command === "pi-x"`); `testPiInvocation_realScript` (with a real `process.argv[1]`, command is `process.execPath` and args[0] is that script); `testPiInvocation_bunVirtualFallback` (stub a `/$bunfs/root/...` argv[1] via a wrapper arg). `main()` exits non-zero on failure. | `node agents/test-fixtures/test-pi-invocation.mjs` exits 0 |
+| 0a.5 | `agents/test-fixtures/test-pi-invocation.mjs` | **CREATE.** **All 4 REQ-16 tests**, using the `env` seam: `testPiInvocation_explicitCommandWins` (`getPiInvocation(["-p"], "pi-x").command === "pi-x"`); `testPiInvocation_realScript` (no `env` → real `process.argv[1]` exists → `command === process.execPath` and `args[0] === process.argv[1]`); `testPiInvocation_bunVirtualFallback` (`getPiInvocation(["-p"], undefined, { argv1: "/$bunfs/root/cli.js", execPath: "/usr/local/bin/bun" }).command === "pi"` — virtual script skipped, execName `bun` matches → final `DEFAULT_PI_COMMAND`); `testPiInvocation_genericRuntimeFallsBackToPath` (`getPiInvocation(["-p"], undefined, { argv1: undefined, execPath: "/opt/app/server" }).command === "/opt/app/server"` — no script, execName not node/bun → returns execPath). `main()` exits non-zero on failure. | `node agents/test-fixtures/test-pi-invocation.mjs` exits 0 |
 | 0a.6 | `agents/test-fixtures/run-p6-0-tests.sh` | **CREATE.** `#!/usr/bin/env bash`, `set -euo pipefail`, `node "$(dirname "$0")/test-pi-invocation.mjs"`. `chmod +x`. | `bash agents/test-fixtures/run-p6-0-tests.sh` exits 0 |
 
 ### `P6-0b` — role→system-prompt transport (REQ-17/17b) — commit `P6-0b: role to --append-system-prompt` — **FOCUSED REVIEW BEFORE BUILD**
 
-Design (resolved): split `buildChildPromptText` into (a) `buildChildSystemText(spec)` = the role
-block (Agent/Source/Role prompt/Allowed tools/Output contract — everything *except* Delegated
-task), written to the existing private temp file and passed as `--append-system-prompt <path>`;
-(b) the **bare trimmed task** delivered on stdin (unchanged transport mechanism). `-p` stays; no
-positional; `-p @file` removed. The temp-file write path already exists in `child-runner.ts`
-(`promptTransport.kind === "private-temp-file"`), so reuse it for the system file.
+**Design (resolved — Pass-3 B1/B2):** the child needs **two** prompt channels in the *same* run —
+the role in the system layer **and** the task on stdin — but the current `ChildPromptTransport`
+union is **single-channel** (`child-args.ts:14-16`) and the runner acts on exactly one
+(`child-runner.ts:151` writes the temp file *xor* `:397` feeds stdin). Overloading the task
+transport is impossible (it cannot be `stdin` *and* `private-temp-file` at once). So add an
+**independent** role channel:
+
+- New field on `ChildPiInvocation`: `systemPromptFile?: { path: string; fileText: string }` —
+  orthogonal to `promptTransport`.
+- `promptTransport` collapses to **stdin-only** (`{ kind: "stdin"; stdinText }`) and now carries
+  the **bare trimmed task**. The `private-temp-file` arm, `buildPromptTransport`, and the `-p @file`
+  push are **removed** — the task never uses a file again.
+- `buildChildPromptText(spec, task)` → `buildChildSystemText(spec)` (role block only:
+  Agent/Source/Role prompt/Allowed tools/Output contract — no task).
+- `buildChildPiArgs` **requires** `options.systemPromptPath` (validated like the old
+  `tempPromptPath`), pushes `--append-system-prompt <systemPromptPath>` (**raw path** — matches the
+  upstream reference `index.ts:327`, which reads the file content), and returns `systemPromptFile`.
+- **Temp allocation is the runner's job** (B2 — `buildChildPiArgs` is pure, and production *never*
+  exercised the old private-temp path: it is test-only). In `runChildAgent` (`child-runner.ts:142`
+  region) `mkdtemp` a `0700` dir, compute `systemPromptPath`, pass it in, write
+  `systemPromptFile.fileText` `wx`/`0600`, and `rm -rf` the dir in `finally` — mirroring the
+  spill-file lifecycle (`child-runner.ts:250-268`).
+- `redactChildPiArgv` redacts the **value after `--append-system-prompt`** to `<system-prompt-file>`
+  (M2 — it only redacted `@`-args before; the raw path would otherwise reach `argvPreview` and the
+  displayed command at `child-runner.ts:183`).
+- Divergence note (m1): task on **stdin**, not the reference's positional `Task:` (`index.ts:330`),
+  to preserve the invariant *"delegated task must not appear in argv"* (`test-child-args-jsonl.mjs:29`).
+
+**Fixture churn is larger than REQ-17b first stated** (Pass-3 B3, widened again by Pass-3b B4):
+removing `-p @file` and the task temp-file transport touches **four** `test-child-args-jsonl.mjs`
+tests + its import line, the runner test, **and** the `test-subagent-tool.mjs` redaction fixture
+(which hand-built the removed `private-temp-file` shape *and* must now prove the new
+`systemPromptFile` channel is stripped from displayed details — its `fileText` carries role
+content). **Two existing `buildChildPiArgs` call sites** at `child-runner.ts:92,96` (the
+profile-fail-closed paths) are *not* in the line-142 allocation region and would **throw** once
+`systemPromptPath` validation lands — they are converted to the same inline spawn-error stub the
+trust-fail paths already use (`:105-106`). All enumerated below as anchored ledger steps.
 
 | Step | File | Surgical action | Verify |
 |---|---|---|---|
-| 0b.1 | `agents/lib/child-args.ts` | **EDIT.** `ANCHOR:` the `buildChildPromptText` return array lines from `"Role prompt:",` through `trimmedTask,`. `REPLACE:` keep the same array but END it before the `"", "Delegated task:", trimmedTask` trio — i.e. `buildChildPromptText` now returns the **role block only** (drop the Delegated-task lines). Rename it `buildChildSystemText` and update its signature to `(spec: AgentSpec): string` (no `task` param). | `grep -n 'export function buildChildSystemText' agents/lib/child-args.ts` |
-| 0b.2 | `agents/lib/child-args.ts` | **EDIT.** `ANCHOR:` `	argv.push("--tools", spec.tools.join(","));` → `REPLACE:` same line + below: build `const systemText = buildChildSystemText(spec);` and push `argv.push("--append-system-prompt", <systemTempPath>)` (write `systemText` to the private temp file). | (covered by 0b.5) |
-| 0b.3 | `agents/lib/child-args.ts` | **EDIT.** `ANCHOR:` the `-p`/`@`-file block (`argv.push("-p");` … `if (promptTransport.kind === "private-temp-file") argv.push(\`@${promptTransport.path}\`);`) → `REPLACE:` `argv.push("-p");` only (no `@file`); set `promptTransport` to carry the **bare trimmed task** as `stdinText`. | `grep -n '@\${' agents/lib/child-args.ts` returns nothing |
-| 0b.4 | `agents/lib/child-runner.ts` | **EDIT.** `ANCHOR:` the `invocation.promptTransport.kind === "private-temp-file"` write block → `REPLACE:` write the **system text** file (mode 0600, `wx`) for `--append-system-prompt`; keep cleanup in `finally`. | `node agents/test-fixtures/test-child-runner.mjs` exits 0 |
-| 0b.5 | `agents/test-fixtures/test-child-args-jsonl.mjs` | **EDIT (ledger).** `ANCHOR:` lines 26-30 (`assert.match(...stdinText, /Role prompt:/)` … `role prompt must not appear in argv`) → `REPLACE:` assert `stdinText` equals the bare task and `argv` contains `--append-system-prompt`; add `testChildArgs_rolePromptToSystemLayer`, `testChildArgs_taskOnlyOnStdin`, `testChildArgs_keepsDashP_noPositional`, `testChildArgs_outputContractInSystemLayer`. | `node agents/test-fixtures/test-child-args-jsonl.mjs` exits 0 |
-| 0b.6 | `agents/test-fixtures/test-child-runner.mjs` | **EDIT (ledger).** `ANCHOR:` lines 128-130 (`stdinText.includes("Agent: user-helper")` … `inspect registered files`) → `REPLACE:` task-only on `stdinText`; assert the role appears in the `--append-system-prompt` file arg. | `node agents/test-fixtures/test-child-runner.mjs` exits 0 |
-| 0b.7 | `agents/test-fixtures/run-p6-0-tests.sh` | **EDIT.** `ANCHOR:` the `test-pi-invocation.mjs` line → `REPLACE:` same line + a line running `test-child-args-jsonl.mjs` and `test-child-runner.mjs` (regression). | `bash agents/test-fixtures/run-p6-0-tests.sh` exits 0 |
+| 0b.1 | `agents/lib/child-args.ts` | **EDIT.** `ANCHOR:` the type block `export type ChildPromptTransport = … cleanup: true };` → `REPLACE:` `ChildPromptTransport = { kind: "stdin"; stdinText: string }` (drop the `private-temp-file` arm); add `systemPromptFile?: { path: string; fileText: string };` to `ChildPiInvocation`; in `ChildPiArgsOptions` drop `promptTransport`/`tempPromptPath`, add `systemPromptPath?: string`. | `grep -n 'systemPromptFile' agents/lib/child-args.ts` |
+| 0b.2 | `agents/lib/child-args.ts` | **EDIT.** `ANCHOR:` `export function buildChildPromptText(spec: AgentSpec, task: string): string {` through its closing `].filter((line): line is string => line !== undefined).join("\n");` + `}` → `REPLACE:` rename to `buildChildSystemText(spec: AgentSpec): string`, drop `trimmedTask` and the `"", "Delegated task:", trimmedTask` lines (role block only). | `grep -n 'export function buildChildSystemText' agents/lib/child-args.ts` |
+| 0b.3 | `agents/lib/child-args.ts` | **EDIT.** `ANCHOR:` `	const promptText = buildChildPromptText(spec, task);` → `REPLACE:` `	const systemText = buildChildSystemText(spec);` | (covered by 0b.11) |
+| 0b.4 | `agents/lib/child-args.ts` | **EDIT.** `ANCHOR:` from `	argv.push("--tools", spec.tools.join(","));` through `	return { command, argv, promptTransport, argvPreview: redactChildPiArgv(argv) };` → `REPLACE:` after `--tools`, `argv.push("--append-system-prompt", options.systemPromptPath!)`; `argv.push("-p")` (no `@file`); `const promptTransport = { kind: "stdin", stdinText: task.trim() } as const;` `const systemPromptFile = { path: options.systemPromptPath!, fileText: systemText };` `return { command, argv, promptTransport, systemPromptFile, argvPreview: redactChildPiArgv(argv) };` | `grep -n '@\${' agents/lib/child-args.ts` returns nothing |
+| 0b.5 | `agents/lib/child-args.ts` | **EDIT.** `ANCHOR:` the whole `function buildPromptTransport(promptText: string, options: ChildPiArgsOptions): ChildPromptTransport { … }` → `REPLACE:` delete it (task transport is now inline stdin). | `grep -n 'buildPromptTransport' agents/lib/child-args.ts` returns nothing |
+| 0b.6 | `agents/lib/child-args.ts` | **EDIT (B2-fixed anchor).** `ANCHOR:` verbatim `	if (options.explicitToolContextLoaderPath !== undefined) {` through its closing `	}` (the loader guard at the end of `validateChildArgInputs`; there are **no** `tempPromptPath` checks in this function — those live in the now-deleted `buildPromptTransport`) → `REPLACE:` keep the loader guard unchanged and **append directly after it**, still inside `validateChildArgInputs`: `if (options.systemPromptPath !== undefined) { if (options.systemPromptPath.trim().length === 0) throw new Error("systemPromptPath is required when provided"); if (hasUnsafePathControlChar(options.systemPromptPath)) throw new Error("systemPromptPath must not contain NUL or newline characters"); }`. | `grep -n 'systemPromptPath must not contain' agents/lib/child-args.ts` |
+| 0b.7 | `agents/lib/child-args.ts` | **EDIT.** `ANCHOR:` verbatim `	return argv.map((arg) => arg.startsWith("@") ? "@<prompt-file>" : arg);` → `REPLACE:` `	return argv.map((arg, i) => argv[i - 1] === "--append-system-prompt" ? "<system-prompt-file>" : arg);` | `grep -n 'system-prompt-file' agents/lib/child-args.ts` |
+| 0b.8 | `agents/lib/child-runner.ts` | **EDIT (M3 — fixes the two pre-allocation call sites that would throw after 0b.6).** `ANCHOR:` the **exact fragment** `buildChildPiArgs(spec, task, options)` (it appears **twice**, at lines 92 and 96, each inside a `spawnErrorResult(spec.name, …, new Error(…))`) → `REPLACE:` (replace **both** occurrences) `{ command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin" as const, stdinText: "" } }` (the identical inline spawn-error invocation stub already used at lines 105-106 and 126-127, so `buildChildPiArgs` is now called **only** at line 142 where `systemPromptPath` is always supplied). | `grep -c 'buildChildPiArgs' agents/lib/child-runner.ts` == 2 (import + the line-142 call only) |
+| 0b.9 | `agents/lib/child-runner.ts` | **EDIT.** `ANCHOR:` from `	const invocation = buildChildPiArgs(childArgSpec, task, options);` through the `finally { if (promptFileCreated && invocation.promptTransport.kind === "private-temp-file" && invocation.promptTransport.cleanup) { await fs.rm(invocation.promptTransport.path, { force: true }); } }` → `REPLACE:` `const sysDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agent-sys-")); await fs.chmod(sysDir, 0o700); const systemPromptPath = path.join(sysDir, "system.md");` then `const invocation = buildChildPiArgs(childArgSpec, task, { ...options, systemPromptPath });`; in `try` `if (invocation.systemPromptFile) await fs.writeFile(invocation.systemPromptFile.path, invocation.systemPromptFile.fileText, { mode: 0o600, flag: "wx" });`; `finally` `await fs.rm(sysDir, { recursive: true, force: true });` (remove the old `promptFileCreated` flag + private-temp write/cleanup). | `node agents/test-fixtures/test-child-runner.mjs` exits 0 |
+| 0b.10 | `agents/test-fixtures/test-child-args-jsonl.mjs` | **EDIT (B1 — import).** `ANCHOR:` verbatim `import { buildChildPiArgs, buildChildPromptText, redactChildPiArgv } from "../lib/child-args.ts";` → `REPLACE:` `import { buildChildPiArgs, buildChildSystemText, redactChildPiArgv } from "../lib/child-args.ts";` (the renamed export — without this the whole fixture fails to load). | `grep -n 'buildChildSystemText' agents/test-fixtures/test-child-args-jsonl.mjs` |
+| 0b.11 | `agents/test-fixtures/test-child-args-jsonl.mjs` | **EDIT (ledger).** `ANCHOR:` verbatim, from `	assert.equal(invocation.argv.includes("-p"), true);` through `	assert.equal(argvText(invocation).includes(scout.prompt.slice(0, 30)), false, "role prompt must not appear in argv");` (inside `testChildArgsDefaultStdinTransport`) → `REPLACE:` call `buildChildPiArgs(scout, secretTask, { systemPromptPath: "/private/tmp/pi-agent-x/system.md" })`; assert `argv.includes("--append-system-prompt")`, `invocation.promptTransport.stdinText === secretTask` (already trimmed by validation), `invocation.systemPromptFile.fileText` matches `/Role prompt:/`, `argvText(invocation).includes("FULL_DELEGATED_PROMPT") === false`, `argvText(invocation).includes(scout.prompt.slice(0,30)) === false`. | `grep -n 'systemPromptFile.fileText' agents/test-fixtures/test-child-args-jsonl.mjs` (file mid-rename — node run deferred to 0b.14) |
+| 0b.12 | `agents/test-fixtures/test-child-args-jsonl.mjs` | **EDIT (ledger).** `ANCHOR:` verbatim `function testChildArgsPrivateTempTransportAndPreview() {` through its closing `}` (lines 36-54) → `REPLACE:` rename `testChildArgs_systemPromptFileChannelAndPreview`; call `buildChildPiArgs(scout, secretTask, { systemPromptPath: "/private/tmp/pi-agent-abc/system.md", explicitToolContextLoaderPath: "/Users/test/.pi/agent/extensions/tool-context-loader/index.ts", disableContextFiles: true })`; assert `invocation.systemPromptFile.path === "/private/tmp/pi-agent-abc/system.md"`, `systemPromptFile.fileText` matches `/FULL_DELEGATED_PROMPT/` is **false** (task is not in the role file) but matches `/Role prompt:/`, `argv.includes("--append-system-prompt")`, no `@`-arg, and `redactChildPiArgv(invocation.argv)` contains `"<system-prompt-file>"` and not the raw path. Update `main()`. | `grep -n 'testChildArgs_systemPromptFileChannelAndPreview' agents/test-fixtures/test-child-args-jsonl.mjs` (node run deferred to 0b.14) |
+| 0b.13 | `agents/test-fixtures/test-child-args-jsonl.mjs` | **EDIT (ledger — B3, exactly 3 lines, keep line 66).** `ANCHOR:` verbatim the **three** lines 63-65: `	assert.throws(() => buildChildPiArgs(scout, "task", { promptTransport: "private-temp-file" }), /tempPromptPath is required/);` + the `promptTransport: "bogus"` line + the `tempPromptPath: "/tmp/bad\npath.md"` line. **Do NOT include line 66** (the `explicitToolContextLoaderPath` throw stays). → `REPLACE:` `	assert.throws(() => buildChildPiArgs(scout, "task", { systemPromptPath: "/tmp/bad\npath.md" }), /systemPromptPath must not contain/);` `	assert.throws(() => buildChildPiArgs(scout, "task", { systemPromptPath: "   " }), /systemPromptPath is required when provided/);` | `grep -n 'systemPromptPath must not contain' agents/test-fixtures/test-child-args-jsonl.mjs` (node run deferred to 0b.14) |
+| 0b.14 | `agents/test-fixtures/test-child-args-jsonl.mjs` | **EDIT (ledger).** `ANCHOR:` verbatim `function testPromptTextIsDeterministicAndBoundedByTaskValidation() {` through its closing `}` (lines 69-74) → `REPLACE:` rename `testSystemTextIsDeterministic`; `const prompt = buildChildSystemText(scout);`; assert `/^Agent: scout/`, `/Required sections: Files\/paths inspected/`, and `prompt.includes("Delegated task:") === false`. Update `main()`. | `node agents/test-fixtures/test-child-args-jsonl.mjs` exits 0 |
+| 0b.15 | `agents/test-fixtures/test-child-runner.mjs` | **EDIT (ledger — m1, assert on the surviving result object, NOT the rm'd temp file).** `ANCHOR:` verbatim the three asserts `assert.equal(child.stdinText.includes("Agent: user-helper"), true);` / `…"Source: user"…` / `…"inspect registered files"…` → `REPLACE:` `assert.equal(child.stdinText, "inspect registered files");` (bare task on stdin) and `assert.match(result.invocation.systemPromptFile.fileText, /Agent: user-helper/);` `assert.match(result.invocation.systemPromptFile.fileText, /Source: user/);` (role is in the returned `systemPromptFile`, which outlives the `finally` cleanup — do **not** re-read the deleted temp path). | `node agents/test-fixtures/test-child-runner.mjs` exits 0 |
+| 0b.16 | `agents/test-fixtures/test-subagent-tool.mjs` | **EDIT (B4 — orphaned redaction fixture; the removed shape carries role `fileText`).** `ANCHOR:` verbatim the `childRunner` stub literal `promptTransport: { kind: "private-temp-file", path: "/tmp/leaked-path.md", fileText: "secret prompt", cleanup: true }` (line 735) → `REPLACE:` `promptTransport: { kind: "stdin", stdinText: "secret task" }, systemPromptFile: { path: "/tmp/leaked-path.md", fileText: "secret role prompt" }` — then **append a step 0b.16b** below. | (covered by 0b.16b) |
+| 0b.16b | `agents/test-fixtures/test-subagent-tool.mjs` | **EDIT (B4 — assert the new channel is also stripped).** `ANCHOR:` verbatim `		assert.equal(result.details.invocation.promptTransport, undefined, "details must not include raw prompt transport path");` → `REPLACE:` same line + below it `		assert.equal(result.details.invocation.systemPromptFile, undefined, "details must not include the system-prompt file or its role content");`. | `node agents/test-fixtures/test-subagent-tool.mjs` exits 0 |
+| 0b.17 | `agents/test-fixtures/run-p6-smoke.sh` | **CREATE.** `#!/usr/bin/env bash`, `set -euo pipefail`; if `command -v pi` absent → `echo "SKIP (pi absent) — non-pass"; exit 2` (visible non-pass, REQ-18). Else run a built-in scout via the real run path against a throwaway repo and assert (a) only read-only tool calls, (b) parseable `--mode json` JSONL, (c) the role reached the child (output-contract sections present in output). `chmod +x`. | `bash agents/test-fixtures/run-p6-smoke.sh; test $? -ne 1` |
+| 0b.18 | `agents/test-fixtures/run-p6-0-tests.sh` | **EDIT.** This file is **CREATEd in step 0a.6** (P6-0a) — it exists before P6-0b runs. `ANCHOR:` verbatim the line invoking `test-pi-invocation.mjs` → `REPLACE:` same line + a line `node "$(dirname "$0")/test-child-args-jsonl.mjs"` + a line `node "$(dirname "$0")/test-child-runner.mjs"` (regression). | `bash agents/test-fixtures/run-p6-0-tests.sh` exits 0 |
+
+**Step-ordering note (executor — read before starting):** `buildChildSystemText` is renamed from
+`buildChildPromptText` at 0b.2, so `test-child-args-jsonl.mjs` **cannot load** between 0b.2 and 0b.14
+(its import is fixed at 0b.10, its last call site at 0b.14). That is expected — steps 0b.10–0b.13
+therefore verify by **grep only**; the single `node …/test-child-args-jsonl.mjs` run is the verify
+for **0b.14**, the last edit to that file. Do not try to run that suite earlier and do not "fix" the
+transient load error — complete 0b.14, then it goes green. (`test-child-runner.mjs` and
+`test-subagent-tool.mjs` import nothing renamed, so their `node` verifies at 0b.15 / 0b.16b are
+valid as written.)
 
 ### `P6-2` — classifier spawn + fallback (REQ-4/5) — commit `P6-2: LLM classifier + heuristic fallback`
 
@@ -635,11 +767,12 @@ positional; `-p @file` removed. The temp-file write path already exists in `chil
 
 | Step | File | Surgical action | Verify |
 |---|---|---|---|
-| 2.1 | `agents/lib/child-runner.ts` | **APPEND.** `export function collectChildProcess(invocation: ChildPiInvocation, options: Parameters<typeof spawnAndCollect>[2]): Promise<ChildAgentRunResult> { return spawnAndCollect("intent-classifier", invocation, options); }` | `grep -n 'export function collectChildProcess' agents/lib/child-runner.ts` |
-| 2.2 | `agents/lib/intent-router.ts` | **APPEND.** `export function buildClassifierPiArgs(task: string, candidates: IntentCandidate[], piCommand?: string): ChildPiInvocation` — argv `["--mode","json","--no-session","--no-extensions","--no-skills","--no-prompt-templates","--no-themes","--no-tools","--thinking","off","-p"]`; if `piCommand` override profile has a model, splice `"--model", model` before `-p`; `command` from `getPiInvocation([...argv], piCommand)`; `promptTransport={kind:"stdin", stdinText: <CLASSIFIER_PROMPT>}`. `CLASSIFIER_PROMPT` = exact template: header `You are an intent classifier...`, the candidate list `- <name>: <description>` lines, the reply contract `Reply with ONLY one JSON object: {"agent":"<name>","confidence":<0..1>,"reason":"<short>"}`, then `Task:\n<task>`. | `grep -n 'no-tools' agents/lib/intent-router.ts` AND `grep -c '\-\-tools' agents/lib/intent-router.ts` == 0 |
-| 2.3 | `agents/lib/intent-router.ts` | **APPEND.** `export async function resolveRunIntent(task, candidates, deps): Promise<IntentDecision>` — call `deps.runClassifier(buildClassifierPiArgs(task, candidates, deps.piCommand))` (injected; prod = `collectChildProcess`); on resolve, `parseClassifierOutput(result.summary.summaryText, candidates.map(c=>c.name))`; `ok` → its decision; on throw / `!ok` → `classifyIntentHeuristic(task, candidates.map(c=>c.name))`. Never throws. | (covered by 2.4) |
-| 2.4 | `agents/test-fixtures/test-intent-classifier.mjs` | **CREATE.** Group 3 tests with injected `runClassifier` stub: `testClassifierArgs_emitsNoTools`, `testClassifierArgs_omitsToolsFlag`, `testClassifierArgs_thinkingOff`, `testClassifierArgs_boundedLimits`, `testClassifierArgs_overrideModelOnly`, `testClassifierArgs_overrideThinkingIgnoredWithWarning`, `testResolve_llmPrimary`, `testResolve_fallbackOnSpawnError`, `testResolve_fallbackOnBadJson`, `testResolve_fallbackOnUnknownAgent`. | `node agents/test-fixtures/test-intent-classifier.mjs` exits 0 |
-| 2.5 | `agents/test-fixtures/run-p6-2-tests.sh` | **CREATE.** runs `test-intent-classifier.mjs`. | `bash agents/test-fixtures/run-p6-2-tests.sh` exits 0 |
+| 2.1 | `agents/lib/child-runner.ts` | **APPEND (B1 — owns the spawn/now defaults so callers pass only limits).** `export function collectChildProcess(invocation: ChildPiInvocation, limits: Omit<Parameters<typeof spawnAndCollect>[2], "spawn" \| "now" \| "cwd" \| "env" \| "stdoutTmpDir">): Promise<ChildAgentRunResult> { return spawnAndCollect("intent-classifier", invocation, { ...limits, spawn: defaultSpawner, now: Date.now }); }` (`defaultSpawner` is in-file; `Date.now` is the real clock — the classifier never needs an injected spawner in prod). | `grep -n 'export function collectChildProcess' agents/lib/child-runner.ts` |
+| 2.2 | `agents/lib/intent-router.ts` | **APPEND (B4 — imports the new file never had).** Add at top (after a blank line below the constants block): `import { redactChildPiArgv, type ChildPiInvocation } from "./child-args.ts";` and `import type { ChildAgentRunResult } from "./child-runner.ts";` (type-only — no runtime cycle: child-runner imports child-args, never intent-router). | `grep -n 'type ChildPiInvocation' agents/lib/intent-router.ts` |
+| 2.3 | `agents/lib/intent-router.ts` | **APPEND (B2 command, B3 override).** `export function buildClassifierPiArgs(task: string, candidates: IntentCandidate[], opts: { piCommand?: string; overrideModel?: string; overrideThinking?: string } = {}): { invocation: ChildPiInvocation; warnings: string[] }`. Build `const argv = ["--mode","json","--no-session","--no-extensions","--no-skills","--no-prompt-templates","--no-themes","--no-tools","--thinking","off"]`; **if `opts.overrideModel`** `argv.push("--model", opts.overrideModel)`; then `argv.push("-p")`. **`command = opts.piCommand ?? "pi"`** — do NOT call `getPiInvocation` here (B2: keep `"pi"` so `defaultSpawner` resolves the binary at spawn time exactly like `buildChildPiArgs`; a desynced `command`+bare-argv would spawn `node` with no pi script). `const warnings: string[] = []; if (opts.overrideThinking) warnings.push("intent-classifier: profile thinking ignored (forced off)")` (B3 / R-101). `const invocation = { command, argv, promptTransport: { kind: "stdin" as const, stdinText: CLASSIFIER_PROMPT }, argvPreview: redactChildPiArgv(argv) }`. `CLASSIFIER_PROMPT` = exact template: header `You are an intent classifier. Choose the single best agent for the task.`, the candidate list `- <name>: <description>` lines, the reply contract `Reply with ONLY one JSON object: {"agent":"<name>","confidence":<0..1>,"reason":"<short>"}`, then `Task:\n<task>`. (No `systemPromptFile` — the classifier has no role file.) | `grep -q 'no-tools' agents/lib/intent-router.ts && test $(grep -c '\-\-tools' agents/lib/intent-router.ts) -eq 0` |
+| 2.4 | `agents/lib/intent-router.ts` | **APPEND (B1 limits, n1).** `export async function resolveRunIntent(task: string, candidates: IntentCandidate[], deps: { runClassifier: (invocation: ChildPiInvocation, limits: typeof CLASSIFIER_LIMITS) => Promise<ChildAgentRunResult>; piCommand?: string; overrideModel?: string; overrideThinking?: string }): Promise<IntentDecision>` — `const names = candidates.map(c => c.name); const { invocation } = buildClassifierPiArgs(task, candidates, { piCommand: deps.piCommand, overrideModel: deps.overrideModel, overrideThinking: deps.overrideThinking }); try { const result = await deps.runClassifier(invocation, CLASSIFIER_LIMITS); const parsed = parseClassifierOutput(result.summary.summaryText, names); return parsed.ok ? parsed.decision : classifyIntentHeuristic(task, names); } catch { return classifyIntentHeuristic(task, names); }`. Prod `runClassifier` = `collectChildProcess`. **Given a non-empty `task` (guaranteed by `parseDoArgs`), never throws on classifier failure** (n1). | (covered by 2.5) |
+| 2.5 | `agents/test-fixtures/test-intent-classifier.mjs` | **CREATE.** Group 3 — **all 11 tests** — with an injected `runClassifier` stub that captures `(invocation, limits)`: `testClassifierArgs_emitsNoTools`, `testClassifierArgs_omitsToolsFlag`, `testClassifierArgs_noSession` (M2 — was missing; assert argv includes `--no-session`), `testClassifierArgs_thinkingOff`, `testClassifierArgs_boundedLimits` (assert the captured `limits.timeoutMs===20000`, `limits.stdoutLimit===65536`, `limits.maxResultChars===512`), `testClassifierArgs_overrideModelOnly` (`overrideModel:"x"` → argv has `--model x`, no extra `--thinking`), `testClassifierArgs_overrideThinkingIgnoredWithWarning` (`overrideThinking:"high"` → `warnings.length===1`, argv `--thinking off` unchanged), `testResolve_llmPrimary`, `testResolve_fallbackOnSpawnError`, `testResolve_fallbackOnBadJson`, `testResolve_fallbackOnUnknownAgent`. | `node agents/test-fixtures/test-intent-classifier.mjs` exits 0 |
+| 2.6 | `agents/test-fixtures/run-p6-2-tests.sh` | **CREATE.** runs `test-intent-classifier.mjs`. | `bash agents/test-fixtures/run-p6-2-tests.sh` exits 0 |
 
 ### `P6-3a` — pure `runResolvedTarget` extraction (REQ-6) — commit `P6-3a: extract runResolvedTarget`
 
@@ -648,35 +781,105 @@ function; `runAgentCommand` calls it.
 
 | Step | File | Surgical action | Verify |
 |---|---|---|---|
-| 3a.1 | `agents/lib/run-resolver.ts` | **APPEND.** `export async function runResolvedTarget(record: RunnableRegisteredRecord, task: string, ctx: AgentsContextLike, diagnostics: AgentDiagnostics, profileOverride?: string): Promise<void>` — body = the verbatim block currently at `runAgentCommand` from `let currentParsed` through the final `await executeChildRun(...)` (re-read spec bytes, status check, `canRunAgent` gate, run). | `grep -n 'export async function runResolvedTarget' agents/lib/run-resolver.ts` |
-| 3a.2 | `agents/lib/run-resolver.ts` | **EDIT.** `ANCHOR:` in `runAgentCommand`, the block from `const record = resolved.record;` through `await executeChildRun(currentParsed.spec, parsed.task, ctx, record.source, parsed.profileOverride);` → `REPLACE:` `await runResolvedTarget(resolved.record, parsed.task, ctx, diagnostics, parsed.profileOverride);` | `node agents/test-fixtures/test-registry-gate.mjs` exits 0 (existing run-path tests green) |
-| 3a.3 | `agents/test-fixtures/run-p6-3-tests.sh` | **CREATE.** runs the existing run-path test(s) + (later) the do-command test. | `bash agents/test-fixtures/run-p6-3-tests.sh` exits 0 |
+| 3a.1 | `agents/lib/run-resolver.ts` | **APPEND.** `export async function runResolvedTarget(record: RunnableRegisteredRecord, task: string, ctx: AgentsContextLike, diagnostics: AgentDiagnostics, profileOverride?: string): Promise<void>`. Body = `run-resolver.ts` **lines 120–141** (the `let currentParsed` … `await executeChildRun(...)` block) with these **exact substitutions** (M2/M3): every `parsed.name` → `record.name` (3 sites — the re-read, status, and gate `notify` messages; provably equal, `resolveRegisteredRunTarget:56` filters on `record.name === name`), `parsed.task` → `task`, `parsed.profileOverride` → `profileOverride`. `record`/`ctx`/`diagnostics` are parameters. (Line 119 `const record = resolved.record;` is NOT moved — see 3a.2.) | `grep -n 'export async function runResolvedTarget' agents/lib/run-resolver.ts` |
+| 3a.2 | `agents/lib/run-resolver.ts` | **EDIT.** `ANCHOR:` verbatim from `	const record = resolved.record;` (line 119) through `	await executeChildRun(currentParsed.spec, parsed.task, ctx, record.source, parsed.profileOverride);` (line 141) → `REPLACE:` `	await runResolvedTarget(resolved.record, parsed.task, ctx, diagnostics, parsed.profileOverride);` (line 119 is **deleted** — its `record` becomes the function parameter; the whole 119–141 tail collapses to one call). | `node agents/test-fixtures/test-p3f-4.mjs` exits 0 (drives `runAgentCommand` → the extracted tail) |
+| 3a.3 | `agents/test-fixtures/run-p6-3-tests.sh` | **CREATE.** `#!/usr/bin/env bash`, `set -euo pipefail`; runs the **run-path** regressions that actually exercise `runAgentCommand`/`executeChildRun` — `node "$(dirname "$0")/test-p3f-4.mjs"` and `node "$(dirname "$0")/test-subagent-tool.mjs"` (NOT `test-registry-gate.mjs`, which only unit-tests `canRunAgent` and never reaches the extracted code — M1). `chmod +x`. | `bash agents/test-fixtures/run-p6-3-tests.sh` exits 0 |
 
 ### `P6-3b` — `/agents do` wiring (REQ-6/7/8/9/10/11/15) — commit `P6-3b: /agents do command`
 
 | Step | File | Surgical action | Verify |
 |---|---|---|---|
-| 3b.1 | `agents/lib/diagnostics.ts` | **APPEND.** `export function buildIntentCandidates(d: AgentDiagnostics): IntentCandidate[]` — built-ins from `listBuiltInAgentSpecs()` (`role` = name) + `d.records.filter(r => r.runnable && r.source !== "built-in")`; `description = (r.spec?.description ?? "").slice(0,200)`. | `grep -n 'export function buildIntentCandidates' agents/lib/diagnostics.ts` |
-| 3b.2 | `agents/lib/run-resolver.ts` | **APPEND.** `export async function runIntentCommand(input, ctx, diagnostics): Promise<void>` — `parseDoArgs`; if `!ctx.hasUI` notify the fail-closed message `"Intent routing needs interactive confirmation. Use /agents run <agent> <task>."` and return (REQ-9, before any spawn); build candidates; `resolveRunIntent`; apply read-only-tools rail + `INTENT_AUTORUN_CONFIDENCE`; if not auto-run, `await ctx.ui.confirm("Route to <agent>?", "<reason> (confidence …)")`; resolve role-default profile via `profileEffect`; dispatch built-in via `executeChildRun` / registered via `runResolvedTarget`. | (covered by 3b.4) |
-| 3b.3 | `agents/index.ts` | **EDIT.** `ANCHOR:` `const options = ["list", "built-ins", "config", "inspect", "registry", "verify", "doctor", "register", "register-project", "unregister", "run", "chain", "run-temp", "save-temp", "profiles"];` → `REPLACE:` same array with `"do",` inserted after `"run",`. | `grep -n '"do"' agents/index.ts` |
-| 3b.4 | `agents/index.ts` | **EDIT.** `ANCHOR:` `			if (parsed.action === "run") {` block → `REPLACE:` add directly above it: `if (parsed.action === "do") { await runIntentCommand(parsed.rest, ctx, diagnostics); return; }` | `node agents/test-fixtures/test-intent-command.mjs` exits 0 |
-| 3b.5 | `agents/test-fixtures/test-intent-command.mjs` | **CREATE.** Groups 5+6 with injected gate/runner/ui/classifier (the catalog tests, incl. `testDo_nonTuiNeverSpawnsClassifier` asserting classifier `callCount===0`, `testDo_registeredAutoRunHighConfidence`, `testDo_autoRunRequiresReadOnlyTools`). | `node agents/test-fixtures/test-intent-command.mjs` exits 0 |
-| 3b.6 | `agents/test-fixtures/run-p6-3-tests.sh` | **EDIT.** `ANCHOR:` the existing run-path test line → `REPLACE:` same + a line running `test-intent-command.mjs`. | `bash agents/test-fixtures/run-p6-3-tests.sh` exits 0 |
+| 3b.1 | `agents/lib/diagnostics.ts` | **APPEND.** `export function buildIntentCandidates(d: AgentDiagnostics): IntentCandidate[]` — built-ins from `listBuiltInAgentSpecs()` (`role` = name, `source:"built-in"`) + `d.records.filter(r => r.runnable && r.source !== "built-in")`; `description = (r.spec?.description ?? "").slice(0,200)`. Import `type IntentCandidate` from `./intent-router.ts`. | `grep -n 'export function buildIntentCandidates' agents/lib/diagnostics.ts` |
+| 3b.2 | `agents/lib/run-resolver.ts` | **EDIT (B3 — imports; 4 anchored edits in the top import block).** (i) `ANCHOR:` `	type AgentDiagnosticRecord,` → `REPLACE:` `	buildIntentCandidates,` + newline + same line. (ii) `ANCHOR:` `import { formatChildAgentRunResult, runBuiltInChildAgent, runChildAgent, type ChildAgentRunner } from "./child-runner.ts";` → `REPLACE:` add `collectChildProcess, ` after `{ `. (iii) `ANCHOR:` `import { isReservedBuiltInAgentName } from "./specs.ts";` → `REPLACE:` `import { getBuiltInAgentSpec, isReservedBuiltInAgentName } from "./specs.ts";`. (iv) `ANCHOR:` `import type { ProjectAgentRegistry } from "./registry.ts";` → `REPLACE:` same line + newline + `import { resolveRunIntent, profileEffect, INTENT_AUTORUN_CONFIDENCE, ROLE_DEFAULT_PROFILE, type IntentCandidate } from "./intent-router.ts";`. | `grep -n 'resolveRunIntent' agents/lib/run-resolver.ts` |
+| 3b.3 | `agents/lib/run-resolver.ts` | **APPEND.** `parseDoArgs` — the EXACT body in the **"P6-3b exact bodies"** block below (M-101 front-position `--profile`; EC5/EC6). | `grep -n 'export function parseDoArgs' agents/lib/run-resolver.ts` |
+| 3b.4 | `agents/lib/run-resolver.ts` | **APPEND.** `READ_ONLY_TOOLS` const + `runIntentCommand` — the EXACT body in the **"P6-3b exact bodies"** block below (REQ-8 read-only rail, REQ-9 fail-closed-before-spawn, REQ-10 role-default via `profileEffect`/`ctx.profileLibrary`, dispatch through `executeChildRun`/`runResolvedTarget` so `canRunAgent` stays authority). | (covered by 3b.7) |
+| 3b.5 | `agents/index.ts` | **EDIT.** `ANCHOR:` `const options = ["list", "built-ins", "config", "inspect", "registry", "verify", "doctor", "register", "register-project", "unregister", "run", "chain", "run-temp", "save-temp", "profiles"];` → `REPLACE:` same array with `"do",` inserted after `"run",`. | `grep -n '"do"' agents/index.ts` |
+| 3b.6 | `agents/index.ts` | **EDIT.** `ANCHOR:` `			if (parsed.action === "run") {` → `REPLACE:` add directly above it: `if (parsed.action === "do") { await runIntentCommand(parsed.rest, ctx, diagnostics); return; }` + the original line. (Routing keys off `parsed.action`; 3b.5 only adds completion — but keep both.) | `node agents/test-fixtures/test-intent-command.mjs` exits 0 |
+| 3b.7 | `agents/test-fixtures/test-intent-command.mjs` | **CREATE.** Groups 5+6 with injected `ctx`/`diagnostics`/classifier (the catalog tests, incl. `testDo_nonTuiNeverSpawnsClassifier` asserting `ctx.hasUI=false` → classifier `callCount===0`, `testDo_emptyTaskUsage`, `testDo_registeredAutoRunHighConfidence`, `testDo_autoRunRequiresReadOnlyTools`, `testDo_profileFlagParsing`). | `node agents/test-fixtures/test-intent-command.mjs` exits 0 |
+| 3b.8 | `agents/test-fixtures/run-p6-3-tests.sh` | **EDIT.** `ANCHOR:` the `test-subagent-tool.mjs` line (added in 3a.3) → `REPLACE:` same + a line running `test-intent-command.mjs`. | `bash agents/test-fixtures/run-p6-3-tests.sh` exits 0 |
+
+### P6-3b exact bodies (copy verbatim — B2/m1)
+
+`parseDoArgs` (APPEND, step 3b.3):
+
+```ts
+export function parseDoArgs(input: string): { ok: true; task: string; profileOverride?: string } | { ok: false; message: string } {
+  const usage = "Usage: /agents do [--profile <name>] <task>";
+  const trimmed = input.trim();
+  if (!trimmed) return { ok: false, message: usage };
+  const tokens = trimmed.split(/\s+/);
+  if (tokens[0] === "--profile") {                              // M-101: no agent-name token; --profile is tokens[0]
+    if (tokens.length < 2 || tokens[1].startsWith("--")) return { ok: false, message: usage };
+    const task = tokens.slice(2).join(" ").trim();
+    if (!task) return { ok: false, message: usage };
+    return { ok: true, task, profileOverride: tokens[1] };
+  }
+  return { ok: true, task: trimmed, profileOverride: undefined };
+}
+```
+
+`READ_ONLY_TOOLS` + `runIntentCommand` (APPEND, step 3b.4):
+
+```ts
+const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
+
+export async function runIntentCommand(input: string, ctx: AgentsContextLike, diagnostics: AgentDiagnostics): Promise<void> {
+  const parsed = parseDoArgs(input);
+  if (!parsed.ok) { ctx.ui.notify(parsed.message, "warning"); return; }
+  // REQ-9 fail-closed: no interactive UI -> refuse BEFORE building candidates or spawning the classifier
+  if (!ctx.hasUI) {
+    ctx.ui.notify("Intent routing needs interactive confirmation. Use /agents run <agent> <task>.", "warning");
+    return;
+  }
+  const candidates = buildIntentCandidates(diagnostics);
+  if (candidates.length === 0) { ctx.ui.notify("No runnable agents to route to.", "warning"); return; }
+  const decision = await resolveRunIntent(parsed.task, candidates, { runClassifier: collectChildProcess });
+  const chosen = candidates.find((c) => c.name === decision.agent);
+  if (!chosen) { ctx.ui.notify(`Router chose unknown agent '${decision.agent}'.`, "warning"); return; }
+  // REQ-8 read-only-tools rail: auto-run only when the pick's tools subset READ_ONLY_TOOLS
+  const tools = chosen.source === "built-in"
+    ? getBuiltInAgentSpec(decision.agent).tools
+    : (diagnostics.records.find((r) => r.name === decision.agent)?.spec?.tools ?? []);
+  const readOnly = tools.length > 0 && tools.every((t) => READ_ONLY_TOOLS.has(t));
+  const autoRun = decision.confidence >= INTENT_AUTORUN_CONFIDENCE && readOnly;
+  if (!autoRun) {
+    const ok = await ctx.ui.confirm(`Route to ${decision.agent}?`, `${decision.reason} (confidence ${decision.confidence.toFixed(2)})`);
+    if (!ok) { ctx.ui.notify("Routing cancelled.", "info"); return; }
+  }
+  // REQ-10 role-default profile: built-in picks only; explicit --profile wins; skip no-op defaults (B-003)
+  let profile = parsed.profileOverride;
+  if (!profile && chosen.source === "built-in" && chosen.role) {
+    const roleDefault = ROLE_DEFAULT_PROFILE[chosen.role];
+    const def = ctx.profileLibrary?.profiles?.find((p) => p.name === roleDefault);
+    if (def && profileEffect(def) !== "none") profile = roleDefault;
+  }
+  if (chosen.source === "built-in") {
+    await executeChildRun(decision.agent, parsed.task, ctx, "built-in", profile);
+  } else {
+    const resolved = await resolveRegisteredRunTarget(decision.agent, diagnostics);
+    if (!resolved.ok) { ctx.ui.notify(resolved.message, "warning"); return; }
+    await runResolvedTarget(resolved.record, parsed.task, ctx, diagnostics, profile);  // canRunAgent enforced inside (REQ-6)
+  }
+}
+```
 
 ### `P6-4` — disambiguation hardening (REQ-12/13/14) — commit `P6-4: profile/agent disambiguation`
 
 | Step | File | Surgical action | Verify |
 |---|---|---|---|
-| 4.1 | `agents/lib/profiles.ts` | **APPEND.** `export function profileEffect(p: { model?: string; thinking?: string }): "none"|"model"|"thinking"|"both" { const m = !!p.model, t = !!p.thinking; return m && t ? "both" : m ? "model" : t ? "thinking" : "none"; }` | `grep -n 'export function profileEffect' agents/lib/profiles.ts` |
-| 4.2 | `agents/lib/diagnostics.ts` | **APPEND.** `export function agentProfileNameCollisions(d: AgentDiagnostics, profileNames: string[]): string[]` — return agent names in `d.records` that also appear in `profileNames`. | `grep -n 'agentProfileNameCollisions' agents/lib/diagnostics.ts` |
-| 4.3 | `agents/lib/run-resolver.ts` | **EDIT.** `ANCHOR:` in `parseRunArgs`, the `if (profileOverride && tokens.slice(3).some((t) => t === "--profile"))` line → `REPLACE:` same guard + when no leading `--profile` but a later `--profile` token exists, set a `warning` field `"--profile must come right after the agent name; treated as task text"`. | `node agents/test-fixtures/test-intent-router.mjs` exits 0 (or the run-args test) |
-| 4.4 | `agents/test-fixtures/test-disambiguation.mjs` | **CREATE.** Group 7: `testProfileEffect_classifies`, `testDoctor_warnsAgentProfileCollision`, `testProfiles_labelsNoOpProfile`, `testInspect_showsNoOpProfile`, `testParseRun_warnsMisplacedProfile`. | `node agents/test-fixtures/test-disambiguation.mjs` exits 0 |
-| 4.5 | `agents/test-fixtures/run-p6-4-tests.sh` | **CREATE.** runs `test-disambiguation.mjs`. | `bash agents/test-fixtures/run-p6-4-tests.sh` exits 0 |
+**Note (Pass-3c M1):** `profileEffect` is **NOT** defined here — it now lives in P6-1's shared block
+(`intent-router.ts`), so P6-3b and P6-4 both consume it and P6-4 is genuinely parallel. The display
+steps below inline the `effect === "none"` check (`!model && !thinking`) to avoid an extra import.
 
-(Doctor/profiles/inspect *display* of the collision warning and the `effect: none` label are
-wired in the diagnostics formatters — `formatAgentsDoctor`/`formatProfileList`/`formatAgentInspect`
-— each as its own anchored `ANCHOR → REPLACE` step appended during P6-4 build, asserted by the
-Group 7 tests above.)
+| Step | File | Surgical action | Verify |
+|---|---|---|---|
+| 4.1 | `agents/lib/diagnostics.ts` | **APPEND.** `export function agentProfileNameCollisions(d: AgentDiagnostics, profileNames: string[]): string[] { return d.records.filter((r) => r.source !== "built-in" && profileNames.includes(r.name)).map((r) => r.name); }` (M2: call site passes `Object.keys(BUILT_IN_PROFILES)`, which `diagnostics.ts` already imports). | `grep -n 'export function agentProfileNameCollisions' agents/lib/diagnostics.ts` |
+| 4.2 | `agents/lib/run-resolver.ts` | **EDIT (B3 — re-anchored to the correct `else` branch + return type, 3 sub-edits in `parseRunArgs`).** (i) `ANCHOR:` `export function parseRunArgs(input: string): { ok: true; name: string; task: string; profileOverride?: string } | { ok: false; message: string } {` → `REPLACE:` add `; warning?: string` inside the `ok: true` object (after `profileOverride?: string`). (ii) `ANCHOR:` verbatim the `else` branch `	} else {` + `		rest = tokens.slice(1).join(" ");` + `	}` → `REPLACE:` same, plus a following line `	const warning = (tokens[1] !== "--profile" && tokens.slice(1).some((t) => t === "--profile")) ? "--profile must come right after the agent name; treated as task text" : undefined;` (REQ-14: a stray `--profile` when there is **no** leading one — the line-171 guard handles the *repeated*-with-leading case and is left unchanged). (iii) `ANCHOR:` `	return { ok: true, name, task, profileOverride };` → `REPLACE:` `	return { ok: true, name, task, profileOverride, warning };`. **Caller note:** `runAgentCommand` should `if (parsed.warning) ctx.ui.notify(parsed.warning, "warning");` — but that caller edit is its own line; keep it in 4.2 as a 4th sub-edit anchored on `	const parsed = parseRunArgs(input);` → add the notify directly after the `if (!parsed.ok)` block. | `node agents/test-fixtures/test-disambiguation.mjs` exits 0 |
+| 4.3 | `agents/index.ts` | **EDIT (B2 — `formatProfileList` is in index.ts, NOT diagnostics.ts).** `ANCHOR:` verbatim `		if (profile.thinking) parts.push(\`thinking=${profile.thinking}\`);` → `REPLACE:` same line + below it `		if (!profile.model && !profile.thinking) parts.push("effect: none (Pi default)");` (REQ-13 no-op label; `= profileEffect(profile) === "none"`). | `node agents/test-fixtures/test-disambiguation.mjs` exits 0 |
+| 4.4 | `agents/lib/diagnostics.ts` | **EDIT (REQ-13 inspect label).** `ANCHOR:` verbatim `		if (record.spec?.profile) lines.push(\`profile: ${record.spec.profile}${record.spec.profile && !BUILT_IN_PROFILES[record.spec.profile] ? " (unresolved in built-in profiles)" : ""}\`);` → `REPLACE:` same line + below it `		if (record.spec?.profile && BUILT_IN_PROFILES[record.spec.profile] && !BUILT_IN_PROFILES[record.spec.profile].model && !BUILT_IN_PROFILES[record.spec.profile].thinking) lines.push("effect: none (Pi default)");`. | `node agents/test-fixtures/test-disambiguation.mjs` exits 0 |
+| 4.5 | `agents/lib/diagnostics.ts` | **EDIT (REQ-12 doctor collision warning).** `ANCHOR:` verbatim `	for (const entry of diagnostics.registryOnlyEntries) issues.push(\`${entry.name} [${entry.source}] registry entry has no matching discovered file: ${entry.canonicalPath}\`);` → `REPLACE:` same line + ABOVE it `	for (const collidingName of agentProfileNameCollisions(diagnostics, Object.keys(BUILT_IN_PROFILES))) issues.push(\`Agent '${collidingName}' shares a name with a built-in profile; '/agents run ${collidingName}' uses the agent, not the profile.\`);`. | `node agents/test-fixtures/test-disambiguation.mjs` exits 0 |
+| 4.6 | `agents/test-fixtures/test-disambiguation.mjs` | **CREATE.** Group 7: `testProfileEffect_classifies` (imports `profileEffect` from `../lib/intent-router.ts`), `testDoctor_warnsAgentProfileCollision`, `testProfiles_labelsNoOpProfile`, `testInspect_showsNoOpProfile`, `testParseRun_warnsMisplacedProfile`. | `node agents/test-fixtures/test-disambiguation.mjs` exits 0 |
+| 4.7 | `agents/test-fixtures/run-p6-4-tests.sh` | **CREATE.** `#!/usr/bin/env bash`, `set -euo pipefail`, `node "$(dirname "$0")/test-disambiguation.mjs"`. `chmod +x`. | `bash agents/test-fixtures/run-p6-4-tests.sh` exits 0 |
 
 ### Definition of done (whole plan)
 
