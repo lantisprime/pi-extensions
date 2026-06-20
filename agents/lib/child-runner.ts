@@ -3,7 +3,7 @@ import { promises as fs, createWriteStream, type WriteStream } from "node:fs";
 import { Buffer } from "node:buffer";
 import path from "node:path";
 import os from "node:os";
-import { buildChildPiArgs, type ChildPiArgsOptions, type ChildPiInvocation } from "./child-args.ts";
+import { buildChildPiArgs, getPiInvocation, type ChildPiArgsOptions, type ChildPiInvocation } from "./child-args.ts";
 import { reduceChildJsonl, type ChildJsonlSummary } from "./jsonl-monitor.ts";
 import { getBuiltInAgentSpec, isReservedBuiltInAgentName, type AgentSpec } from "./specs.ts";
 import { resolveSpecProfile, type ModelProfileLibrary } from "./profiles.ts";
@@ -400,7 +400,8 @@ async function spawnAndCollect(agentName: string, invocation: ChildPiInvocation,
 }
 
 function defaultSpawner(command: string, argv: readonly string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; stdio: ["pipe", "pipe", "pipe"] }): ChildProcessLike {
-	return nodeSpawn(command, [...argv], options);
+	const inv = command === "pi" ? getPiInvocation([...argv]) : { command, args: [...argv] };
+	return nodeSpawn(inv.command, inv.args, options);
 }
 
 function spawnErrorResult(agentName: string, invocation: ChildPiInvocation, error: unknown): ChildAgentRunResult {

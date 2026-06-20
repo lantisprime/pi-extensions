@@ -1,4 +1,6 @@
 import { P3_FORBIDDEN_TOOLS, type AgentSpec } from "./specs.ts";
+import { existsSync } from "node:fs";
+import path from "node:path";
 
 export type PromptTransportKind = "stdin" | "private-temp-file";
 
@@ -103,4 +105,15 @@ function validateChildArgInputs(spec: AgentSpec, task: string, options: ChildPiA
 
 function hasUnsafePathControlChar(value: string): boolean {
 	return /[\0\r\n]/.test(value);
+}
+
+export function getPiInvocation(args: string[], piCommandOverride?: string, env?: { argv1?: string; execPath?: string }): { command: string; args: string[] } {
+	if (piCommandOverride) return { command: piCommandOverride, args };
+	const currentScript = env?.argv1 ?? process.argv[1];
+	const execPath = env?.execPath ?? process.execPath;
+	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
+	if (currentScript && !isBunVirtualScript && existsSync(currentScript)) return { command: execPath, args: [currentScript, ...args] };
+	const execName = path.basename(execPath).toLowerCase();
+	if (!/^(node|bun)(\.exe)?$/.test(execName)) return { command: execPath, args };
+	return { command: DEFAULT_PI_COMMAND, args };
 }
