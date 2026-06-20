@@ -227,7 +227,7 @@ export const ROLE_DEFAULT_PROFILE = Object.freeze({
 | `agents/lib/child-args.ts` | L33-42 | argv build: `--tools`, `-p @file`/stdin transport | REQ-17: role → `--append-system-prompt`, task → user prompt; remove `-p @file` |
 | `agents/lib/child-runner.ts` | L206 | `spawnAndCollect` (private) | APPEND exported `collectChildProcess` wrapper (no refactor) |
 | `agents/lib/diagnostics.ts` | L31-52 | `AgentDiagnosticRecord` (has `spec`, `runnable`) | Candidate source (REQ-7); add R-004 collision finding (REQ-12) |
-| `agents/lib/profiles.ts` | L338 | `BUILT_IN_PROFILE_DEFS` (no-op `fast-local`) | Add `profileEffect()` (REQ-13); role-default source |
+| `agents/lib/profiles.ts` | L338 | `BUILT_IN_PROFILE_DEFS` (no-op `fast-local`) | Role-default source; `profileEffect()` now lives in P6-1 `intent-router.ts`, not here |
 | `agents/lib/specs.ts` | L3,L101 | `RESERVED_BUILT_IN_AGENT_NAMES`, name regex | Role enumeration; collision basis |
 
 ## Slice Ladder
@@ -240,7 +240,7 @@ export const ROLE_DEFAULT_PROFILE = Object.freeze({
 | `P6-2` | Classifier spawn + fallback | `lib/intent-router.ts`, `lib/child-runner.ts` (export `collectChildProcess`) | REQ-4,5 | Classifier never gets `--tools`; existing child-runner tests green |
 | `P6-3a` | Pure `runResolvedTarget` extraction | `lib/run-resolver.ts` | existing `/agents run` tests + added TOCTOU/per-`gate.code` coverage | **Zero behavior change** |
 | `P6-3b` | `/agents do` wiring | `index.ts`, `lib/run-resolver.ts` | REQ-6,7,8,9,10,11,15 | Must not bypass `canRunAgent` for registered |
-| `P6-4` | Disambiguation hardening | `lib/diagnostics.ts`, `lib/profiles.ts`, `lib/run-resolver.ts` | REQ-12,13,14 | Independent; may land first |
+| `P6-4` | Disambiguation hardening | `lib/diagnostics.ts`, `lib/run-resolver.ts`, `index.ts` | REQ-12,13,14 | Independent (needs P6-1's `profileEffect`); may land any time after P6-1 |
 
 ### Dependency graph
 
@@ -548,7 +548,7 @@ stricter than the old argv exposure, and the task-not-in-argv invariant is prese
 | `agents/index.ts` | Add `"do"` action/completions; dispatch → `runIntentCommand`. |
 | `agents/lib/run-resolver.ts` | Extract `runResolvedTarget` (P6-3a); add `runIntentCommand`, `parseDoArgs`; REQ-14 warning. |
 | `agents/lib/diagnostics.ts` | Candidate enumeration helper; R-004 collision finding. |
-| `agents/lib/profiles.ts` | `profileEffect()` helper. |
+| `agents/lib/profiles.ts` | No P6 change (role-default source only; `profileEffect()` lives in P6-1 `intent-router.ts`). |
 | `.github/workflows/ci.yml` | REQ-19: add a step running the P6 unit runners (`run-p6-*-tests.sh`); excludes smoke/E2E (no `pi` in CI). |
 | `agents/README.md` / `docs/USER_MANUAL.md` | Document `/agents do` (propose-first per Rule 1). |
 
@@ -847,16 +847,19 @@ export async function runIntentCommand(input: string, ctx: AgentsContextLike, di
 
 | Step | File | Surgical action | Verify |
 |---|---|---|---|
-| 4.1 | `agents/lib/profiles.ts` | **APPEND.** `export function profileEffect(p: { model?: string; thinking?: string }): "none"|"model"|"thinking"|"both" { const m = !!p.model, t = !!p.thinking; return m && t ? "both" : m ? "model" : t ? "thinking" : "none"; }` | `grep -n 'export function profileEffect' agents/lib/profiles.ts` |
-| 4.2 | `agents/lib/diagnostics.ts` | **APPEND.** `export function agentProfileNameCollisions(d: AgentDiagnostics, profileNames: string[]): string[]` — return agent names in `d.records` that also appear in `profileNames`. | `grep -n 'agentProfileNameCollisions' agents/lib/diagnostics.ts` |
-| 4.3 | `agents/lib/run-resolver.ts` | **EDIT.** `ANCHOR:` in `parseRunArgs`, the `if (profileOverride && tokens.slice(3).some((t) => t === "--profile"))` line → `REPLACE:` same guard + when no leading `--profile` but a later `--profile` token exists, set a `warning` field `"--profile must come right after the agent name; treated as task text"`. | `node agents/test-fixtures/test-intent-router.mjs` exits 0 (or the run-args test) |
-| 4.4 | `agents/test-fixtures/test-disambiguation.mjs` | **CREATE.** Group 7: `testProfileEffect_classifies`, `testDoctor_warnsAgentProfileCollision`, `testProfiles_labelsNoOpProfile`, `testInspect_showsNoOpProfile`, `testParseRun_warnsMisplacedProfile`. | `node agents/test-fixtures/test-disambiguation.mjs` exits 0 |
-| 4.5 | `agents/test-fixtures/run-p6-4-tests.sh` | **CREATE.** runs `test-disambiguation.mjs`. | `bash agents/test-fixtures/run-p6-4-tests.sh` exits 0 |
+**Note (Pass-3c M1):** `profileEffect` is **NOT** defined here — it now lives in P6-1's shared block
+(`intent-router.ts`), so P6-3b and P6-4 both consume it and P6-4 is genuinely parallel. The display
+steps below inline the `effect === "none"` check (`!model && !thinking`) to avoid an extra import.
 
-(Doctor/profiles/inspect *display* of the collision warning and the `effect: none` label are
-wired in the diagnostics formatters — `formatAgentsDoctor`/`formatProfileList`/`formatAgentInspect`
-— each as its own anchored `ANCHOR → REPLACE` step appended during P6-4 build, asserted by the
-Group 7 tests above.)
+| Step | File | Surgical action | Verify |
+|---|---|---|---|
+| 4.1 | `agents/lib/diagnostics.ts` | **APPEND.** `export function agentProfileNameCollisions(d: AgentDiagnostics, profileNames: string[]): string[] { return d.records.filter((r) => r.source !== "built-in" && profileNames.includes(r.name)).map((r) => r.name); }` (M2: call site passes `Object.keys(BUILT_IN_PROFILES)`, which `diagnostics.ts` already imports). | `grep -n 'export function agentProfileNameCollisions' agents/lib/diagnostics.ts` |
+| 4.2 | `agents/lib/run-resolver.ts` | **EDIT (B3 — re-anchored to the correct `else` branch + return type, 3 sub-edits in `parseRunArgs`).** (i) `ANCHOR:` `export function parseRunArgs(input: string): { ok: true; name: string; task: string; profileOverride?: string } | { ok: false; message: string } {` → `REPLACE:` add `; warning?: string` inside the `ok: true` object (after `profileOverride?: string`). (ii) `ANCHOR:` verbatim the `else` branch `	} else {` + `		rest = tokens.slice(1).join(" ");` + `	}` → `REPLACE:` same, plus a following line `	const warning = (tokens[1] !== "--profile" && tokens.slice(1).some((t) => t === "--profile")) ? "--profile must come right after the agent name; treated as task text" : undefined;` (REQ-14: a stray `--profile` when there is **no** leading one — the line-171 guard handles the *repeated*-with-leading case and is left unchanged). (iii) `ANCHOR:` `	return { ok: true, name, task, profileOverride };` → `REPLACE:` `	return { ok: true, name, task, profileOverride, warning };`. **Caller note:** `runAgentCommand` should `if (parsed.warning) ctx.ui.notify(parsed.warning, "warning");` — but that caller edit is its own line; keep it in 4.2 as a 4th sub-edit anchored on `	const parsed = parseRunArgs(input);` → add the notify directly after the `if (!parsed.ok)` block. | `node agents/test-fixtures/test-disambiguation.mjs` exits 0 |
+| 4.3 | `agents/index.ts` | **EDIT (B2 — `formatProfileList` is in index.ts, NOT diagnostics.ts).** `ANCHOR:` verbatim `		if (profile.thinking) parts.push(\`thinking=${profile.thinking}\`);` → `REPLACE:` same line + below it `		if (!profile.model && !profile.thinking) parts.push("effect: none (Pi default)");` (REQ-13 no-op label; `= profileEffect(profile) === "none"`). | `node agents/test-fixtures/test-disambiguation.mjs` exits 0 |
+| 4.4 | `agents/lib/diagnostics.ts` | **EDIT (REQ-13 inspect label).** `ANCHOR:` verbatim `		if (record.spec?.profile) lines.push(\`profile: ${record.spec.profile}${record.spec.profile && !BUILT_IN_PROFILES[record.spec.profile] ? " (unresolved in built-in profiles)" : ""}\`);` → `REPLACE:` same line + below it `		if (record.spec?.profile && BUILT_IN_PROFILES[record.spec.profile] && !BUILT_IN_PROFILES[record.spec.profile].model && !BUILT_IN_PROFILES[record.spec.profile].thinking) lines.push("effect: none (Pi default)");`. | `node agents/test-fixtures/test-disambiguation.mjs` exits 0 |
+| 4.5 | `agents/lib/diagnostics.ts` | **EDIT (REQ-12 doctor collision warning).** `ANCHOR:` verbatim `	for (const entry of diagnostics.registryOnlyEntries) issues.push(\`${entry.name} [${entry.source}] registry entry has no matching discovered file: ${entry.canonicalPath}\`);` → `REPLACE:` same line + ABOVE it `	for (const collidingName of agentProfileNameCollisions(diagnostics, Object.keys(BUILT_IN_PROFILES))) issues.push(\`Agent '${collidingName}' shares a name with a built-in profile; '/agents run ${collidingName}' uses the agent, not the profile.\`);`. | `node agents/test-fixtures/test-disambiguation.mjs` exits 0 |
+| 4.6 | `agents/test-fixtures/test-disambiguation.mjs` | **CREATE.** Group 7: `testProfileEffect_classifies` (imports `profileEffect` from `../lib/intent-router.ts`), `testDoctor_warnsAgentProfileCollision`, `testProfiles_labelsNoOpProfile`, `testInspect_showsNoOpProfile`, `testParseRun_warnsMisplacedProfile`. | `node agents/test-fixtures/test-disambiguation.mjs` exits 0 |
+| 4.7 | `agents/test-fixtures/run-p6-4-tests.sh` | **CREATE.** `#!/usr/bin/env bash`, `set -euo pipefail`, `node "$(dirname "$0")/test-disambiguation.mjs"`. `chmod +x`. | `bash agents/test-fixtures/run-p6-4-tests.sh` exits 0 |
 
 ### Definition of done (whole plan)
 
