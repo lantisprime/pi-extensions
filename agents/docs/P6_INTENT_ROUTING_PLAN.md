@@ -247,13 +247,20 @@ export const ROLE_DEFAULT_PROFILE = Object.freeze({
 ```text
 P6-0a ── P6-0b ─┐
                 ├─ P6-2 (classifier reuses getPiInvocation + collectChildProcess)
-P6-1 ───────────┘     └─ P6-3a ── P6-3b
+P6-1 ───────────┤     └─ P6-3a ── P6-3b
+   (shared:     │
+    profileEffect,
+    CLASSIFIER_LIMITS)
 P6-4 (independent — can land before or in parallel)
 ```
 
 P6-0a is foundational: both the target-agent spawn **and** the new classifier spawn (P6-2)
 benefit from correct binary resolution, so it lands first. P6-0b (transport layering) is
 independent of routing but shares files — sequence it before P6-2 to avoid churn.
+**P6-1 is a hard predecessor of P6-3b and P6-4** because it now owns `profileEffect`,
+`CLASSIFIER_LIMITS`, `ROLE_DEFAULT_PROFILE`, and the `IntentCandidate`/`IntentDecision` types
+(Pass-3c micro-decision #1). With `profileEffect` in P6-1, **P6-4 is genuinely parallel** — it no
+longer defines a symbol P6-3b imports (the earlier false "parallel" edge is removed).
 
 **M-104 (slice coupling — corrected by Pass-3c):** P6-2's `collectChildProcess` is a thin wrapper
 over `spawnAndCollect`, which **P6-0b does NOT modify** (P6-0b edits the `runChildAgent` line-142
@@ -754,20 +761,87 @@ function; `runAgentCommand` calls it.
 
 | Step | File | Surgical action | Verify |
 |---|---|---|---|
-| 3a.1 | `agents/lib/run-resolver.ts` | **APPEND.** `export async function runResolvedTarget(record: RunnableRegisteredRecord, task: string, ctx: AgentsContextLike, diagnostics: AgentDiagnostics, profileOverride?: string): Promise<void>` — body = the verbatim block currently at `runAgentCommand` from `let currentParsed` through the final `await executeChildRun(...)` (re-read spec bytes, status check, `canRunAgent` gate, run). | `grep -n 'export async function runResolvedTarget' agents/lib/run-resolver.ts` |
-| 3a.2 | `agents/lib/run-resolver.ts` | **EDIT.** `ANCHOR:` in `runAgentCommand`, the block from `const record = resolved.record;` through `await executeChildRun(currentParsed.spec, parsed.task, ctx, record.source, parsed.profileOverride);` → `REPLACE:` `await runResolvedTarget(resolved.record, parsed.task, ctx, diagnostics, parsed.profileOverride);` | `node agents/test-fixtures/test-registry-gate.mjs` exits 0 (existing run-path tests green) |
-| 3a.3 | `agents/test-fixtures/run-p6-3-tests.sh` | **CREATE.** runs the existing run-path test(s) + (later) the do-command test. | `bash agents/test-fixtures/run-p6-3-tests.sh` exits 0 |
+| 3a.1 | `agents/lib/run-resolver.ts` | **APPEND.** `export async function runResolvedTarget(record: RunnableRegisteredRecord, task: string, ctx: AgentsContextLike, diagnostics: AgentDiagnostics, profileOverride?: string): Promise<void>`. Body = `run-resolver.ts` **lines 120–141** (the `let currentParsed` … `await executeChildRun(...)` block) with these **exact substitutions** (M2/M3): every `parsed.name` → `record.name` (3 sites — the re-read, status, and gate `notify` messages; provably equal, `resolveRegisteredRunTarget:56` filters on `record.name === name`), `parsed.task` → `task`, `parsed.profileOverride` → `profileOverride`. `record`/`ctx`/`diagnostics` are parameters. (Line 119 `const record = resolved.record;` is NOT moved — see 3a.2.) | `grep -n 'export async function runResolvedTarget' agents/lib/run-resolver.ts` |
+| 3a.2 | `agents/lib/run-resolver.ts` | **EDIT.** `ANCHOR:` verbatim from `	const record = resolved.record;` (line 119) through `	await executeChildRun(currentParsed.spec, parsed.task, ctx, record.source, parsed.profileOverride);` (line 141) → `REPLACE:` `	await runResolvedTarget(resolved.record, parsed.task, ctx, diagnostics, parsed.profileOverride);` (line 119 is **deleted** — its `record` becomes the function parameter; the whole 119–141 tail collapses to one call). | `node agents/test-fixtures/test-p3f-4.mjs` exits 0 (drives `runAgentCommand` → the extracted tail) |
+| 3a.3 | `agents/test-fixtures/run-p6-3-tests.sh` | **CREATE.** `#!/usr/bin/env bash`, `set -euo pipefail`; runs the **run-path** regressions that actually exercise `runAgentCommand`/`executeChildRun` — `node "$(dirname "$0")/test-p3f-4.mjs"` and `node "$(dirname "$0")/test-subagent-tool.mjs"` (NOT `test-registry-gate.mjs`, which only unit-tests `canRunAgent` and never reaches the extracted code — M1). `chmod +x`. | `bash agents/test-fixtures/run-p6-3-tests.sh` exits 0 |
 
 ### `P6-3b` — `/agents do` wiring (REQ-6/7/8/9/10/11/15) — commit `P6-3b: /agents do command`
 
 | Step | File | Surgical action | Verify |
 |---|---|---|---|
-| 3b.1 | `agents/lib/diagnostics.ts` | **APPEND.** `export function buildIntentCandidates(d: AgentDiagnostics): IntentCandidate[]` — built-ins from `listBuiltInAgentSpecs()` (`role` = name) + `d.records.filter(r => r.runnable && r.source !== "built-in")`; `description = (r.spec?.description ?? "").slice(0,200)`. | `grep -n 'export function buildIntentCandidates' agents/lib/diagnostics.ts` |
-| 3b.2 | `agents/lib/run-resolver.ts` | **APPEND.** `export async function runIntentCommand(input, ctx, diagnostics): Promise<void>` — `parseDoArgs`; if `!ctx.hasUI` notify the fail-closed message `"Intent routing needs interactive confirmation. Use /agents run <agent> <task>."` and return (REQ-9, before any spawn); build candidates; `resolveRunIntent`; apply read-only-tools rail + `INTENT_AUTORUN_CONFIDENCE`; if not auto-run, `await ctx.ui.confirm("Route to <agent>?", "<reason> (confidence …)")`; resolve role-default profile via `profileEffect`; dispatch built-in via `executeChildRun` / registered via `runResolvedTarget`. | (covered by 3b.4) |
-| 3b.3 | `agents/index.ts` | **EDIT.** `ANCHOR:` `const options = ["list", "built-ins", "config", "inspect", "registry", "verify", "doctor", "register", "register-project", "unregister", "run", "chain", "run-temp", "save-temp", "profiles"];` → `REPLACE:` same array with `"do",` inserted after `"run",`. | `grep -n '"do"' agents/index.ts` |
-| 3b.4 | `agents/index.ts` | **EDIT.** `ANCHOR:` `			if (parsed.action === "run") {` block → `REPLACE:` add directly above it: `if (parsed.action === "do") { await runIntentCommand(parsed.rest, ctx, diagnostics); return; }` | `node agents/test-fixtures/test-intent-command.mjs` exits 0 |
-| 3b.5 | `agents/test-fixtures/test-intent-command.mjs` | **CREATE.** Groups 5+6 with injected gate/runner/ui/classifier (the catalog tests, incl. `testDo_nonTuiNeverSpawnsClassifier` asserting classifier `callCount===0`, `testDo_registeredAutoRunHighConfidence`, `testDo_autoRunRequiresReadOnlyTools`). | `node agents/test-fixtures/test-intent-command.mjs` exits 0 |
-| 3b.6 | `agents/test-fixtures/run-p6-3-tests.sh` | **EDIT.** `ANCHOR:` the existing run-path test line → `REPLACE:` same + a line running `test-intent-command.mjs`. | `bash agents/test-fixtures/run-p6-3-tests.sh` exits 0 |
+| 3b.1 | `agents/lib/diagnostics.ts` | **APPEND.** `export function buildIntentCandidates(d: AgentDiagnostics): IntentCandidate[]` — built-ins from `listBuiltInAgentSpecs()` (`role` = name, `source:"built-in"`) + `d.records.filter(r => r.runnable && r.source !== "built-in")`; `description = (r.spec?.description ?? "").slice(0,200)`. Import `type IntentCandidate` from `./intent-router.ts`. | `grep -n 'export function buildIntentCandidates' agents/lib/diagnostics.ts` |
+| 3b.2 | `agents/lib/run-resolver.ts` | **EDIT (B3 — imports; 4 anchored edits in the top import block).** (i) `ANCHOR:` `	type AgentDiagnosticRecord,` → `REPLACE:` `	buildIntentCandidates,` + newline + same line. (ii) `ANCHOR:` `import { formatChildAgentRunResult, runBuiltInChildAgent, runChildAgent, type ChildAgentRunner } from "./child-runner.ts";` → `REPLACE:` add `collectChildProcess, ` after `{ `. (iii) `ANCHOR:` `import { isReservedBuiltInAgentName } from "./specs.ts";` → `REPLACE:` `import { getBuiltInAgentSpec, isReservedBuiltInAgentName } from "./specs.ts";`. (iv) `ANCHOR:` `import type { ProjectAgentRegistry } from "./registry.ts";` → `REPLACE:` same line + newline + `import { resolveRunIntent, profileEffect, INTENT_AUTORUN_CONFIDENCE, ROLE_DEFAULT_PROFILE, type IntentCandidate } from "./intent-router.ts";`. | `grep -n 'resolveRunIntent' agents/lib/run-resolver.ts` |
+| 3b.3 | `agents/lib/run-resolver.ts` | **APPEND.** `parseDoArgs` — the EXACT body in the **"P6-3b exact bodies"** block below (M-101 front-position `--profile`; EC5/EC6). | `grep -n 'export function parseDoArgs' agents/lib/run-resolver.ts` |
+| 3b.4 | `agents/lib/run-resolver.ts` | **APPEND.** `READ_ONLY_TOOLS` const + `runIntentCommand` — the EXACT body in the **"P6-3b exact bodies"** block below (REQ-8 read-only rail, REQ-9 fail-closed-before-spawn, REQ-10 role-default via `profileEffect`/`ctx.profileLibrary`, dispatch through `executeChildRun`/`runResolvedTarget` so `canRunAgent` stays authority). | (covered by 3b.7) |
+| 3b.5 | `agents/index.ts` | **EDIT.** `ANCHOR:` `const options = ["list", "built-ins", "config", "inspect", "registry", "verify", "doctor", "register", "register-project", "unregister", "run", "chain", "run-temp", "save-temp", "profiles"];` → `REPLACE:` same array with `"do",` inserted after `"run",`. | `grep -n '"do"' agents/index.ts` |
+| 3b.6 | `agents/index.ts` | **EDIT.** `ANCHOR:` `			if (parsed.action === "run") {` → `REPLACE:` add directly above it: `if (parsed.action === "do") { await runIntentCommand(parsed.rest, ctx, diagnostics); return; }` + the original line. (Routing keys off `parsed.action`; 3b.5 only adds completion — but keep both.) | `node agents/test-fixtures/test-intent-command.mjs` exits 0 |
+| 3b.7 | `agents/test-fixtures/test-intent-command.mjs` | **CREATE.** Groups 5+6 with injected `ctx`/`diagnostics`/classifier (the catalog tests, incl. `testDo_nonTuiNeverSpawnsClassifier` asserting `ctx.hasUI=false` → classifier `callCount===0`, `testDo_emptyTaskUsage`, `testDo_registeredAutoRunHighConfidence`, `testDo_autoRunRequiresReadOnlyTools`, `testDo_profileFlagParsing`). | `node agents/test-fixtures/test-intent-command.mjs` exits 0 |
+| 3b.8 | `agents/test-fixtures/run-p6-3-tests.sh` | **EDIT.** `ANCHOR:` the `test-subagent-tool.mjs` line (added in 3a.3) → `REPLACE:` same + a line running `test-intent-command.mjs`. | `bash agents/test-fixtures/run-p6-3-tests.sh` exits 0 |
+
+### P6-3b exact bodies (copy verbatim — B2/m1)
+
+`parseDoArgs` (APPEND, step 3b.3):
+
+```ts
+export function parseDoArgs(input: string): { ok: true; task: string; profileOverride?: string } | { ok: false; message: string } {
+  const usage = "Usage: /agents do [--profile <name>] <task>";
+  const trimmed = input.trim();
+  if (!trimmed) return { ok: false, message: usage };
+  const tokens = trimmed.split(/\s+/);
+  if (tokens[0] === "--profile") {                              // M-101: no agent-name token; --profile is tokens[0]
+    if (tokens.length < 2 || tokens[1].startsWith("--")) return { ok: false, message: usage };
+    const task = tokens.slice(2).join(" ").trim();
+    if (!task) return { ok: false, message: usage };
+    return { ok: true, task, profileOverride: tokens[1] };
+  }
+  return { ok: true, task: trimmed, profileOverride: undefined };
+}
+```
+
+`READ_ONLY_TOOLS` + `runIntentCommand` (APPEND, step 3b.4):
+
+```ts
+const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
+
+export async function runIntentCommand(input: string, ctx: AgentsContextLike, diagnostics: AgentDiagnostics): Promise<void> {
+  const parsed = parseDoArgs(input);
+  if (!parsed.ok) { ctx.ui.notify(parsed.message, "warning"); return; }
+  // REQ-9 fail-closed: no interactive UI -> refuse BEFORE building candidates or spawning the classifier
+  if (!ctx.hasUI) {
+    ctx.ui.notify("Intent routing needs interactive confirmation. Use /agents run <agent> <task>.", "warning");
+    return;
+  }
+  const candidates = buildIntentCandidates(diagnostics);
+  if (candidates.length === 0) { ctx.ui.notify("No runnable agents to route to.", "warning"); return; }
+  const decision = await resolveRunIntent(parsed.task, candidates, { runClassifier: collectChildProcess });
+  const chosen = candidates.find((c) => c.name === decision.agent);
+  if (!chosen) { ctx.ui.notify(`Router chose unknown agent '${decision.agent}'.`, "warning"); return; }
+  // REQ-8 read-only-tools rail: auto-run only when the pick's tools subset READ_ONLY_TOOLS
+  const tools = chosen.source === "built-in"
+    ? getBuiltInAgentSpec(decision.agent).tools
+    : (diagnostics.records.find((r) => r.name === decision.agent)?.spec?.tools ?? []);
+  const readOnly = tools.length > 0 && tools.every((t) => READ_ONLY_TOOLS.has(t));
+  const autoRun = decision.confidence >= INTENT_AUTORUN_CONFIDENCE && readOnly;
+  if (!autoRun) {
+    const ok = await ctx.ui.confirm(`Route to ${decision.agent}?`, `${decision.reason} (confidence ${decision.confidence.toFixed(2)})`);
+    if (!ok) { ctx.ui.notify("Routing cancelled.", "info"); return; }
+  }
+  // REQ-10 role-default profile: built-in picks only; explicit --profile wins; skip no-op defaults (B-003)
+  let profile = parsed.profileOverride;
+  if (!profile && chosen.source === "built-in" && chosen.role) {
+    const roleDefault = ROLE_DEFAULT_PROFILE[chosen.role];
+    const def = ctx.profileLibrary?.profiles?.find((p) => p.name === roleDefault);
+    if (def && profileEffect(def) !== "none") profile = roleDefault;
+  }
+  if (chosen.source === "built-in") {
+    await executeChildRun(decision.agent, parsed.task, ctx, "built-in", profile);
+  } else {
+    const resolved = await resolveRegisteredRunTarget(decision.agent, diagnostics);
+    if (!resolved.ok) { ctx.ui.notify(resolved.message, "warning"); return; }
+    await runResolvedTarget(resolved.record, parsed.task, ctx, diagnostics, profile);  // canRunAgent enforced inside (REQ-6)
+  }
+}
+```
 
 ### `P6-4` — disambiguation hardening (REQ-12/13/14) — commit `P6-4: profile/agent disambiguation`
 
