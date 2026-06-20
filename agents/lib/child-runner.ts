@@ -171,7 +171,7 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 			stdoutTmpDir: options.stdoutTmpDir,
 		});
 	} finally {
-		await fs.rm(sysDir!, { recursive: true, force: true });
+		if (sysDir) await fs.rm(sysDir, { recursive: true, force: true });
 	}
 }
 

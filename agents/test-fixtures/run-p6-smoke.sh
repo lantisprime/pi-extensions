@@ -71,5 +71,11 @@ if ! echo "$output" | grep -q '"type"[[:space:]]*:[[:space:]]*"\(agent_end\|resu
   exit 1
 fi
 
-echo "P6-0b smoke OK ($jsonl_lines JSONL lines, 0 forbidden tools)"
+# (c) Verify role reached child — sentinel must flow through to output
+if ! echo "$output" | grep -q 'SMOKE_ROLE_OK'; then
+  echo "SMOKE FAILED: role marker absent (--append-system-prompt did not reach child)"
+  exit 1
+fi
+
+echo "P6-0b smoke OK ($jsonl_lines JSONL lines, 0 forbidden, sentinel present)"
 rm -f "$role_file"
