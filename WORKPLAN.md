@@ -11,7 +11,7 @@ the source of truth; older entries in the chain are `superseded`.
 
 ## Active implementation (P6 Intent Routing)
 
-- **PR #50** open on `feat/p6-intent-routing`. P6-1 (`51a6851`), P6-0a (`8eacb5a`), P6-0b (`c7ac50d`) built. P6-0b APPROVED after 4-round adversarial review (episode `20260620-103000`). Next: P6-2 (classifier spawn + fallback).
+- **PR #50 merged.** P6-1 (intent router core), P6-0a (getPiInvocation), P6-0b (role→system-prompt transport) on main. Next: P6-2 (classifier spawn + fallback).
 - **P6 plan:** `agents/docs/P6_INTENT_ROUTING_PLAN.md` — executor-ready, 5 review passes.
 
 ## Active design docs (track 2)
