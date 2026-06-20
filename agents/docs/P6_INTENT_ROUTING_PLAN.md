@@ -4,10 +4,13 @@
 
 **TOP PRIORITY** (canonical workplan, 2026-06-20 — ahead of the P4R background-agents track).
 
-**Revised after two adversarial-review passes (claude-subagent — pass 1: conditional-go, 3B+5H+6M;
-pass 2: conditional-go, 2B+3H+4M+1 ratify — all resolved below).** Rule 18 step 4: this is the
-final plan, awaiting approval. Do not implement until approved (one focused review of the P6-0b
-transport change still pending).
+**Revised after four review passes (claude-subagent — pass 1: conditional-go, 3B+5H+6M;
+pass 2: conditional-go, 2B+3H+4M+1 ratify; pass 3: focused P6-0b transport review, 4B+2M+2m;
+pass 3b: independent second opinion on the re-spec, NO-GO 4B+1M+2m — all resolved below).**
+Rule 18 step 4: this is the final plan, awaiting approval. Do not implement until approved.
+The P6-0b focused transport review **and** its independent second opinion are **complete**
+(Pass-3/3b); their blockers re-specced the slice (new `systemPromptFile` channel, 18 anchored
+steps) — see Appendix B + the Pass-3 / Pass-3b tables.
 
 **Post-review additions (parent, after pass 1):** (a) classifier-model decision resolved
 (`--thinking off` + child-default model + model-only override — see REQ-5 / Open Decisions);
@@ -96,8 +99,8 @@ Intent routing removes the taxonomy burden; the disambiguation fixes remove the 
 | REQ-14 | `parseRunArgs` warns (does not silently drop) when a `--profile` token appears in the task position rather than right after the agent name; `parseDoArgs` extracts a leading `--profile <name>` for `/agents do` | `testParseRun_warnsMisplacedProfile`, `testDo_profileFlagParsing` | SHOULD | Fixes defect #3; `parseDoArgs` (M-003) |
 | REQ-15 | Routing metadata (engine, agent, confidence, reason, applied profile rendered with **effective** model/thinking, fallback flag) is surfaced bounded; raw classifier prompt/output is not persisted | `testDo_emitsRoutingMetadata`, `testDo_metadataShowsEffectiveModel`, `testDo_doesNotPersistClassifierRaw` | SHOULD | Honest metadata (R-005); metadata-first observability |
 | REQ-16 | Child `pi` binary is resolved like the upstream reference `getPiInvocation()`: `process.execPath` + `process.argv[1]` when argv[1] is a real (non-`/$bunfs/root/`) script, else `process.execPath` for non-generic runtimes, else `"pi"` (or explicit `piCommand`). Used by both the target-agent spawn and the classifier spawn | `testPiInvocation_realScript`, `testPiInvocation_bunVirtualFallback`, `testPiInvocation_genericRuntimeFallsBackToPath`, `testPiInvocation_explicitCommandWins` | MUST | Analysis finding #1: hardcoded `"pi"` breaks bun-single-file/npx/non-PATH installs (`child-args.ts:26`) |
-| REQ-17 | **Exact transport contract** (B-101): argv keeps `-p` with **no positional**; the **role block** (Agent/Source/Role prompt/Allowed tools/Output contract) moves to the **system-prompt layer** via `--append-system-prompt <file>` (file path, written 0600 like the current temp-prompt); the **delegated task alone** is delivered on **stdin** (`stdio[0]="pipe"`, unchanged), so `pi -p` reads it as the user prompt. `-p @file` is **not** used. `buildChildPromptText` splits into `buildChildSystemText` (role block) + the bare task. Diverges intentionally from the reference's *positional* task — stdin is the extension's verified-working channel (`pi -p` reads stdin with no positional) | `testChildArgs_rolePromptToSystemLayer`, `testChildArgs_taskOnlyOnStdin`, `testChildArgs_keepsDashP_noPositional`, `testChildArgs_noBareAtFilePromptArg` | SHOULD | Findings #2/#3 |
-| REQ-17b | **Fixture-change ledger** (B-102 — "tests stay green" was false): REQ-17 **edits** the existing transport assertions. Enumerated: `test-child-args-jsonl.mjs:26-28` (`stdinText` matched `/Role prompt:/`,`/Delegated task:/`,task → becomes: `stdinText` is the bare task; new asserts on the `--append-system-prompt` file content for the role block) and `test-child-runner.mjs:73,128-130` (`stdinText.includes("Agent:"/"Source:"/task)` → role asserts move to the system-text helper, task stays on stdin). The Output-Contract block (`requiredSections`/`maxSummaryChars`/`verdicts`) moves **with the role** into the system layer | `testChildArgs_outputContractInSystemLayer`, updated `test-child-args-jsonl.mjs`, updated `test-child-runner.mjs` | SHOULD | Behavior change to ALL child runs → **focused review before P6-0b**; fixtures change deliberately, not silently |
+| REQ-17 | **Exact transport contract** (B-101; transport model resolved Pass-3 B1/B2): argv keeps `-p` with **no positional**; the **role block** (Agent/Source/Role prompt/Allowed tools/Output contract) moves to the **system-prompt layer** via `--append-system-prompt <raw-path>` carried on a **new independent `ChildPiInvocation.systemPromptFile` channel** (orthogonal to `promptTransport`; the runner `mkdtemp`s a 0700 dir and writes the file 0600/`wx`; `buildChildPiArgs` **requires** `options.systemPromptPath`). `promptTransport` collapses to **stdin-only** and carries the **delegated task alone** (`stdio[0]="pipe"`), so `pi -p` reads it as the user prompt. `-p @file`, the `private-temp-file` task arm, and `buildPromptTransport` are **removed**. `buildChildPromptText` → `buildChildSystemText` (role block, no task). Diverges intentionally from the reference's *positional* task — stdin keeps the task out of argv (`test-child-args-jsonl.mjs:29` invariant) | `testChildArgsDefaultStdinTransport` (bare-task stdin + no `@`-arg), `testChildArgs_systemPromptFileChannelAndPreview`, `testSystemTextIsDeterministic`, `testChildArgsRejectsUnsafeInputs` | SHOULD | Findings #2/#3 |
+| REQ-17b | **Fixture-change ledger** (B-102 — "tests stay green" was false; **widened Pass-3 B3**): REQ-17 **edits four** `test-child-args-jsonl.mjs` tests + one runner test, each an anchored P6-0b ledger step. Enumerated: (1) `testChildArgsDefaultStdinTransport` (lines 24-30) → system-file channel + bare-task stdin; (2) `testChildArgsPrivateTempTransportAndPreview` (36-54) → renamed `testChildArgs_systemPromptFileChannelAndPreview` (asserts `systemPromptFile` + `<system-prompt-file>` redaction, no `@`-arg); (3) `testChildArgsRejectsUnsafeInputs` (63-66) → `systemPromptPath` required / control-char throws; (4) `testPromptTextIsDeterministicAndBoundedByTaskValidation` (69-74) → `buildChildSystemText`, no `Delegated task:` line; (5) `test-child-runner.mjs:128-130` → bare-task stdin + role asserted on the surviving `result.invocation.systemPromptFile.fileText` (not the rm'd temp path); plus (6) the **import line** `test-child-args-jsonl.mjs:2` (renamed export) and (7) `test-subagent-tool.mjs:735` redaction fixture (old shape → `stdin` + `systemPromptFile`, and a new assert that `details.invocation.systemPromptFile === undefined`). The Output-Contract block (`requiredSections`/`maxSummaryChars`/`verdicts`) moves **with the role** into the system layer | updated `test-child-args-jsonl.mjs` (import + 4 tests), updated `test-child-runner.mjs`, updated `test-subagent-tool.mjs` | SHOULD | Behavior change to ALL child runs → **focused review before P6-0b**; fixtures change deliberately, not silently |
 | REQ-18 | A real-`pi` smoke test spawns an actual child via the run path and asserts (a) read-only, (b) parseable `--mode json` JSONL, (c) role in the system prompt. Skips when `pi` absent — but skip is a **visible non-pass signal** (not silent green): documented as a **local pre-merge manual gate**, optionally a nightly job with `pi` installed. It is NOT counted as CI coverage | `manual gate: run-p6-smoke.sh` | SHOULD | R-103: `pi` is absent in CI, so an in-CI smoke test is always-skipped assurance theater |
 | REQ-19 | **CI runs the agents/ unit suite.** A `.github/workflows/ci.yml` step invokes the P6 runners (`run-p6-0-tests.sh`…`run-p6-4-tests.sh`); the smoke test is excluded (no `pi` in CI). Flags the **pre-existing gap**: no `agents/` step exists today (`ci.yml` runs only web-search/tool-context-loader/permission-policy) — the P3/P4 suites also don't run in CI (DEFER backfilling those, but call it out) | `manual: ci.yml step present`, `git grep run-p6 .github/workflows` | MUST | R-103 + Rule 13 (enforce in CI, not just docs) — P6 unit tests are worthless if CI never runs them |
 | REQ-20 | **E2E runs ACTUAL agents.** `run-p6-e2e.sh` spawns real `pi` subagents end-to-end against a disposable fixture repo + temp `HOME`/`PI` dirs (no pollution of the user's `~/.pi`). Scenarios E2E-1…E2E-7 below assert real built-in runs honor their output contract, `/agents do` actually classifies→routes→runs, a registered agent auto-runs at high confidence, and **no file mutation occurs** (fixture `git status` stays clean). Skips with a visible non-pass when `pi` absent; manual/nightly gate, not CI | `e2e gate: run-p6-e2e.sh` (E2E-1…E2E-7) | SHOULD | User request: prove the feature with real agent runs, not just mocks + a single smoke |
@@ -232,7 +235,7 @@ export const ROLE_DEFAULT_PROFILE = Object.freeze({
 | Slice | Objective | Primary files | Tests | Hard stops |
 |---|---|---|---|---|
 | `P6-0a` | Child `pi` binary resolution | `lib/child-args.ts` | REQ-16 | Port reference `getPiInvocation`; existing child-runner/args tests green |
-| `P6-0b` | Role→system-prompt layering + `-p @file` fix + smoke test | `lib/child-args.ts`, `lib/child-runner.ts`, **new** `run-p6-smoke.sh` | REQ-17,18 | Behavior change to ALL child runs → **focused review first**; existing run tests green |
+| `P6-0b` | New `systemPromptFile` channel (role→`--append-system-prompt`) + remove `-p @file` + smoke test | `lib/child-args.ts`, `lib/child-runner.ts`, fixtures, **new** `run-p6-smoke.sh` | REQ-17,17b,18 | Behavior change to ALL child runs → **focused review first**; 4-test+runner ledger; existing run tests green |
 | `P6-1` | Pure router core | **new** `lib/intent-router.ts`, `test-fixtures/test-intent-router.mjs` | REQ-1,2,3 + map/const | **No** existing-file changes |
 | `P6-2` | Classifier spawn + fallback | `lib/intent-router.ts`, `lib/child-runner.ts` (export `collectChildProcess`) | REQ-4,5 | Classifier never gets `--tools`; existing child-runner tests green |
 | `P6-3a` | Pure `runResolvedTarget` extraction | `lib/run-resolver.ts` | existing `/agents run` tests + added TOCTOU/per-`gate.code` coverage | **Zero behavior change** |
@@ -325,14 +328,14 @@ the task. A `--profile` later in the task warns (REQ-14). Empty task → usage.
 ## Test Case Catalog
 
 ```text
-Group 0: run-path hardening — P6-0 (11 + smoke)
+Group 0: run-path hardening — P6-0 (4 new + 5 ledger-edited + smoke)
   testPiInvocation_realScript, testPiInvocation_bunVirtualFallback,
   testPiInvocation_genericRuntimeFallsBackToPath, testPiInvocation_explicitCommandWins,
-  testChildArgs_rolePromptToSystemLayer, testChildArgs_taskOnlyOnStdin,
-  testChildArgs_keepsDashP_noPositional, testChildArgs_noBareAtFilePromptArg,
-  testChildArgs_outputContractInSystemLayer,
-  updated test-child-args-jsonl.mjs, updated test-child-runner.mjs   (REQ-17b ledger)
-  smoke (manual gate, not CI): run-p6-smoke.sh (real pi; skips when absent)
+  ledger-edited (REQ-17b): testChildArgsDefaultStdinTransport,
+    testChildArgs_systemPromptFileChannelAndPreview, testChildArgsRejectsUnsafeInputs,
+    testSystemTextIsDeterministic   (test-child-args-jsonl.mjs)
+    + test-child-runner.mjs:128-130 (bare-task stdin + role in --append-system-prompt file)
+  smoke (manual gate, not CI): run-p6-smoke.sh (real pi; skips when absent → exit 2)
 
 Group 1: heuristic (7)
   testHeuristic_reviewVerbs, testHeuristic_planVerbs, testHeuristic_scoutVerbs,
@@ -412,7 +415,8 @@ test's superset and the primary defense against Pi CLI/JSONL drift.
 | Heuristic keyword list rots / English-only | Low | Pure + table-driven fallback; LLM covers messy prompts |
 | Classifier latency/cost | Low | `--thinking off` + 20s/512-char bounds; heuristic-only cut exists; child default model (model-only override for cheaper pin) |
 | CI never runs the `agents/` suite, so P6 unit tests don't execute (R-103) | Medium | REQ-19 adds a `ci.yml` step for the P6 runners; smoke test is a manual gate, not CI |
-| P6-0b transport change regresses ALL existing child runs (role now in system layer) | Medium | Focused review before P6-0b; keep every existing run/child-runner test green; `run-p6-smoke.sh` proves real-`pi` behavior; P6-0b is independently revertable |
+| P6-0b transport change regresses ALL existing child runs (role now in system layer) | Medium | New `systemPromptFile` channel keeps role+task orthogonal (no single-channel overload, Pass-3 B1); runner owns mkdtemp/0600/cleanup (B2); **4-test + runner ledger** edits the contract explicitly, never silently (B3); `run-p6-smoke.sh` proves real-`pi` role-takes-effect (M1); `<system-prompt-file>` redaction (M2); P6-0b is independently revertable |
+| `--append-system-prompt` is read as literal text (not a file) by the installed `pi` | Low | Raw-path read confirmed against upstream reference (`index.ts:327`); `run-p6-smoke.sh` is the per-version guard (output-contract sections present ⇒ role took effect) |
 | `getPiInvocation` mis-resolves in an exotic runtime | Low | Mirror the upstream reference exactly; explicit `piCommand`/`agentsPiCommand` override remains the escape hatch |
 
 ## Open Decisions
@@ -448,7 +452,8 @@ All MUST requirements passing = done for first merge.
 |---|---|---|---|---|
 | 1 | claude-subagent (adversarial) | Opus 4.8 | 3 blockers + 5 high + 6 medium | conditional-go |
 | 2 | claude-subagent (adversarial, P6-0 + classifier focus) | Opus 4.8 | 2 blockers + 3 high + 4 medium + 1 ratify | conditional-go |
-| 3 | (pending — focused review of P6-0b transport, then approval) | | | |
+| 3 | claude (focused P6-0b transport review) | Opus 4.8 | 4 blockers + 2 major + 2 minor | conditional-go (P6-0b re-specced; build still gated) |
+| 3b | claude-subagent (independent second opinion on the re-spec) | Opus 4.8 | 4 blockers + 1 major + 2 minor (NO-GO) | all resolved → executor-ready; build still gated |
 
 ### Pass-2 resolved (B-1xx/R-1xx/M-1xx)
 
@@ -464,6 +469,40 @@ All MUST requirements passing = done for first merge.
 | M-103 | Cut Order omitted P6-0 | Added: P6-0b cuttable (hardening), P6-0a + REQ-19 non-cuttable |
 | M-104 | `collectChildProcess` slice-ownership coupling | Note added: P6-2 extracts from post-P6-0b `spawnAndCollect` |
 | A-101 | registered-always-confirm narrowed the locked "confirm-unless-high-confidence" | **User ratified the OTHER way:** registered picks **do** auto-run at ≥0.8. Reinstated uniform auto-run; safety preserved by a **read-only-tools rail** (no-op in P3, future-proof) + `canRunAgent`. REQ-8/Safety/flow/invariants updated |
+
+### Pass-3 resolved (P6-0b focused transport review)
+
+All findings folded into the re-specced `P6-0b` (Appendix B), REQ-17/17b, and the Risk table.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| B1 | Blocker | `ChildPromptTransport` is single-channel; the old steps made `promptTransport` both `stdin` (task) and `private-temp-file` (role) at once — impossible, so either the system file was never written or the task never reached stdin | Added an **independent** `ChildPiInvocation.systemPromptFile` channel; `promptTransport` collapses to stdin-only carrying the bare task (0b.1/0b.3/0b.4) |
+| B2 | Blocker | Plan said "reuse the existing temp-file write" — but production never allocated it (private-temp path is test-only); `buildChildPiArgs` is pure and cannot `mkdtemp` | Runner allocates `mkdtemp` 0700 + writes 0600/`wx` + `rm -rf` in `finally`, passes `systemPromptPath` into `buildChildPiArgs` (0b.8), mirroring the spill-file lifecycle |
+| B3 | Blocker | Ledger covered 2 assertions; removing `-p @file` + the task temp transport actually breaks **4** `test-child-args-jsonl.mjs` tests + the runner test | REQ-17b widened; ledger steps 0b.9–0b.13 enumerate all five |
+| B4 | Blocker | `run-p6-smoke.sh` named in the ladder/risk table but no Appendix step created it | Added create step 0b.14 (visible non-pass `exit 2` when `pi` absent) |
+| M1 | Major | `--append-system-prompt` raw-path read + the behavior change (role now augments pi's full system prompt) had no automated guard | Raw-path confirmed vs upstream `index.ts:327`; 0b.14 smoke asserts role-takes-effect (output-contract sections present); new Risk row |
+| M2 | Major | `redactChildPiArgv` only redacted `@`-args → the raw system temp path leaked into `argvPreview`/displayed command | Step 0b.7 redacts the token after `--append-system-prompt` to `<system-prompt-file>` |
+| m1 | Minor | stdin-vs-positional divergence from upstream undocumented | Rationale added to REQ-17 + 0b design (keeps task out of argv) |
+| m2 | Minor | `finally` cleanup still targeted the removed `promptTransport.path` | 0b.8 cleans the new `sysDir` (file + dir) and on spawn-error |
+
+### Pass-3b resolved (independent second opinion on the P6-0b re-spec)
+
+A fresh claude-subagent adversarially re-checked the Pass-3 re-spec against source and returned
+**NO-GO**; all findings folded into the steps above. These are exactly the "phantom anchor / hidden
+fix" failure modes a low-capability executor cannot recover from.
+
+| # | Severity | Finding (verified file:line) | Resolution |
+|---|---|---|---|
+| 3b-B1 | Blocker | `test-child-args-jsonl.mjs:2` imports `buildChildPromptText`; 0b.2 renames the export but no step fixed the import → whole fixture fails to load | New step **0b.10** edits the import to `buildChildSystemText` |
+| 3b-B2 | Blocker | 0b.6 anchored on "`tempPromptPath` checks in `validateChildArgInputs`" — none exist there (they live in the deleted `buildPromptTransport`, `child-args.ts:76-79`) → phantom anchor, executor STOPs | 0b.6 re-anchored verbatim on the `explicitToolContextLoaderPath` guard; `systemPromptPath` guard appended |
+| 3b-B3 | Blocker | 0b.11 range "63-66" swept in line 66, a **kept** `explicitToolContextLoaderPath` throw | 0b.13 pinned to exactly the three lines 63-65; line 66 explicitly preserved |
+| 3b-B4 | Blocker | `test-subagent-tool.mjs:735` hand-builds the removed `private-temp-file` shape and is unlisted; its `fileText` carries role content that must stay stripped | New steps **0b.16/0b.16b**: migrate the fixture to `stdin` + `systemPromptFile`, assert `details.invocation.systemPromptFile === undefined` |
+| 3b-M3 | Major | `child-runner.ts:92,96` call `buildChildPiArgs(spec, task, options)` **before** the line-142 allocation → throw once 0b.6 requires `systemPromptPath`, regressing the profile-fail-closed contract | New step **0b.8** converts both to the inline spawn-error stub (`:105-106` idiom); `buildChildPiArgs` now called only at line 142 |
+| 3b-m1 | Minor | 0b.13 (old) asserted by re-reading the `--append-system-prompt` file, but `finally` `rm -rf`s it before the await resolves → ENOENT | 0b.15 asserts on the surviving `result.invocation.systemPromptFile.fileText` |
+| 3b-m2 | Minor | Line-pinned anchors had drifted (e.g. `testChildArgsDefaultStdinTransport` is 13-34, not 24-30) | All ledger anchors re-pinned to **verbatim function-name / quoted-line** anchors; embedded line numbers are now navigational only |
+
+(Pass-3b n1 — secrecy — was a **REJECT**: role in a `0600` file inside a `0700` `mkdtemp` dir is
+stricter than the old argv exposure, and the task-not-in-argv invariant is preserved.)
 
 ### Resolved blockers / high-risk
 
@@ -611,22 +650,74 @@ it, and `buildChildPiArgs` still returns `command:"pi"`, so `test-child-args-jso
 
 ### `P6-0b` — role→system-prompt transport (REQ-17/17b) — commit `P6-0b: role to --append-system-prompt` — **FOCUSED REVIEW BEFORE BUILD**
 
-Design (resolved): split `buildChildPromptText` into (a) `buildChildSystemText(spec)` = the role
-block (Agent/Source/Role prompt/Allowed tools/Output contract — everything *except* Delegated
-task), written to the existing private temp file and passed as `--append-system-prompt <path>`;
-(b) the **bare trimmed task** delivered on stdin (unchanged transport mechanism). `-p` stays; no
-positional; `-p @file` removed. The temp-file write path already exists in `child-runner.ts`
-(`promptTransport.kind === "private-temp-file"`), so reuse it for the system file.
+**Design (resolved — Pass-3 B1/B2):** the child needs **two** prompt channels in the *same* run —
+the role in the system layer **and** the task on stdin — but the current `ChildPromptTransport`
+union is **single-channel** (`child-args.ts:14-16`) and the runner acts on exactly one
+(`child-runner.ts:151` writes the temp file *xor* `:397` feeds stdin). Overloading the task
+transport is impossible (it cannot be `stdin` *and* `private-temp-file` at once). So add an
+**independent** role channel:
+
+- New field on `ChildPiInvocation`: `systemPromptFile?: { path: string; fileText: string }` —
+  orthogonal to `promptTransport`.
+- `promptTransport` collapses to **stdin-only** (`{ kind: "stdin"; stdinText }`) and now carries
+  the **bare trimmed task**. The `private-temp-file` arm, `buildPromptTransport`, and the `-p @file`
+  push are **removed** — the task never uses a file again.
+- `buildChildPromptText(spec, task)` → `buildChildSystemText(spec)` (role block only:
+  Agent/Source/Role prompt/Allowed tools/Output contract — no task).
+- `buildChildPiArgs` **requires** `options.systemPromptPath` (validated like the old
+  `tempPromptPath`), pushes `--append-system-prompt <systemPromptPath>` (**raw path** — matches the
+  upstream reference `index.ts:327`, which reads the file content), and returns `systemPromptFile`.
+- **Temp allocation is the runner's job** (B2 — `buildChildPiArgs` is pure, and production *never*
+  exercised the old private-temp path: it is test-only). In `runChildAgent` (`child-runner.ts:142`
+  region) `mkdtemp` a `0700` dir, compute `systemPromptPath`, pass it in, write
+  `systemPromptFile.fileText` `wx`/`0600`, and `rm -rf` the dir in `finally` — mirroring the
+  spill-file lifecycle (`child-runner.ts:250-268`).
+- `redactChildPiArgv` redacts the **value after `--append-system-prompt`** to `<system-prompt-file>`
+  (M2 — it only redacted `@`-args before; the raw path would otherwise reach `argvPreview` and the
+  displayed command at `child-runner.ts:183`).
+- Divergence note (m1): task on **stdin**, not the reference's positional `Task:` (`index.ts:330`),
+  to preserve the invariant *"delegated task must not appear in argv"* (`test-child-args-jsonl.mjs:29`).
+
+**Fixture churn is larger than REQ-17b first stated** (Pass-3 B3, widened again by Pass-3b B4):
+removing `-p @file` and the task temp-file transport touches **four** `test-child-args-jsonl.mjs`
+tests + its import line, the runner test, **and** the `test-subagent-tool.mjs` redaction fixture
+(which hand-built the removed `private-temp-file` shape *and* must now prove the new
+`systemPromptFile` channel is stripped from displayed details — its `fileText` carries role
+content). **Two existing `buildChildPiArgs` call sites** at `child-runner.ts:92,96` (the
+profile-fail-closed paths) are *not* in the line-142 allocation region and would **throw** once
+`systemPromptPath` validation lands — they are converted to the same inline spawn-error stub the
+trust-fail paths already use (`:105-106`). All enumerated below as anchored ledger steps.
 
 | Step | File | Surgical action | Verify |
 |---|---|---|---|
-| 0b.1 | `agents/lib/child-args.ts` | **EDIT.** `ANCHOR:` the `buildChildPromptText` return array lines from `"Role prompt:",` through `trimmedTask,`. `REPLACE:` keep the same array but END it before the `"", "Delegated task:", trimmedTask` trio — i.e. `buildChildPromptText` now returns the **role block only** (drop the Delegated-task lines). Rename it `buildChildSystemText` and update its signature to `(spec: AgentSpec): string` (no `task` param). | `grep -n 'export function buildChildSystemText' agents/lib/child-args.ts` |
-| 0b.2 | `agents/lib/child-args.ts` | **EDIT.** `ANCHOR:` `	argv.push("--tools", spec.tools.join(","));` → `REPLACE:` same line + below: build `const systemText = buildChildSystemText(spec);` and push `argv.push("--append-system-prompt", <systemTempPath>)` (write `systemText` to the private temp file). | (covered by 0b.5) |
-| 0b.3 | `agents/lib/child-args.ts` | **EDIT.** `ANCHOR:` the `-p`/`@`-file block (`argv.push("-p");` … `if (promptTransport.kind === "private-temp-file") argv.push(\`@${promptTransport.path}\`);`) → `REPLACE:` `argv.push("-p");` only (no `@file`); set `promptTransport` to carry the **bare trimmed task** as `stdinText`. | `grep -n '@\${' agents/lib/child-args.ts` returns nothing |
-| 0b.4 | `agents/lib/child-runner.ts` | **EDIT.** `ANCHOR:` the `invocation.promptTransport.kind === "private-temp-file"` write block → `REPLACE:` write the **system text** file (mode 0600, `wx`) for `--append-system-prompt`; keep cleanup in `finally`. | `node agents/test-fixtures/test-child-runner.mjs` exits 0 |
-| 0b.5 | `agents/test-fixtures/test-child-args-jsonl.mjs` | **EDIT (ledger).** `ANCHOR:` lines 26-30 (`assert.match(...stdinText, /Role prompt:/)` … `role prompt must not appear in argv`) → `REPLACE:` assert `stdinText` equals the bare task and `argv` contains `--append-system-prompt`; add `testChildArgs_rolePromptToSystemLayer`, `testChildArgs_taskOnlyOnStdin`, `testChildArgs_keepsDashP_noPositional`, `testChildArgs_outputContractInSystemLayer`. | `node agents/test-fixtures/test-child-args-jsonl.mjs` exits 0 |
-| 0b.6 | `agents/test-fixtures/test-child-runner.mjs` | **EDIT (ledger).** `ANCHOR:` lines 128-130 (`stdinText.includes("Agent: user-helper")` … `inspect registered files`) → `REPLACE:` task-only on `stdinText`; assert the role appears in the `--append-system-prompt` file arg. | `node agents/test-fixtures/test-child-runner.mjs` exits 0 |
-| 0b.7 | `agents/test-fixtures/run-p6-0-tests.sh` | **EDIT.** `ANCHOR:` the `test-pi-invocation.mjs` line → `REPLACE:` same line + a line running `test-child-args-jsonl.mjs` and `test-child-runner.mjs` (regression). | `bash agents/test-fixtures/run-p6-0-tests.sh` exits 0 |
+| 0b.1 | `agents/lib/child-args.ts` | **EDIT.** `ANCHOR:` the type block `export type ChildPromptTransport = … cleanup: true };` → `REPLACE:` `ChildPromptTransport = { kind: "stdin"; stdinText: string }` (drop the `private-temp-file` arm); add `systemPromptFile?: { path: string; fileText: string };` to `ChildPiInvocation`; in `ChildPiArgsOptions` drop `promptTransport`/`tempPromptPath`, add `systemPromptPath?: string`. | `grep -n 'systemPromptFile' agents/lib/child-args.ts` |
+| 0b.2 | `agents/lib/child-args.ts` | **EDIT.** `ANCHOR:` `export function buildChildPromptText(spec: AgentSpec, task: string): string {` through its closing `].filter((line): line is string => line !== undefined).join("\n");` + `}` → `REPLACE:` rename to `buildChildSystemText(spec: AgentSpec): string`, drop `trimmedTask` and the `"", "Delegated task:", trimmedTask` lines (role block only). | `grep -n 'export function buildChildSystemText' agents/lib/child-args.ts` |
+| 0b.3 | `agents/lib/child-args.ts` | **EDIT.** `ANCHOR:` `	const promptText = buildChildPromptText(spec, task);` → `REPLACE:` `	const systemText = buildChildSystemText(spec);` | (covered by 0b.11) |
+| 0b.4 | `agents/lib/child-args.ts` | **EDIT.** `ANCHOR:` from `	argv.push("--tools", spec.tools.join(","));` through `	return { command, argv, promptTransport, argvPreview: redactChildPiArgv(argv) };` → `REPLACE:` after `--tools`, `argv.push("--append-system-prompt", options.systemPromptPath!)`; `argv.push("-p")` (no `@file`); `const promptTransport = { kind: "stdin", stdinText: task.trim() } as const;` `const systemPromptFile = { path: options.systemPromptPath!, fileText: systemText };` `return { command, argv, promptTransport, systemPromptFile, argvPreview: redactChildPiArgv(argv) };` | `grep -n '@\${' agents/lib/child-args.ts` returns nothing |
+| 0b.5 | `agents/lib/child-args.ts` | **EDIT.** `ANCHOR:` the whole `function buildPromptTransport(promptText: string, options: ChildPiArgsOptions): ChildPromptTransport { … }` → `REPLACE:` delete it (task transport is now inline stdin). | `grep -n 'buildPromptTransport' agents/lib/child-args.ts` returns nothing |
+| 0b.6 | `agents/lib/child-args.ts` | **EDIT (B2-fixed anchor).** `ANCHOR:` verbatim `	if (options.explicitToolContextLoaderPath !== undefined) {` through its closing `	}` (the loader guard at the end of `validateChildArgInputs`; there are **no** `tempPromptPath` checks in this function — those live in the now-deleted `buildPromptTransport`) → `REPLACE:` keep the loader guard unchanged and **append directly after it**, still inside `validateChildArgInputs`: `if (options.systemPromptPath !== undefined) { if (options.systemPromptPath.trim().length === 0) throw new Error("systemPromptPath is required when provided"); if (hasUnsafePathControlChar(options.systemPromptPath)) throw new Error("systemPromptPath must not contain NUL or newline characters"); }`. | `grep -n 'systemPromptPath must not contain' agents/lib/child-args.ts` |
+| 0b.7 | `agents/lib/child-args.ts` | **EDIT.** `ANCHOR:` verbatim `	return argv.map((arg) => arg.startsWith("@") ? "@<prompt-file>" : arg);` → `REPLACE:` `	return argv.map((arg, i) => argv[i - 1] === "--append-system-prompt" ? "<system-prompt-file>" : arg);` | `grep -n 'system-prompt-file' agents/lib/child-args.ts` |
+| 0b.8 | `agents/lib/child-runner.ts` | **EDIT (M3 — fixes the two pre-allocation call sites that would throw after 0b.6).** `ANCHOR:` the **exact fragment** `buildChildPiArgs(spec, task, options)` (it appears **twice**, at lines 92 and 96, each inside a `spawnErrorResult(spec.name, …, new Error(…))`) → `REPLACE:` (replace **both** occurrences) `{ command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin" as const, stdinText: "" } }` (the identical inline spawn-error invocation stub already used at lines 105-106 and 126-127, so `buildChildPiArgs` is now called **only** at line 142 where `systemPromptPath` is always supplied). | `grep -c 'buildChildPiArgs' agents/lib/child-runner.ts` == 2 (import + the line-142 call only) |
+| 0b.9 | `agents/lib/child-runner.ts` | **EDIT.** `ANCHOR:` from `	const invocation = buildChildPiArgs(childArgSpec, task, options);` through the `finally { if (promptFileCreated && invocation.promptTransport.kind === "private-temp-file" && invocation.promptTransport.cleanup) { await fs.rm(invocation.promptTransport.path, { force: true }); } }` → `REPLACE:` `const sysDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agent-sys-")); await fs.chmod(sysDir, 0o700); const systemPromptPath = path.join(sysDir, "system.md");` then `const invocation = buildChildPiArgs(childArgSpec, task, { ...options, systemPromptPath });`; in `try` `if (invocation.systemPromptFile) await fs.writeFile(invocation.systemPromptFile.path, invocation.systemPromptFile.fileText, { mode: 0o600, flag: "wx" });`; `finally` `await fs.rm(sysDir, { recursive: true, force: true });` (remove the old `promptFileCreated` flag + private-temp write/cleanup). | `node agents/test-fixtures/test-child-runner.mjs` exits 0 |
+| 0b.10 | `agents/test-fixtures/test-child-args-jsonl.mjs` | **EDIT (B1 — import).** `ANCHOR:` verbatim `import { buildChildPiArgs, buildChildPromptText, redactChildPiArgv } from "../lib/child-args.ts";` → `REPLACE:` `import { buildChildPiArgs, buildChildSystemText, redactChildPiArgv } from "../lib/child-args.ts";` (the renamed export — without this the whole fixture fails to load). | `grep -n 'buildChildSystemText' agents/test-fixtures/test-child-args-jsonl.mjs` |
+| 0b.11 | `agents/test-fixtures/test-child-args-jsonl.mjs` | **EDIT (ledger).** `ANCHOR:` verbatim, from `	assert.equal(invocation.argv.includes("-p"), true);` through `	assert.equal(argvText(invocation).includes(scout.prompt.slice(0, 30)), false, "role prompt must not appear in argv");` (inside `testChildArgsDefaultStdinTransport`) → `REPLACE:` call `buildChildPiArgs(scout, secretTask, { systemPromptPath: "/private/tmp/pi-agent-x/system.md" })`; assert `argv.includes("--append-system-prompt")`, `invocation.promptTransport.stdinText === secretTask` (already trimmed by validation), `invocation.systemPromptFile.fileText` matches `/Role prompt:/`, `argvText(invocation).includes("FULL_DELEGATED_PROMPT") === false`, `argvText(invocation).includes(scout.prompt.slice(0,30)) === false`. | `grep -n 'systemPromptFile.fileText' agents/test-fixtures/test-child-args-jsonl.mjs` (file mid-rename — node run deferred to 0b.14) |
+| 0b.12 | `agents/test-fixtures/test-child-args-jsonl.mjs` | **EDIT (ledger).** `ANCHOR:` verbatim `function testChildArgsPrivateTempTransportAndPreview() {` through its closing `}` (lines 36-54) → `REPLACE:` rename `testChildArgs_systemPromptFileChannelAndPreview`; call `buildChildPiArgs(scout, secretTask, { systemPromptPath: "/private/tmp/pi-agent-abc/system.md", explicitToolContextLoaderPath: "/Users/test/.pi/agent/extensions/tool-context-loader/index.ts", disableContextFiles: true })`; assert `invocation.systemPromptFile.path === "/private/tmp/pi-agent-abc/system.md"`, `systemPromptFile.fileText` matches `/FULL_DELEGATED_PROMPT/` is **false** (task is not in the role file) but matches `/Role prompt:/`, `argv.includes("--append-system-prompt")`, no `@`-arg, and `redactChildPiArgv(invocation.argv)` contains `"<system-prompt-file>"` and not the raw path. Update `main()`. | `grep -n 'testChildArgs_systemPromptFileChannelAndPreview' agents/test-fixtures/test-child-args-jsonl.mjs` (node run deferred to 0b.14) |
+| 0b.13 | `agents/test-fixtures/test-child-args-jsonl.mjs` | **EDIT (ledger — B3, exactly 3 lines, keep line 66).** `ANCHOR:` verbatim the **three** lines 63-65: `	assert.throws(() => buildChildPiArgs(scout, "task", { promptTransport: "private-temp-file" }), /tempPromptPath is required/);` + the `promptTransport: "bogus"` line + the `tempPromptPath: "/tmp/bad\npath.md"` line. **Do NOT include line 66** (the `explicitToolContextLoaderPath` throw stays). → `REPLACE:` `	assert.throws(() => buildChildPiArgs(scout, "task", { systemPromptPath: "/tmp/bad\npath.md" }), /systemPromptPath must not contain/);` `	assert.throws(() => buildChildPiArgs(scout, "task", { systemPromptPath: "   " }), /systemPromptPath is required when provided/);` | `grep -n 'systemPromptPath must not contain' agents/test-fixtures/test-child-args-jsonl.mjs` (node run deferred to 0b.14) |
+| 0b.14 | `agents/test-fixtures/test-child-args-jsonl.mjs` | **EDIT (ledger).** `ANCHOR:` verbatim `function testPromptTextIsDeterministicAndBoundedByTaskValidation() {` through its closing `}` (lines 69-74) → `REPLACE:` rename `testSystemTextIsDeterministic`; `const prompt = buildChildSystemText(scout);`; assert `/^Agent: scout/`, `/Required sections: Files\/paths inspected/`, and `prompt.includes("Delegated task:") === false`. Update `main()`. | `node agents/test-fixtures/test-child-args-jsonl.mjs` exits 0 |
+| 0b.15 | `agents/test-fixtures/test-child-runner.mjs` | **EDIT (ledger — m1, assert on the surviving result object, NOT the rm'd temp file).** `ANCHOR:` verbatim the three asserts `assert.equal(child.stdinText.includes("Agent: user-helper"), true);` / `…"Source: user"…` / `…"inspect registered files"…` → `REPLACE:` `assert.equal(child.stdinText, "inspect registered files");` (bare task on stdin) and `assert.match(result.invocation.systemPromptFile.fileText, /Agent: user-helper/);` `assert.match(result.invocation.systemPromptFile.fileText, /Source: user/);` (role is in the returned `systemPromptFile`, which outlives the `finally` cleanup — do **not** re-read the deleted temp path). | `node agents/test-fixtures/test-child-runner.mjs` exits 0 |
+| 0b.16 | `agents/test-fixtures/test-subagent-tool.mjs` | **EDIT (B4 — orphaned redaction fixture; the removed shape carries role `fileText`).** `ANCHOR:` verbatim the `childRunner` stub literal `promptTransport: { kind: "private-temp-file", path: "/tmp/leaked-path.md", fileText: "secret prompt", cleanup: true }` (line 735) → `REPLACE:` `promptTransport: { kind: "stdin", stdinText: "secret task" }, systemPromptFile: { path: "/tmp/leaked-path.md", fileText: "secret role prompt" }` — then **append a step 0b.16b** below. | (covered by 0b.16b) |
+| 0b.16b | `agents/test-fixtures/test-subagent-tool.mjs` | **EDIT (B4 — assert the new channel is also stripped).** `ANCHOR:` verbatim `		assert.equal(result.details.invocation.promptTransport, undefined, "details must not include raw prompt transport path");` → `REPLACE:` same line + below it `		assert.equal(result.details.invocation.systemPromptFile, undefined, "details must not include the system-prompt file or its role content");`. | `node agents/test-fixtures/test-subagent-tool.mjs` exits 0 |
+| 0b.17 | `agents/test-fixtures/run-p6-smoke.sh` | **CREATE.** `#!/usr/bin/env bash`, `set -euo pipefail`; if `command -v pi` absent → `echo "SKIP (pi absent) — non-pass"; exit 2` (visible non-pass, REQ-18). Else run a built-in scout via the real run path against a throwaway repo and assert (a) only read-only tool calls, (b) parseable `--mode json` JSONL, (c) the role reached the child (output-contract sections present in output). `chmod +x`. | `bash agents/test-fixtures/run-p6-smoke.sh; test $? -ne 1` |
+| 0b.18 | `agents/test-fixtures/run-p6-0-tests.sh` | **EDIT.** This file is **CREATEd in step 0a.6** (P6-0a) — it exists before P6-0b runs. `ANCHOR:` verbatim the line invoking `test-pi-invocation.mjs` → `REPLACE:` same line + a line `node "$(dirname "$0")/test-child-args-jsonl.mjs"` + a line `node "$(dirname "$0")/test-child-runner.mjs"` (regression). | `bash agents/test-fixtures/run-p6-0-tests.sh` exits 0 |
+
+**Step-ordering note (executor — read before starting):** `buildChildSystemText` is renamed from
+`buildChildPromptText` at 0b.2, so `test-child-args-jsonl.mjs` **cannot load** between 0b.2 and 0b.14
+(its import is fixed at 0b.10, its last call site at 0b.14). That is expected — steps 0b.10–0b.13
+therefore verify by **grep only**; the single `node …/test-child-args-jsonl.mjs` run is the verify
+for **0b.14**, the last edit to that file. Do not try to run that suite earlier and do not "fix" the
+transient load error — complete 0b.14, then it goes green. (`test-child-runner.mjs` and
+`test-subagent-tool.mjs` import nothing renamed, so their `node` verifies at 0b.15 / 0b.16b are
+valid as written.)
 
 ### `P6-2` — classifier spawn + fallback (REQ-4/5) — commit `P6-2: LLM classifier + heuristic fallback`
 
