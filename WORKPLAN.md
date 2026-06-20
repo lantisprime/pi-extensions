@@ -9,9 +9,9 @@ The canonical `pi-extensions` workplan now lives in episodic memory.
 NOT hardcode an episode ID here — it drifts on every revision. The active head is
 the source of truth; older entries in the chain are `superseded`.
 
-## Active implementation
+## Active implementation (P6 Intent Routing)
 
-- **P6 Intent Routing** — PR #50 open on `feat/p6-intent-routing`. P6-1 (intent router core, `889c05b`) and P6-0a (getPiInvocation, `3f5af43`) built. Rule 18 step 6 (code review pending). Next: P6-0b (role→system-prompt transport, focused review required before build).
+- **PR #50** open on `feat/p6-intent-routing`. P6-1 (`51a6851`), P6-0a (`8eacb5a`), P6-0b (`c7ac50d`) built. P6-0b APPROVED after 4-round adversarial review (episode `20260620-103000`). Next: P6-2 (classifier spawn + fallback).
 - **P6 plan:** `agents/docs/P6_INTENT_ROUTING_PLAN.md` — executor-ready, 5 review passes.
 
 ## Active design docs (track 2)

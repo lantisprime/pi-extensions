@@ -34,9 +34,9 @@ Current slices:
 - P3f-4: runtime profile override + stdout spill, PR #41, commit `4473431`
 
 **P6 Intent Routing** (in progress on `feat/p6-intent-routing`, PR #50):
-- P6-1: intent router core, commit `889c05b` (all new files, 22 tests)
-- P6-0a: getPiInvocation binary resolution, commit `3f5af43` (4 tests, all regressions green)
-- P6-0b: role→system-prompt transport (next, focused review required before build)
+- P6-1: intent router core, commit `51a6851` (all new files, 22 tests)
+- P6-0a: getPiInvocation, commit `8eacb5a` (4 tests, all regressions green)
+- P6-0b: role→system-prompt transport, commit `c7ac50d` — APPROVED (4-round review, episode `20260620-103000`)
 - P6-2 through P6-4: pending (see agents/docs/P6_INTENT_ROUTING_PLAN.md)
 
 Track 2 (planning only):
