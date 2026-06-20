@@ -423,11 +423,27 @@ These keep the diff small and the existing suite green — derived from real sli
      fixture whose input contains "just / only / nothing else / exactly" while a sentinel is
      asserted in the output.
   3. **If behavioral compliance is unavoidable, make it near-deterministic and prove
-     stability.** Use a minimal, unambiguous instruction (`Always begin every reply with the
-     exact token <SENTINEL> on its own line`) and a neutral task that does not compete; the
-     `Verify` MUST run the guard **green ≥3× consecutively** (one pass is not portable). If
-     the outcome still varies by model/provider/env, tag the row `UNGUARDED-IN-CI` and name
-     the residual + the manual check that covers it.
+     stability** — using a minimal, unambiguous instruction (`Always begin every reply with
+     the exact token <SENTINEL> on its own line`) and a neutral task that does not compete.
+     How you gate then depends on **which role the non-determinism plays** — these are
+     opposite, and conflating them is itself a planning bug:
+     - **3a. Non-determinism is incidental observation machinery** (the property under test
+       is *deterministic*; the flaky signal is only *how you observe it*). Example: proving
+       an appended system prompt **reached** the child — the transport is deterministic; the
+       model emitting `<SENTINEL>` is just the read-out. Here **retry-to-observe** is correct:
+       run up to N attempts, **pass if the signal appears at least once, fail if it never
+       does.** A broken property never produces the signal in *any* attempt, so retry cannot
+       mask the failure — it only smooths the read-out noise. Do **not** require consecutive
+       greens here: that would flake on the incidental noise, not on the property.
+     - **3b. Non-determinism IS the property under test** (e.g. "the model refuses X" / "the
+       classifier picks Y"). Here **retry-to-green is forbidden** — it manufactures a pass by
+       re-rolling the very thing you are measuring. Run a fixed N, **assert a rate/threshold**
+       (`≥k of N`), and report the observed rate; never stop at the first green.
+     - Either way, if the outcome still varies by model/provider/env beyond your threshold,
+       tag the row `UNGUARDED-IN-CI` and name the residual + the manual check that covers it.
+     (Calibration note: a blanket "≥3× consecutive" is wrong for 3a — on a 90%/attempt
+     read-out it self-flakes ~27% — which is why the P6-0b transport smoke correctly uses
+     retry-to-observe, not consecutive greens.)
 
 ### Definition of done (whole plan)
 
