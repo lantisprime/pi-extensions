@@ -205,6 +205,7 @@ export function formatAgentInspect(diagnostics: AgentDiagnostics, name: string):
 		if (record.spec?.model) lines.push(`model: ${record.spec.model}`);
 		if (record.spec?.thinking) lines.push(`thinking: ${record.spec.thinking}`);
 		if (record.spec?.profile) lines.push(`profile: ${record.spec.profile}${record.spec.profile && !BUILT_IN_PROFILES[record.spec.profile] ? " (unresolved in built-in profiles)" : ""}`);
+		if (record.spec?.profile && BUILT_IN_PROFILES[record.spec.profile] && !BUILT_IN_PROFILES[record.spec.profile].model && !BUILT_IN_PROFILES[record.spec.profile].thinking) lines.push("effect: none (Pi default)");
 		lines.push(`risk: ${record.scannerRisk}`);
 		lines.push(`evals: ${record.evalStatus}`);
 		lines.push(`registered: ${record.registered ? "yes" : "no"}${record.hashMismatch ? " (hash changed)" : ""}`);
@@ -351,6 +352,7 @@ function diagnosticIssues(diagnostics: AgentDiagnostics): string[] {
 			issues.push(`${record.name} [${record.source}] profile '${record.spec.profile}' is not a known built-in profile. The agent will fail at runtime.`);
 		}
 	}
+	for (const collidingName of agentProfileNameCollisions(diagnostics, Object.keys(BUILT_IN_PROFILES))) issues.push(`Agent '${collidingName}' shares a name with a built-in profile; '/agents run ${collidingName}' uses the agent, not the profile.`);
 	for (const entry of diagnostics.registryOnlyEntries) issues.push(`${entry.name} [${entry.source}] registry entry has no matching discovered file: ${entry.canonicalPath}`);
 	if (!diagnostics.projectTrusted) issues.push("Project trust inactive; project-local agent discovery is disabled.");
 	return issues.slice(0, 50);
@@ -422,4 +424,9 @@ export function buildIntentCandidates(d: AgentDiagnostics): IntentCandidate[] {
 			description: (r.spec?.description ?? "").slice(0, 200),
 		}));
 	return [...builtIns, ...registered];
+}
+
+/** P6-4: find agent names that collide with built-in profile names (REQ-12). */
+export function agentProfileNameCollisions(d: AgentDiagnostics, profileNames: string[]): string[] {
+	return d.records.filter((r) => r.source !== "built-in" && profileNames.includes(r.name)).map((r) => r.name);
 }

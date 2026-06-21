@@ -107,6 +107,7 @@ export async function runAgentCommand(input: string, ctx: AgentsContextLike, dia
 		ctx.ui.notify(parsed.message, "warning");
 		return;
 	}
+	if (parsed.warning) ctx.ui.notify(parsed.warning, "warning");
 	if (isReservedBuiltInAgentName(parsed.name)) {
 		ctx.ui.notify(`Running built-in agent '${parsed.name}' with read-only tools.`, "info");
 		await executeChildRun(parsed.name, parsed.task, ctx, "built-in", parsed.profileOverride);
@@ -121,7 +122,7 @@ export async function runAgentCommand(input: string, ctx: AgentsContextLike, dia
 	await runResolvedTarget(resolved.record, parsed.task, ctx, diagnostics, parsed.profileOverride);
 }
 
-export function parseRunArgs(input: string): { ok: true; name: string; task: string; profileOverride?: string } | { ok: false; message: string } {
+export function parseRunArgs(input: string): { ok: true; name: string; task: string; profileOverride?: string; warning?: string } | { ok: false; message: string } {
 	const usage = "Usage: /agents run <agent> [--profile <name>] <task>";
 	const trimmed = input.trim();
 	if (!trimmed) return { ok: false, message: usage };
@@ -145,6 +146,7 @@ export function parseRunArgs(input: string): { ok: true; name: string; task: str
 	} else {
 		rest = tokens.slice(1).join(" ");
 	}
+	const warning = (tokens[1] !== "--profile" && tokens.slice(1).some((t) => t === "--profile")) ? "--profile must come right after the agent name; treated as task text" : undefined;
 
 	// Reject repeated --profile token (token-level, so task text containing "--profile"
 	// as a substring like "--profiled" is NOT rejected)
@@ -152,7 +154,7 @@ export function parseRunArgs(input: string): { ok: true; name: string; task: str
 
 	const task = rest.trim();
 	if (!task) return { ok: false, message: usage };
-	return { ok: true, name, task, profileOverride };
+	return { ok: true, name, task, profileOverride, warning };
 }
 
 /** P6-3a: extract the registered-run tail of runAgentCommand into a reusable function.
