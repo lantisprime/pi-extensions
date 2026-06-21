@@ -134,7 +134,7 @@ export async function executeChildRun(agent: Parameters<ChildAgentRunner>[0], ta
  *  Backgrounding returns immediately so pi's composer stays live (REQ-1). The synchronous path
  *  is taken when !hasUI OR the host lacks setWidget (REQ-8), keeping non-TUI/tool callers and the
  *  existing test suites unchanged (their ctx.ui has no setWidget). */
-async function dispatchChildRun(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string, profileOverride?: string, timeoutMs?: number): Promise<void> {
+export async function dispatchChildRun(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string, profileOverride?: string, timeoutMs?: number): Promise<void> {
 	if (ctx.hasUI && typeof ctx.ui.setWidget === "function") {
 		const label = typeof agent === "string" ? agent : agent.name;
 		startBackgroundRun({

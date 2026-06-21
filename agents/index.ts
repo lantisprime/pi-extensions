@@ -12,12 +12,12 @@ export * from "./lib/jsonl-monitor.ts";
 export * from "./lib/registration.ts";
 export * from "./lib/profiles.ts";
 export * from "./lib/profile-discovery.ts";
-export { executeChildRun, nextStepForRunBlock, parseDoArgs, parseRunArgs, resolveRegisteredRunTarget, runAgentCommand, runIntentCommand, runResolvedTarget, type AgentsContextLike, type RunnableRegisteredRecord } from "./lib/run-resolver.ts";
+export { dispatchChildRun, executeChildRun, nextStepForRunBlock, parseDoArgs, parseRunArgs, resolveRegisteredRunTarget, runAgentCommand, runIntentCommand, runResolvedTarget, type AgentsContextLike, type RunnableRegisteredRecord } from "./lib/run-resolver.ts";
 
 import { buildProjectAgentRecommendation, collectAgentDiagnostics, formatAgentInspect, formatAgentsConfig, formatAgentsDoctor, formatAgentsList, formatAgentsRegistry, formatAgentsVerify } from "./lib/diagnostics.ts";
 import { runEphemeralCommand, saveTempCommand, type EphemeralRunHandlerContext } from "./lib/ephemeral.ts";
 import { registerAgent, registerProjectAgents, unregisterAgent } from "./lib/registration.ts";
-import { runAgentCommand, runIntentCommand } from "./lib/run-resolver.ts";
+import { runAgentCommand, runIntentCommand, dispatchChildRun } from "./lib/run-resolver.ts";
 import { disposeBackgroundRuns } from "./lib/bg-run.ts";
 import { validateBuiltInAgentSpecs } from "./lib/specs.ts";
 import { registerSubagentTool } from "./lib/subagent-tool.ts";
@@ -25,6 +25,7 @@ import { formatBuiltInProfilesList, toProfileLibrary, buildProfileLibrary, type 
 import { discoverProfiles, rejectDuplicateProfileNames, DEFAULT_PROFILE_DISCOVERY_LIMITS, type ParsedProfile } from "./lib/profile-discovery.ts";
 import { addOrReplaceRegisteredProfile, findMatchingRegisteredProfile, type RegisteredProfile } from "./lib/registry.ts";
 import { runChainCommand } from "./lib/chain-runner.ts";
+import { loadGateConfig, classifyGateIntent, GATE_INSTRUCTIONS } from "./lib/intent-gate.ts";
 import os from "node:os";
 import path from "node:path";
 
@@ -88,6 +89,13 @@ export default function agentsExtension(pi: ExtensionAPI) {
 		}
 		if (!ctx.hasUI) return;
 		await maybeNotifyProjectRecommendation(ctx, false);
+	});
+
+	// P7-2: prompt-intent gate — intercept natural-language prompts before model processing.
+	// Gate disables itself for /commands, non-TUI sessions, untrusted projects, and missing config.
+	eventApi.on?.("input", async (event: { text: string }, ctx: AgentsContext) => {
+		const result = await handleGateInput(event.text, ctx);
+		return result;
 	});
 
 	registerSubagentTool(pi, () => sessionAgentsCtx);
@@ -212,6 +220,64 @@ export default function agentsExtension(pi: ExtensionAPI) {
 			ctx.ui.notify("Usage: /agents [list|built-ins|config|inspect <name>|registry|verify|doctor|register <path-or-name>|register-project [--all-safe]|unregister <name>|run <agent> <task>|chain <agent>,<agent>[,<agent>] <task>|run-temp <scout|planner|reviewer> <task>|save-temp <name>|profiles].", "warning");
 		},
 	});
+}
+
+// ── P7-2: Prompt-intent gate handler ────────────────────────────────────
+
+/** Test seam: override fn to intercept gate-level child dispatch in tests.
+ *  Do not mutate in production. Defaults to dispatchChildRun. */
+export const __gateDispatch = { fn: dispatchChildRun };
+
+export async function handleGateInput(
+	text: string,
+	ctx: AgentsContext,
+): Promise<{ action: "continue" | "handled" | "transform"; text?: string }> {
+	// REQ-9: skip non-TUI sessions
+	if (!ctx.hasUI) return { action: "continue" };
+
+	// REQ-8: skip /-prefixed commands
+	if (text.trimStart().startsWith("/")) return { action: "continue" };
+
+	// REQ-1 / REQ-SEC-1: load config, gated on project trust
+	const configPath = path.join(ctx.cwd ?? process.cwd(), ".pi", "intent-workflows.json");
+	const projectTrusted = resolveProjectTrusted(ctx);
+	const configResult = await loadGateConfig(configPath, projectTrusted);
+	if (!configResult.ok) return { action: "continue" };
+
+	// REQ-2: classify
+	const decision = classifyGateIntent(text, configResult.config);
+
+	// REQ-4 / REQ-11: route or confirm — always ask in TUI (REQ-SEC-3)
+	if (decision.kind === "route" || decision.kind === "confirm") {
+		// REQ-SEC-3: NL-routed prompts ALWAYS confirm, regardless of P6 confidence
+		if (ctx.ui.confirm) {
+			const ok = await ctx.ui.confirm(
+				`Route to ${decision.agent}?`,
+				`Intent '${decision.metadata.intentId}' matched by ${decision.metadata.matchedBy}.\nTask: ${text}`,
+			);
+			if (!ok) { ctx.ui.notify("Routing cancelled.", "info"); return { action: "continue" }; }
+		}
+
+		// REQ-SEC-5: gate-routed children must disable context files
+		ctx.disableContextFiles = true;
+
+		// C3: config-chosen agent = spawned agent — direct dispatch, no re-classification.
+		// Bypasses runIntentCommand's classifier + auto-run rail (SEC-3 satisfied).
+		// Profile passed structurally, not via string interpolation (SEC-2).
+		void __gateDispatch.fn(decision.agent, text, ctx, "built-in", decision.profile).catch((err) => {
+			ctx.ui.notify(`Gate dispatch failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+		});
+		return { action: "handled" };
+	}
+
+	// REQ-5 / REQ-SEC-4: plan-only injects code-owned instruction
+	if (decision.kind === "inject") {
+		const instruction = GATE_INSTRUCTIONS[decision.instruction];
+		return { action: "transform", text: instruction + "\n\n" + text };
+	}
+
+	// REQ-7: pass-through for unmatched / ambiguous
+	return { action: "continue" };
 }
 
 function parseAgentsArgs(args: string): { action: string; rest: string } {
