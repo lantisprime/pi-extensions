@@ -8,6 +8,10 @@
 
 export const BG_RUN_MAX_CONCURRENT = 5;
 export const MAX_TAIL_LINE_CHARS = 200;
+/** Fixed number of activity (tail) lines rendered per run. The slots are ALWAYS present (padded
+ *  with blanks), so the widget height is constant and the editor + status bar never shift as
+ *  output streams — the latest lines just scroll through the reserved slots. */
+export const TAIL_SLOTS = 2;
 export const SPINNER_FRAMES = ["◐", "◓", "◑", "◒"] as const; // user's "rotating circle"
 export const SPINNER_INTERVAL_MS = 120;
 export const WIDGET_KEY = "agents:bg-runs";
@@ -88,7 +92,11 @@ function render(): void {
 	for (const entry of registry.values()) {
 		const elapsed = Math.max(0, Math.floor((deps.now() - entry.startedAt) / 1000));
 		lines.push(`${frame} ${entry.label} · ${elapsed}s`);
-		for (const t of entry.tail) lines.push(`   ${t}`);
+		// Always emit TAIL_SLOTS lines (newest at the bottom, blank-padded at the top) so the
+		// widget height is fixed — the tail scrolls in place instead of growing the widget.
+		const slots = entry.tail.slice(-TAIL_SLOTS);
+		while (slots.length < TAIL_SLOTS) slots.unshift("");
+		for (const t of slots) lines.push(`   ${t}`);
 	}
 	try { activeUI.setWidget(WIDGET_KEY, lines, { placement: "aboveEditor" }); } catch { /* detached/closed UI context */ }
 }
@@ -153,7 +161,7 @@ export function startBackgroundRun(args: {
 			const summary = summarizeProgressLine(line);
 			if (!summary) return;
 			entry.tail.push(summary);
-			if (entry.tail.length > 2) entry.tail = entry.tail.slice(-2);
+			if (entry.tail.length > TAIL_SLOTS) entry.tail = entry.tail.slice(-TAIL_SLOTS);
 		},
 	};
 
