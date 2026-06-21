@@ -1,3 +1,6 @@
+import { redactChildPiArgv, type ChildPiInvocation } from "./child-args.ts";
+import type { ChildAgentRunResult } from "./child-runner.ts";
+
 export const INTENT_AUTORUN_CONFIDENCE = 0.8;
 export const HEURISTIC_SATURATION = 6;           // confidence = min(1, weight / SATURATION)
 export const TIE_ORDER = ["reviewer", "planner", "scout"] as const;
@@ -176,4 +179,50 @@ export function parseClassifierOutput(
       engine: "llm",
     },
   };
+}
+
+/** P6-2: build the LLM classifier child invocation. No AgentSpec, no tools, no session.
+ *  Override is model-only — thinking is always forced off. Returns warnings for ignored override fields. */
+export function buildClassifierPiArgs(task: string, candidates: IntentCandidate[], opts: { piCommand?: string; overrideModel?: string; overrideThinking?: string } = {}): { invocation: ChildPiInvocation; warnings: string[] } {
+  const warnings: string[] = [];
+  if (opts.overrideThinking) {
+    warnings.push("intent-classifier: profile thinking ignored (forced off)");
+  }
+  const argv = ["--mode", "json", "--no-session", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-tools", "--thinking", "off"];
+  if (opts.overrideModel) argv.push("--model", opts.overrideModel);
+  argv.push("-p");
+  const command = opts.piCommand ?? "pi";
+  const candidateLines = candidates.map((c) => `- ${c.name}: ${c.description.slice(0,200)}`).join("\n");
+  const CLASSIFIER_PROMPT = [
+    "You are an intent classifier. Choose the single best agent for the task.",
+    "",
+    candidateLines,
+    "",
+    'Reply with ONLY one JSON object: {"agent":"<name>","confidence":<0..1>,"reason":"<short>"}',
+    "",
+    `Task:`,
+    task,
+  ].join("\n");
+  const invocation: ChildPiInvocation = {
+    command,
+    argv,
+    promptTransport: { kind: "stdin", stdinText: CLASSIFIER_PROMPT },
+    argvPreview: redactChildPiArgv(argv),
+  };
+  return { invocation, warnings };
+}
+
+/** P6-2: resolve run intent — tries LLM classifier first, falls back to heuristic.
+ *  The deps.runClassifier is prod = collectChildProcess, inject a stub in tests.
+ *  Given a non-empty task (guaranteed by parseDoArgs), never throws on classifier failure. */
+export async function resolveRunIntent(task: string, candidates: IntentCandidate[], deps: { runClassifier: (invocation: ChildPiInvocation, limits: typeof CLASSIFIER_LIMITS) => Promise<ChildAgentRunResult>; piCommand?: string; overrideModel?: string; overrideThinking?: string }): Promise<IntentDecision> {
+  const names = candidates.map((c) => c.name);
+  const { invocation } = buildClassifierPiArgs(task, candidates, { piCommand: deps.piCommand, overrideModel: deps.overrideModel, overrideThinking: deps.overrideThinking });
+  try {
+    const result = await deps.runClassifier(invocation, CLASSIFIER_LIMITS);
+    const parsed = parseClassifierOutput(result.summary.summaryText, names);
+    return parsed.ok ? parsed.decision : classifyIntentHeuristic(task, names);
+  } catch {
+    return classifyIntentHeuristic(task, names);
+  }
 }
