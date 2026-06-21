@@ -445,6 +445,37 @@ async function testRunSubagentRejectsChainParam() {
 
 // --- Main ---
 
+// P8-3: runChainCommand backgrounds the chain run (hasUI+setWidget) AFTER preflight notifies.
+async function testChainCommandBackgroundsAfterPreflight() {
+	const { __resetBackgroundRuns } = await import("../lib/bg-run.ts");
+	__resetBackgroundRuns();
+	const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "chain-bg-"));
+	try {
+		const notifications = [];
+		const widgets = [];
+		const diag = await collectAgentDiagnostics({ cwd: "/tmp/project", homeDir, projectTrusted: false });
+		let settled = false, release;
+		const gate = new Promise((res) => { release = res; });
+		const runner = async (agent) => {
+			await gate; settled = true;
+			return { agentName: typeof agent === "string" ? agent : agent.name, status: "completed", durationMs: 10, stdoutBytes: 50, stderrPreview: "", invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin" } }, summary: { eventsSeen: 1, malformedLines: 0, toolCalls: [], summaryText: "ok", truncation: {}, errors: [] }, timedOut: false, outputLimitExceeded: false };
+		};
+		const ctx = { cwd: "/tmp/project", hasUI: true, agentsChildRunner: runner, ui: { notify: (msg, level) => notifications.push({ message: msg, level: level || "info" }), setWidget: (k, c) => widgets.push({ k, c }) } };
+		await runChainCommand("scout,planner inspect", ctx, diag);
+		assert.equal(settled, false, "chain run backgrounded — not settled when command returned");
+		assert.ok(notifications.some((n) => /Chain preflight passed/.test(n.message)), "preflight-passed notify fired inline before backgrounding");
+		assert.equal(notifications.some((n) => /Chain complete/.test(n.message)), false, "no completion notify until settle");
+		assert.ok(widgets.some((w) => Array.isArray(w.c)), "progress widget rendered while running");
+		release();
+		await new Promise((r) => setImmediate(r)); await new Promise((r) => setImmediate(r));
+		assert.equal(settled, true, "chain settled after release");
+		assert.ok(notifications.some((n) => /Chain complete/.test(n.message)), "completion notify fired after settle");
+		__resetBackgroundRuns();
+	} finally {
+		await fs.rm(homeDir, { recursive: true, force: true });
+	}
+}
+
 // P8-3 / N2 / REQ-12: threading onProgress through runChain must not alter handoff or results.
 async function testChainStepOnProgressDoesNotAlterHandoff() {
 	const make = () => {
@@ -507,6 +538,7 @@ async function main() {
 		["chainUsesExecuteChildRun", testChainUsesExecuteChildRun],
 		// Group 6
 		["chainOutputFormat", testChainOutputFormat],
+		["chainCommandBackgroundsAfterPreflight", testChainCommandBackgroundsAfterPreflight],
 		// Group 7
 		["runSubagentRejectsChainParam", testRunSubagentRejectsChainParam],
 	];

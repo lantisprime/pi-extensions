@@ -113,6 +113,14 @@ export function startBackgroundRun(args: {
 	clearInterval?: typeof clearInterval;
 }): void {
 	const { ui, label, run } = args;
+	// Cap check first — a rejected run must not mutate module state (timer/activeUI/deps).
+	if (registry.size >= BG_RUN_MAX_CONCURRENT) {
+		ui.notify(BG_RUN_CAP_MESSAGE, "warning");
+		return;
+	}
+	// Apply injectable deps (tests); production passes none, so this always resolves to the globals.
+	// NOTE: activeUI is a single module-global — pi runs one session per process, so concurrent
+	// background runs legitimately share one widget surface.
 	deps = {
 		now: args.now ?? deps.now ?? DEFAULT_DEPS.now,
 		setIntervalFn: args.setInterval ?? deps.setIntervalFn ?? DEFAULT_DEPS.setIntervalFn,
@@ -120,10 +128,10 @@ export function startBackgroundRun(args: {
 	};
 	activeUI = ui;
 
-	if (registry.size >= BG_RUN_MAX_CONCURRENT) {
-		ui.notify(BG_RUN_CAP_MESSAGE, "warning");
-		return;
-	}
+	// Guarded so a notify after session_shutdown (UI detached) can't throw an unhandled rejection.
+	const safeNotify = (message: string, level: "info" | "warning" | "error") => {
+		try { ui.notify(message, level); } catch { /* UI detached/closed */ }
+	};
 
 	const entry: RunEntry = { id: ++idCounter, label, startedAt: deps.now(), tail: [] };
 	registry.set(entry.id, entry);
@@ -142,8 +150,8 @@ export function startBackgroundRun(args: {
 
 	Promise.resolve()
 		.then(() => run(handle))
-		.then((settle) => { ui.notify(settle.message, settle.level); })
-		.catch((err) => { ui.notify(`Background agent run failed: ${err instanceof Error ? err.message : String(err)}`, "error"); })
+		.then((settle) => { safeNotify(settle.message, settle.level); })
+		.catch((err) => { safeNotify(`Background agent run failed: ${err instanceof Error ? err.message : String(err)}`, "error"); })
 		.finally(() => {
 			registry.delete(entry.id);
 			render();
