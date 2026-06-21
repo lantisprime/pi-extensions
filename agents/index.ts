@@ -12,12 +12,12 @@ export * from "./lib/jsonl-monitor.ts";
 export * from "./lib/registration.ts";
 export * from "./lib/profiles.ts";
 export * from "./lib/profile-discovery.ts";
-export { executeChildRun, nextStepForRunBlock, parseDoArgs, parseRunArgs, resolveRegisteredRunTarget, runAgentCommand, runIntentCommand, runResolvedTarget, type AgentsContextLike, type RunnableRegisteredRecord } from "./lib/run-resolver.ts";
+export { dispatchChildRun, executeChildRun, nextStepForRunBlock, parseDoArgs, parseRunArgs, resolveRegisteredRunTarget, runAgentCommand, runIntentCommand, runResolvedTarget, type AgentsContextLike, type RunnableRegisteredRecord } from "./lib/run-resolver.ts";
 
 import { buildProjectAgentRecommendation, collectAgentDiagnostics, formatAgentInspect, formatAgentsConfig, formatAgentsDoctor, formatAgentsList, formatAgentsRegistry, formatAgentsVerify } from "./lib/diagnostics.ts";
 import { runEphemeralCommand, saveTempCommand, type EphemeralRunHandlerContext } from "./lib/ephemeral.ts";
 import { registerAgent, registerProjectAgents, unregisterAgent } from "./lib/registration.ts";
-import { runAgentCommand, runIntentCommand } from "./lib/run-resolver.ts";
+import { runAgentCommand, runIntentCommand, dispatchChildRun } from "./lib/run-resolver.ts";
 import { disposeBackgroundRuns } from "./lib/bg-run.ts";
 import { validateBuiltInAgentSpecs } from "./lib/specs.ts";
 import { registerSubagentTool } from "./lib/subagent-tool.ts";
@@ -224,9 +224,9 @@ export default function agentsExtension(pi: ExtensionAPI) {
 
 // ── P7-2: Prompt-intent gate handler ────────────────────────────────────
 
-/** Test seam: override fn to intercept runIntentCommand calls in tests.
- *  Do not mutate in production. Defaults to runIntentCommand. */
-export const __gateRunner = { fn: runIntentCommand };
+/** Test seam: override fn to intercept gate-level child dispatch in tests.
+ *  Do not mutate in production. Defaults to dispatchChildRun. */
+export const __gateDispatch = { fn: dispatchChildRun };
 
 export async function handleGateInput(
 	text: string,
@@ -249,17 +249,11 @@ export async function handleGateInput(
 
 	// REQ-4 / REQ-11: route or confirm — always ask in TUI (REQ-SEC-3)
 	if (decision.kind === "route" || decision.kind === "confirm") {
-		const diagnostics = await collectAgentDiagnostics({
-			cwd: ctx.cwd,
-			homeDir: ctx.agentsHomeDir,
-			projectTrusted,
-		});
-
 		// REQ-SEC-3: NL-routed prompts ALWAYS confirm, regardless of P6 confidence
 		if (ctx.ui.confirm) {
 			const ok = await ctx.ui.confirm(
 				`Route to ${decision.agent}?`,
-				`Intent '${decision.metadata.intentId}' matched by ${decision.metadata.matchedBy}.\nTask: ${decision.task}`,
+				`Intent '${decision.metadata.intentId}' matched by ${decision.metadata.matchedBy}.\nTask: ${text}`,
 			);
 			if (!ok) { ctx.ui.notify("Routing cancelled.", "info"); return { action: "continue" }; }
 		}
@@ -267,11 +261,10 @@ export async function handleGateInput(
 		// REQ-SEC-5: gate-routed children must disable context files
 		ctx.disableContextFiles = true;
 
-		// REQ-SEC-2: profile is a NAME resolved through trusted library;
-		// prepend --profile flag so runIntentCommand threads it to the child.
-		const taskText = decision.profile ? `--profile ${decision.profile} ${text}` : text;
-
-		await __gateRunner.fn(taskText, ctx, diagnostics);
+		// C3: config-chosen agent = spawned agent — direct dispatch, no re-classification.
+		// Bypasses runIntentCommand's classifier + auto-run rail (SEC-3 satisfied).
+		// Profile passed structurally, not via string interpolation (SEC-2).
+		void __gateDispatch.fn(decision.agent, text, ctx, "built-in", decision.profile);
 		return { action: "handled" };
 	}
 
