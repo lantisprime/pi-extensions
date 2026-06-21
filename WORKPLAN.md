@@ -11,7 +11,8 @@ the source of truth; older entries in the chain are `superseded`.
 
 ## Active implementation (P6 Intent Routing)
 
-- **PR #50 merged.** P6-1 (intent router core), P6-0a (getPiInvocation), P6-0b (role→system-prompt transport) on main. Next: P6-2 (classifier spawn + fallback).
+- **PR #50 merged.** P6-1 (intent router core), P6-0a (getPiInvocation), P6-0b (role→system-prompt transport) on main.
+- **P6-2 merged (cc5ca7c).** LLM classifier spawn + heuristic fallback on main. Next: P6-3a (pure runResolvedTarget extraction).
 - **P6 plan:** `agents/docs/P6_INTENT_ROUTING_PLAN.md` — executor-ready, 5 review passes.
 
 ## Active design docs (track 2)
