@@ -54,6 +54,7 @@ function testParseDoArgs_withProfile() { const r = parseDoArgs("--profile fast-l
 function testParseDoArgs_emptyRejected() { assert.equal(parseDoArgs("").ok, false); }
 function testParseDoArgs_profileNoValueRejected() { assert.equal(parseDoArgs("--profile").ok, false); }
 function testParseDoArgs_profileNoTaskRejected() { assert.equal(parseDoArgs("--profile fast-local").ok, false); }
+function testParseDoArgs_timeout() { const r = parseDoArgs("--timeout 120 review this"); assert.equal(r.ok, true); if (r.ok) { assert.equal(r.timeoutMs, 120000); assert.equal(r.task, "review this"); } const r2 = parseDoArgs("--profile fast --timeout 90 do it"); assert.equal(r2.ok, true); if (r2.ok) { assert.equal(r2.profileOverride, "fast"); assert.equal(r2.timeoutMs, 90000); } assert.equal(parseDoArgs("--timeout 0 x").ok, false); }
 
 // ── Group 5: gate + autonomy ──
 async function testDo_nonTuiFailClosed() { const m = []; const ctx = makeCtx({ hasUI: false, ui: { notify: (x) => m.push(x) } }); await runIntentCommand("review this", ctx, makeDiagnostics()); assert.ok(m.some((x) => x.includes("interactive confirmation")), "non-TUI"); }
@@ -119,13 +120,40 @@ async function testToolPathDoesNotBackground() {
   assert.equal(/dispatchChildRun/.test(code), false, "run_subagent must not route through dispatchChildRun");
 }
 
+// P8-followup: a completed do-run injects its result (NL summary + tools) into pi's context.
+async function testDoDeliversResultToContext() {
+  stubClassifier("scout", 0.95);
+  const delivered = [];
+  const ctx = makeCtx();
+  ctx.deliverResult = (content) => delivered.push(content);
+  await runIntentCommand("review this code", ctx, makeDiagnostics());
+  assert.equal(ctx._runnerCalls.length, 1);
+  assert.equal(delivered.length, 1, "completed run delivers exactly one context message");
+  assert.match(delivered[0], /`scout` subagent finished/);
+  assert.match(delivered[0], /Summary:/);
+}
+
+// A failed run injects a FRAMED error so pi interprets it and advises (not just a raw dump).
+async function testDoDeliversFailureForInterpretation() {
+  stubClassifier("scout", 0.95);
+  const delivered = [];
+  const ctx = makeCtx();
+  ctx.agentsChildRunner = async (agent) => ({ agentName: typeof agent === "string" ? agent : agent.name, status: "timed-out", exitCode: 143, durationMs: 120000, stdoutBytes: 0, stderrPreview: "", invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin", stdinText: "" } }, summary: { summaryText: "", toolCalls: [], errors: [], usage: undefined, cost: undefined, stopReason: undefined, model: undefined, provider: undefined, truncation: {} }, timedOut: true, outputLimitExceeded: false });
+  ctx.deliverResult = (content) => delivered.push(content);
+  await runIntentCommand("review this", ctx, makeDiagnostics());
+  assert.equal(delivered.length, 1, "a failed run is injected for interpretation");
+  assert.match(delivered[0], /did NOT complete \(status: timed-out\)/);
+  assert.match(delivered[0], /recommend the single best next step/);
+}
+
 async function main() {
-  testParseDoArgs_basic(); testParseDoArgs_withProfile(); testParseDoArgs_emptyRejected(); testParseDoArgs_profileNoValueRejected(); testParseDoArgs_profileNoTaskRejected();
+  testParseDoArgs_basic(); testParseDoArgs_withProfile(); testParseDoArgs_emptyRejected(); testParseDoArgs_profileNoValueRejected(); testParseDoArgs_profileNoTaskRejected(); testParseDoArgs_timeout();
   await testDo_nonTuiFailClosed(); await testDo_nonTuiNeverSpawnsClassifier(); await testDo_emptyTaskUsage(); await testDo_classifierFallbackRuns();
   await testDo_builtInAutoRunHighConfidence(); await testDo_confirmLowConfidence(); await testDo_confirmDeclinedNoRun(); await testDo_autoRunRequiresReadOnlyTools();
   await testDo_registeredDispatchFailsClosedOnReReadError(); await testDo_gateDeniesUntrustedProject();
   await testDo_appliesRoleDefaultProfile(); await testDo_skipsNoOpRoleDefault(); await testDo_explicitProfileOverridesRoleDefault(); await testDo_roleDefaultWithNoLibraryDoesNotFailClosed();
   await testHandlerReturnsBeforeChildSettles(); await testNoUiFallbackSynchronous(); await testToolPathDoesNotBackground();
-  console.log("OK: 22/22 tests passed");
+  await testDoDeliversResultToContext(); await testDoDeliversFailureForInterpretation();
+  console.log("OK: 25/25 tests passed");
 }
 main().catch((error) => { console.error(error); process.exit(1); });

@@ -110,13 +110,34 @@ function testInspect_showsNoOpProfile() {
 
 // ── Main ──
 
+// --timeout flag: seconds → ms, any order with --profile, validated.
+function testParseRun_timeoutFlag() {
+  const a = parseRunArgs("scout --timeout 300 explore");
+  assert.equal(a.ok, true);
+  if (a.ok) { assert.equal(a.timeoutMs, 300000); assert.equal(a.task, "explore"); }
+  const b = parseRunArgs("planner --profile fast --timeout 60 plan it");
+  assert.equal(b.ok, true);
+  if (b.ok) { assert.equal(b.profileOverride, "fast"); assert.equal(b.timeoutMs, 60000); assert.equal(b.task, "plan it"); }
+  const c = parseRunArgs("scout --timeout 30 --profile fast explore"); // order-independent
+  assert.equal(c.ok, true);
+  if (c.ok) { assert.equal(c.timeoutMs, 30000); assert.equal(c.profileOverride, "fast"); }
+  assert.equal(parseRunArgs("scout --timeout abc task").ok, false, "non-numeric rejected");
+  assert.equal(parseRunArgs("scout --timeout 0 task").ok, false, "non-positive rejected");
+  assert.equal(parseRunArgs("scout --timeout 99999 task").ok, false, "above 3600s cap rejected");
+  assert.equal(parseRunArgs("scout --timeout").ok, false, "missing value rejected");
+  const d = parseRunArgs("scout do --timeout 30 thing"); // mid-task → part of task + warning
+  assert.equal(d.ok, true);
+  if (d.ok) { assert.equal(d.timeoutMs, undefined); assert.ok(d.warning); }
+}
+
 async function main() {
   testProfileEffect_classifies();
   testParseRun_warnsMisplacedProfile();
+  testParseRun_timeoutFlag();
   testDoctor_warnsAgentProfileCollision();
   await testProfiles_labelsNoOpProfile();
   testInspect_showsNoOpProfile();
-  console.log("OK: 5/5 tests passed");
+  console.log("OK: 6/6 tests passed");
 }
 
 main().catch((error) => { console.error(error); process.exit(1); });

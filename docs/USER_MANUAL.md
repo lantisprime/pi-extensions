@@ -264,9 +264,32 @@ pi -e ./agents/index.ts
   `/agents run <agent>` there.
 - Every run passes the `canRunAgent` gate. A spec whose hash changed is blocked
   until you re-register it.
-- On `/agents run`, `--profile` has to come right after the agent name.
-  Misplaced, Pi warns and treats it as task text.
+- On `/agents run`, `--profile` and `--timeout` have to come right after the
+  agent name (in any order). Misplaced, Pi warns and treats it as task text.
 - `/agents doctor` warns when an agent name matches a built-in profile name.
+
+**Background runs, the live indicator, and timeout**
+
+In an interactive TUI, `/agents do`, `run`, `chain`, and `run-temp` run
+**non-blocking**: the agent runs in the background while your prompt stays free,
+so you can keep typing (follow-ups queue through Pi normally). A fixed-height
+widget above the editor shows a spinner and the agent's latest activity, then
+clears with a result when it finishes. On success the agent's findings are fed
+into the conversation; on failure (e.g. a timeout) the error is handed to Pi to
+interpret and recommend a next step, rather than dumped raw.
+
+Each agent run has a **5-minute default timeout**. Override it per run with
+`--timeout <seconds>` (1–3600), right after the agent name (or, for `/agents do`,
+at the start):
+
+```text
+/agents run reviewer --timeout 600 review the whole repo for auth bugs
+/agents do --timeout 120 where is authentication configured?
+/agents run planner --profile reasoning-deep --timeout 300 plan the migration
+```
+
+If a run times out, Pi will usually suggest either narrowing the task or raising
+`--timeout` — narrowing is generally the better first move.
 
 See [Intent-based agent routing](#intent-based-agent-routing) and
 [Registered custom agents](#registered-custom-agents).

@@ -42,12 +42,17 @@ type AgentsContext = {
 	profileLibrary?: ModelProfileLibrary;
 	profileLibraryWarnings?: ProfileLibraryBuildWarning[];
 	isProjectTrusted?: () => boolean;
+	// Resolved trust + registry for the run path (project-profile trust check needs these).
+	projectTrusted?: boolean;
+	projectRegistry?: import("./lib/registry.ts").ProjectAgentRegistry;
 	ui: {
 		notify(message: string, level?: "info" | "warning" | "error" | string): void;
 		confirm?(title: string, message: string): Promise<boolean> | boolean;
 		// P8: interactive widget surface used for the live background-run indicator.
 		setWidget?(key: string, content: string[] | undefined, options?: { placement?: "aboveEditor" | "belowEditor" }): void;
 	};
+	// P8-followup: inject a completed subagent result into pi's conversation (set in the handler).
+	deliverResult?: (content: string) => void;
 };
 
 export default function agentsExtension(pi: ExtensionAPI) {
@@ -97,7 +102,27 @@ export default function agentsExtension(pi: ExtensionAPI) {
 		},
 		handler: async (args, ctx) => {
 			const parsed = parseAgentsArgs(args);
+			// The profile library is built once at session_start and stashed on sessionAgentsCtx.
+			// When pi hands the command a fresh ctx, ctx.profileLibrary is undefined — agents with a
+			// mandatory `profile:` (e.g. a registered project agent) then fail with "no profile
+			// library available". Re-attach the session library so profile resolution works.
+			if (!ctx.profileLibrary && sessionAgentsCtx?.profileLibrary) {
+				ctx.profileLibrary = sessionAgentsCtx.profileLibrary;
+				ctx.profileLibraryWarnings = sessionAgentsCtx.profileLibraryWarnings;
+			}
+			// P8-followup: deliver a completed subagent's result into pi's conversation (triggers a
+			// turn so pi reacts to the findings). deliverAs:"followUp" queues politely if pi is busy.
+			const sendUserMessage = (pi as ExtensionAPI & { sendUserMessage?: (content: string, options?: { deliverAs?: "steer" | "followUp" }) => void }).sendUserMessage;
+			if (typeof sendUserMessage === "function") {
+				ctx.deliverResult = (content: string) => sendUserMessage(content, { deliverAs: "followUp" });
+			}
 			const diagnostics = await collectAgentDiagnostics({ cwd: ctx.cwd, homeDir: ctx.agentsHomeDir, projectTrusted: resolveProjectTrusted(ctx) });
+			// Thread the resolved trust + project registry onto ctx so the run path's project-profile
+			// trust check sees them (the per-command ctx only carries isProjectTrusted(), not the
+			// resolved booleans). Without this, a registered project agent with a project `profile:`
+			// fails with "project trust is not active" even though its gate already passed.
+			ctx.projectTrusted = diagnostics.projectTrusted;
+			ctx.projectRegistry = diagnostics.projectRegistry;
 			if (parsed.action === "list" || parsed.action === "built-ins") {
 				if (parsed.action === "list") await maybeNotifyProjectRecommendation(ctx, true, diagnostics);
 				ctx.ui.notify(`P3 agents diagnostics: child execution is available via /agents run <built-in-or-registered> <task>.\n${formatAgentsList(diagnostics)}`, "info");
@@ -173,14 +198,14 @@ export default function agentsExtension(pi: ExtensionAPI) {
 				return;
 			}
 			if (parsed.action === "run-temp") {
-				const ephCtx: EphemeralRunHandlerContext = { cwd: ctx.cwd, hasUI: ctx.hasUI, agentsPiCommand: ctx.agentsPiCommand, agentsChildRunner: ctx.agentsChildRunner, agentsLastEphemeralSpec: ctx.agentsLastEphemeralSpec, ui: ctx.ui };
+				const ephCtx: EphemeralRunHandlerContext = { cwd: ctx.cwd, hasUI: ctx.hasUI, agentsPiCommand: ctx.agentsPiCommand, agentsChildRunner: ctx.agentsChildRunner, agentsLastEphemeralSpec: ctx.agentsLastEphemeralSpec, ui: ctx.ui, deliverResult: ctx.deliverResult };
 				const stashed = await runEphemeralCommand(parsed.rest, ephCtx);
 				if (stashed) ctx.agentsLastEphemeralSpec = stashed;
 				return;
 			}
 			if (parsed.action === "save-temp") {
 				const userAgentsDir = diagnostics.userAgentsDir;
-				const ephCtx: EphemeralRunHandlerContext = { cwd: ctx.cwd, hasUI: ctx.hasUI, agentsPiCommand: ctx.agentsPiCommand, agentsChildRunner: ctx.agentsChildRunner, agentsLastEphemeralSpec: ctx.agentsLastEphemeralSpec, ui: ctx.ui };
+				const ephCtx: EphemeralRunHandlerContext = { cwd: ctx.cwd, hasUI: ctx.hasUI, agentsPiCommand: ctx.agentsPiCommand, agentsChildRunner: ctx.agentsChildRunner, agentsLastEphemeralSpec: ctx.agentsLastEphemeralSpec, ui: ctx.ui, deliverResult: ctx.deliverResult };
 				await saveTempCommand(parsed.rest, ephCtx, { projectTrusted: diagnostics.projectTrusted, userAgentsDir });
 				return;
 			}

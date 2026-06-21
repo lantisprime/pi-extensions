@@ -8,6 +8,10 @@
 
 export const BG_RUN_MAX_CONCURRENT = 5;
 export const MAX_TAIL_LINE_CHARS = 200;
+/** Fixed number of activity (tail) lines rendered per run. The slots are ALWAYS present (padded
+ *  with blanks), so the widget height is constant and the editor + status bar never shift as
+ *  output streams — the latest lines just scroll through the reserved slots. */
+export const TAIL_SLOTS = 2;
 export const SPINNER_FRAMES = ["◐", "◓", "◑", "◒"] as const; // user's "rotating circle"
 export const SPINNER_INTERVAL_MS = 120;
 export const WIDGET_KEY = "agents:bg-runs";
@@ -46,29 +50,47 @@ export function sanitizeProgressLine(raw: string): string {
 	return stripped.length > MAX_TAIL_LINE_CHARS ? stripped.slice(0, MAX_TAIL_LINE_CHARS) : stripped;
 }
 
-/** Best-effort: reduce a JSONL stdout line to a short activity string. Never throws. */
+/** Max display width of a tail line (excl. indent). Kept short so a line never wraps to a second
+ *  terminal row — wrapping is what made the fixed-height widget grow and shove the editor down. */
+export const TAIL_DISPLAY_CHARS = 76;
+
+function clip(s: string): string | undefined {
+	const t = s.trim();
+	if (!t.length) return undefined;
+	return t.length > TAIL_DISPLAY_CHARS ? t.slice(0, TAIL_DISPLAY_CHARS - 1) + "…" : t;
+}
+
+function extractText(content: unknown): string | undefined {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return undefined;
+	const parts: string[] = [];
+	for (const p of content) {
+		if (p && typeof p === "object" && (p as Record<string, unknown>).type === "text" && typeof (p as Record<string, unknown>).text === "string") {
+			parts.push((p as Record<string, unknown>).text as string);
+		}
+	}
+	return parts.length ? parts.join(" ") : undefined;
+}
+
+/** Reduce a JSONL stdout line to a SHORT, meaningful activity string for the fixed-height tail.
+ *  Returns undefined for noise — message_start/update (thinking), turn markers, malformed lines —
+ *  so the tail shows only tool calls + final text. Short, single-row lines keep the widget height
+ *  stable (long raw-JSON lines wrapped and pushed the prompt/status bar down). */
 export function summarizeProgressLine(raw: string): string | undefined {
+	if (raw.length > 4000) return undefined; // oversized event = noise; parsing it would also stall the loop
 	let parsed: unknown;
-	try {
-		parsed = JSON.parse(raw);
-	} catch {
-		const s = sanitizeProgressLine(raw);
-		return s.length ? s : undefined;
+	try { parsed = JSON.parse(raw); } catch { return undefined; }
+	if (!parsed || typeof parsed !== "object") return undefined;
+	const obj = parsed as Record<string, unknown>;
+	if (typeof obj.toolName === "string") {
+		const args = obj.args !== undefined ? sanitizeProgressLine(JSON.stringify(obj.args)).slice(0, 50) : "";
+		return clip(sanitizeProgressLine(`→ ${obj.toolName} ${args}`));
 	}
-	if (parsed && typeof parsed === "object") {
-		const obj = parsed as Record<string, unknown>;
-		if (typeof obj.toolName === "string") {
-			const args = obj.args !== undefined ? sanitizeProgressLine(JSON.stringify(obj.args)).slice(0, 60) : "";
-			return sanitizeProgressLine(`→ ${obj.toolName} ${args}`.trim());
-		}
-		const message = obj.message as { content?: unknown } | undefined;
-		if (obj.type === "message_end" && message && typeof message.content === "string") {
-			const s = sanitizeProgressLine(message.content.replace(/\n/g, " "));
-			return s.length ? s : undefined;
-		}
+	if (obj.type === "message_end" || obj.type === "turn_end") {
+		const text = extractText((obj.message as { content?: unknown } | undefined)?.content);
+		if (text) return clip(sanitizeProgressLine(text.replace(/\s+/g, " ")));
 	}
-	const s = sanitizeProgressLine(raw);
-	return s.length ? s : undefined;
+	return undefined;
 }
 
 function render(): void {
@@ -82,7 +104,11 @@ function render(): void {
 	for (const entry of registry.values()) {
 		const elapsed = Math.max(0, Math.floor((deps.now() - entry.startedAt) / 1000));
 		lines.push(`${frame} ${entry.label} · ${elapsed}s`);
-		for (const t of entry.tail) lines.push(`   ${t}`);
+		// Always emit TAIL_SLOTS lines (newest at the bottom, blank-padded at the top) so the
+		// widget height is fixed — the tail scrolls in place instead of growing the widget.
+		const slots = entry.tail.slice(-TAIL_SLOTS);
+		while (slots.length < TAIL_SLOTS) slots.unshift("");
+		for (const t of slots) lines.push(`   ${t}`);
 	}
 	try { activeUI.setWidget(WIDGET_KEY, lines, { placement: "aboveEditor" }); } catch { /* detached/closed UI context */ }
 }
@@ -140,11 +166,14 @@ export function startBackgroundRun(args: {
 
 	const handle: BgRunHandle = {
 		onProgress(line: string) {
+			// Update the tail buffer ONLY — do NOT render here. A chatty agent emits many stdout
+			// lines in bursts; rendering per line floods setWidget with synchronous TUI redraws and
+			// starves pi's input loop (keystrokes lag). The spinner interval (every SPINNER_INTERVAL_MS)
+			// renders the latest tail, so redraws are capped regardless of stdout volume.
 			const summary = summarizeProgressLine(line);
 			if (!summary) return;
 			entry.tail.push(summary);
-			if (entry.tail.length > 2) entry.tail = entry.tail.slice(-2);
-			render();
+			if (entry.tail.length > TAIL_SLOTS) entry.tail = entry.tail.slice(-TAIL_SLOTS);
 		},
 	};
 
@@ -157,6 +186,35 @@ export function startBackgroundRun(args: {
 			render();
 			stopTimerIfIdle();
 		});
+}
+
+/** Show an animated spinner row for a SYNCHRONOUS phase that blocks the composer before a
+ *  background run starts — e.g. the /agents do intent classifier (which must finish picking an
+ *  agent first). The handler is still awaiting, but the event loop is free, so the spinner
+ *  interval keeps animating: the user sees "◐ routing…" instead of a frozen screen. Returns a
+ *  stop function (idempotent) that removes the row. Reuses the same widget + timer as runs, so
+ *  it transitions seamlessly into the agent's spinner. */
+export function startBackgroundPhase(ui: BgRunUI, label: string, opts?: { now?: () => number; setInterval?: typeof setInterval; clearInterval?: typeof clearInterval }): () => void {
+	if (opts) {
+		deps = {
+			now: opts.now ?? deps.now,
+			setIntervalFn: opts.setInterval ?? deps.setIntervalFn,
+			clearIntervalFn: opts.clearInterval ?? deps.clearIntervalFn,
+		};
+	}
+	activeUI = ui;
+	const entry: RunEntry = { id: ++idCounter, label, startedAt: deps.now(), tail: [] };
+	registry.set(entry.id, entry);
+	ensureTimer();
+	render();
+	let stopped = false;
+	return () => {
+		if (stopped) return;
+		stopped = true;
+		registry.delete(entry.id);
+		render();
+		stopTimerIfIdle();
+	};
 }
 
 /** Registered on session_shutdown — clears the timer and the widget so nothing leaks (REQ-11). */

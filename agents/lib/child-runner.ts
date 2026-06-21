@@ -180,6 +180,23 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 	}
 }
 
+/** Map a non-completed run to a concrete next step the user can take. Best-effort, pattern-based;
+ *  returns undefined for a clean completed run. Shown as a `→ next:` line in the result. */
+export function suggestNextAction(result: ChildAgentRunResult): string | undefined {
+	if (result.status === "completed") return undefined;
+	const err = (result.error || "").toLowerCase();
+	if (err.includes("project trust is not active")) return "activate project trust (trust the project / run /agents register-project), then rerun.";
+	if (err.includes("no profile library is available")) return "profile library unavailable — reload the session, or run /agents profiles to verify.";
+	if (err.includes("profile") && (err.includes("not found") || err.includes("unknown") || err.includes("no matching"))) return "profile not found — run /agents profiles to list profiles, or check .pi/profiles/.";
+	if (err.includes("not registered") || err.includes("unregistered")) return "register it first — /agents register <name> (or /agents register-project).";
+	if (err.includes("hash") || err.includes("re-read") || err.includes("changed")) return "the spec changed on disk — /agents inspect <name>, then re-register.";
+	if (result.timedOut) return `timed out after ${result.durationMs}ms — narrow the task or raise the agent's timeoutMs.`;
+	if (result.outputLimitExceeded) return "output exceeded limits — narrow the task or raise maxStdoutBytes.";
+	if (result.status === "spawn-error") return "could not spawn the child — ensure the 'pi' CLI is on PATH and the spec/profile is valid; /agents doctor.";
+	if (result.status === "failed") return `child exited non-zero${result.exitCode !== undefined ? ` (exit ${result.exitCode})` : ""} — check the stderr/tool output above and rerun with a narrower task.`;
+	return "run /agents inspect <name> and /agents doctor to diagnose.";
+}
+
 export function formatChildAgentRunResult(result: ChildAgentRunResult): string {
 	const lines = [
 		`Agent run: ${result.agentName}`,
@@ -202,8 +219,47 @@ export function formatChildAgentRunResult(result: ChildAgentRunResult): string {
 	if (result.summary.cost !== undefined) lines.push(`cost: ${stableJson(result.summary.cost)}`);
 	if (result.summary.stopReason) lines.push(`stopReason: ${result.summary.stopReason}`);
 	if (result.summary.model || result.summary.provider) lines.push(`model: ${[result.summary.provider, result.summary.model].filter(Boolean).join("/")}`);
+	const next = suggestNextAction(result);
+	if (next) lines.push(`→ next: ${next}`);
 	lines.push("summary:");
 	lines.push(result.summary.summaryText || "(no assistant summary captured)");
+	return lines.join("\n");
+}
+
+/** P8-followup: format a subagent run for injection into pi's conversation context. On success:
+ *  NL summary + a compact tool list. On failure: frame the error so the parent LLM interprets it
+ *  in plain language and proposes next steps (instead of the user staring at a raw dump). Distinct
+ *  from formatChildAgentRunResult (the verbose operator toast); kept short to bound context spend. */
+export function formatAgentResultForContext(result: ChildAgentRunResult): string {
+	const toolList = () => {
+		if (result.summary.toolCalls.length === 0) return [];
+		const out = ["", `Tool calls (${result.summary.toolCalls.length}):`];
+		for (const tool of result.summary.toolCalls.slice(0, 20)) out.push(`- ${tool.name}: ${tool.argsPreview}`.trimEnd());
+		if (result.summary.toolCalls.length > 20) out.push(`- … +${result.summary.toolCalls.length - 20} more`);
+		return out;
+	};
+
+	if (result.status !== "completed") {
+		// Failure: ask pi to interpret and advise in natural language.
+		const lines = [
+			`The \`${result.agentName}\` subagent did NOT complete (status: ${result.status}). In plain language, explain what likely went wrong and recommend the single best next step for me to take.`,
+			"",
+			result.error ? `Error: ${result.error}` : `It ended with status "${result.status}" after ${result.durationMs}ms.`,
+		];
+		const next = suggestNextAction(result);
+		if (next) lines.push("", `Heuristic hint (verify before suggesting): ${next}`);
+		lines.push(...toolList());
+		return lines.join("\n");
+	}
+
+	const summary = result.summary.summaryText?.trim();
+	const lines = [
+		`The \`${result.agentName}\` subagent finished (status: completed). Use its findings to help with my task.`,
+		"",
+		"Summary:",
+		summary && summary.length > 0 ? summary : "(the subagent produced no natural-language summary)",
+	];
+	lines.push(...toolList());
 	return lines.join("\n");
 }
 

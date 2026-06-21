@@ -224,6 +224,7 @@ export async function runChainCommand(
 			confirm?(title: string, message: string): Promise<boolean> | boolean;
 			setWidget?(key: string, content: string[] | undefined, options?: { placement?: "aboveEditor" | "belowEditor" }): void;
 		};
+		deliverResult?: (content: string) => void;
 	},
 	diagnostics: AgentDiagnostics,
 ): Promise<void> {
@@ -259,15 +260,34 @@ export async function runChainCommand(
 		return { message: `Chain failed at agent '${outcome.agentName}' (${outcome.code}): ${outcome.message}`, level: "warning" as const };
 	};
 
+	// P8-followup: on success, feed the per-step findings into pi's conversation (best-effort).
+	const handleOutcome = (outcome: ChainRunOutcome) => {
+		if (typeof ctx.deliverResult === "function") {
+			const chainName = preflight.resolved.map((a) => a.name).join(" → ");
+			const lines = outcome.ok
+				? [
+						`The agent chain (${chainName}) finished. Use its findings to help with my task.`,
+						...outcome.results.map((r) => `\n[${r.agentName}] ${r.status}:\n${r.summaryText || "(no summary)"}`),
+					]
+				: [
+						`The agent chain (${chainName}) FAILED at '${outcome.agentName}' (${outcome.code}). In plain language, explain what likely went wrong and recommend the single best next step.`,
+						"",
+						`Error: ${outcome.message}`,
+					];
+			try { ctx.deliverResult(lines.join("\n")); } catch { /* best-effort */ }
+		}
+		return settleFor(outcome);
+	};
+
 	if (ctx.hasUI && typeof ctx.ui.setWidget === "function") {
 		startBackgroundRun({
 			ui: ctx.ui as BgRunUI,
 			label: `chain:${preflight.resolved.map((a) => a.name).join("→")}`,
-			run: async (handle) => settleFor(await runChain(preflight.resolved, parsed.task, { ...ctx, onProgress: handle.onProgress })),
+			run: async (handle) => handleOutcome(await runChain(preflight.resolved, parsed.task, { ...ctx, onProgress: handle.onProgress })),
 		});
 		return;
 	}
 
-	const settle = settleFor(await runChain(preflight.resolved, parsed.task, ctx));
+	const settle = handleOutcome(await runChain(preflight.resolved, parsed.task, ctx));
 	ctx.ui.notify(settle.message, settle.level);
 }

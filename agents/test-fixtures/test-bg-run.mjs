@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
 	startBackgroundRun,
+	startBackgroundPhase,
 	disposeBackgroundRuns,
 	__resetBackgroundRuns,
 	sanitizeProgressLine,
@@ -74,10 +75,16 @@ async function testTailKeepsLastTwoLines() {
 	const d = deferred();
 	startBackgroundRun({ ui, label: "run:scout", run: (h) => { handle = h; return d.promise; }, now: () => 0, setInterval: timer.setInterval.bind(timer), clearInterval: timer.clearInterval.bind(timer) });
 	await flush(); // let run() execute so `handle` is set
-	handle.onProgress("line1");
-	handle.onProgress("line2");
-	handle.onProgress("line3");
-	assert.deepEqual(tailLines(ui.lastWidget()), ["   line2", "   line3"], "only the last two activity lines are kept");
+	const widgetsBefore = ui.widgets.length;
+	const tool = (name) => JSON.stringify({ toolName: name }); // real progress lines are JSONL
+	handle.onProgress(tool("a"));
+	handle.onProgress(tool("b"));
+	handle.onProgress(tool("c"));
+	handle.onProgress('{"type":"message_update","assistantMessageEvent":{"type":"thinking_start"}}'); // noise → skipped
+	// Throttle: onProgress updates the tail buffer but must NOT render (no setWidget flood).
+	assert.equal(ui.widgets.length, widgetsBefore, "onProgress does not render per line (redraws are throttled to the interval)");
+	timer.tick(); // the spinner interval renders the latest tail
+	assert.deepEqual(tailLines(ui.lastWidget()), ["   → b", "   → c"], "keeps last two MEANINGFUL lines; noise (thinking) is skipped");
 	d.resolve({ message: "ok", level: "info" });
 	await flush();
 	__resetBackgroundRuns();
@@ -197,7 +204,25 @@ async function testIndexRegistersShutdownDispose() {
 	assert.match(src, /disposeBackgroundRuns\(/, "index.ts calls disposeBackgroundRuns on shutdown");
 }
 
+// P8-followup: a synchronous-phase spinner (e.g. intent classifier) animates then clears.
+async function testPhaseSpinnerAnimatesThenClears() {
+	__resetBackgroundRuns();
+	const ui = makeUI();
+	const timer = makeFakeTimer();
+	const stop = startBackgroundPhase(ui, "routing — selecting agent…", { now: () => 0, setInterval: timer.setInterval.bind(timer), clearInterval: timer.clearInterval.bind(timer) });
+	assert.ok(ui.lastWidget().content[0].includes("routing"), "phase label is shown");
+	const first = frameOf(ui.lastWidget());
+	timer.tick();
+	assert.notEqual(frameOf(ui.lastWidget()), first, "spinner animates during the blocking phase");
+	stop();
+	assert.deepEqual(ui.lastWidget(), { key: WIDGET_KEY, content: undefined, options: undefined }, "phase spinner cleared on stop");
+	assert.equal(timer.cleared, true, "interval stopped when idle");
+	stop(); // idempotent — second call is a no-op
+	__resetBackgroundRuns();
+}
+
 async function main() {
+	await testPhaseSpinnerAnimatesThenClears();
 	await testSpinnerFrameAdvances();
 	await testTailKeepsLastTwoLines();
 	await testProgressLineSanitized();
