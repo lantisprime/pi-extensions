@@ -13,6 +13,7 @@ import {
 } from "../lib/ephemeral.ts";
 import { validateAgentSpec } from "../lib/specs.ts";
 import { parseAgentMarkdownFile } from "../lib/agent-markdown.ts";
+import { __resetBackgroundRuns, WIDGET_KEY } from "../lib/bg-run.ts";
 
 async function makeHarness() {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "ephemeral-test-"));
@@ -454,6 +455,33 @@ async function testSaveTempRenderedMarkdownRoundTripsThroughParser() {
 	}
 }
 
+// P8-3: run-temp backgrounds when hasUI+setWidget — stash returns immediately; widget clears on settle.
+async function testRunTempBackgroundReturnsStashImmediately() {
+	__resetBackgroundRuns();
+	const harness = await makeHarness();
+	try {
+		const widgets = [];
+		harness.ctx.ui.setWidget = (k, c) => widgets.push({ k, c });
+		let settled = false, release;
+		const gate = new Promise((res) => { release = res; });
+		harness.ctx.agentsChildRunner = async (agent) => {
+			await gate; settled = true;
+			return { agentName: typeof agent === "string" ? agent : agent.name, status: "completed", exitCode: 0, durationMs: 1, stdoutBytes: 0, stderrPreview: "", invocation: { command: "pi", argv: [], argvPreview: [] }, summary: { eventsSeen: 1, malformedLines: 0, toolCalls: [], summaryText: "ok", truncation: {}, errors: [] }, timedOut: false, outputLimitExceeded: false };
+		};
+		const stashed = await runEphemeralCommand("planner plan something", harness.ctx);
+		assert.ok(stashed && stashed.spec, "stash returned immediately for save-temp while backgrounded");
+		assert.equal(settled, false, "child still running (backgrounded) when command returned");
+		assert.ok(widgets.some((w) => Array.isArray(w.c)), "progress widget rendered while running");
+		release();
+		await new Promise((r) => setImmediate(r)); await new Promise((r) => setImmediate(r));
+		assert.equal(settled, true, "child settled after release");
+		assert.deepEqual(widgets[widgets.length - 1], { k: WIDGET_KEY, c: undefined }, "widget cleared after settle");
+		__resetBackgroundRuns();
+	} finally {
+		await cleanup(harness);
+	}
+}
+
 async function main() {
 	// Group 1: Argument parsing
 	await testParseEphemeralRunArgsRejectsEmptyInput();
@@ -476,6 +504,7 @@ async function main() {
 	await testRunTempChildArgvIncludesNoApprove();
 	await testRunTempChildArgvDiscoveryDisabled();
 	await testRunTempWritesNoFile();
+	await testRunTempBackgroundReturnsStashImmediately();
 
 	// Group 3: Spec construction
 	await testEphemeralSpecPassesValidateAgentSpec();

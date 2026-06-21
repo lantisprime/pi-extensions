@@ -18,6 +18,7 @@ import { buildProjectAgentRecommendation, collectAgentDiagnostics, formatAgentIn
 import { runEphemeralCommand, saveTempCommand, type EphemeralRunHandlerContext } from "./lib/ephemeral.ts";
 import { registerAgent, registerProjectAgents, unregisterAgent } from "./lib/registration.ts";
 import { runAgentCommand, runIntentCommand } from "./lib/run-resolver.ts";
+import { disposeBackgroundRuns } from "./lib/bg-run.ts";
 import { validateBuiltInAgentSpecs } from "./lib/specs.ts";
 import { registerSubagentTool } from "./lib/subagent-tool.ts";
 import { formatBuiltInProfilesList, toProfileLibrary, buildProfileLibrary, type ModelProfileLibrary, type ProfileLibraryBuildWarning } from "./lib/profiles.ts";
@@ -44,12 +45,18 @@ type AgentsContext = {
 	ui: {
 		notify(message: string, level?: "info" | "warning" | "error" | string): void;
 		confirm?(title: string, message: string): Promise<boolean> | boolean;
+		// P8: interactive widget surface used for the live background-run indicator.
+		setWidget?(key: string, content: string[] | undefined, options?: { placement?: "aboveEditor" | "belowEditor" }): void;
 	};
 };
 
 export default function agentsExtension(pi: ExtensionAPI) {
 	const eventApi = pi as ExtensionAPI & { on?: (name: string, handler: (event: unknown, ctx: AgentsContext) => Promise<void> | void) => void };
 	let sessionAgentsCtx: AgentsContext | undefined;
+	// P8-4: clear any live background-run spinner timer + widget when the session shuts down.
+	eventApi.on?.("session_shutdown", (_event, ctx) => {
+		disposeBackgroundRuns(ctx?.ui ?? { setWidget: () => {} });
+	});
 	eventApi.on?.("session_start", async (_event, ctx) => {
 		sessionAgentsCtx = ctx;
 		ctx.profileLibrary = profileLibrary; // start with built-ins

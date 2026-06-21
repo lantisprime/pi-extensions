@@ -13,6 +13,7 @@ import { getBuiltInAgentSpec, isReservedBuiltInAgentName } from "./specs.ts";
 import type { ModelProfileLibrary } from "./profiles.ts";
 import type { ProjectAgentRegistry } from "./registry.ts";
 import { resolveRunIntent, profileEffect, INTENT_AUTORUN_CONFIDENCE, ROLE_DEFAULT_PROFILE, type IntentCandidate } from "./intent-router.ts";
+import { startBackgroundRun, type BgRunUI, type BgRunSettle } from "./bg-run.ts";
 
 export type AgentsContextLike = {
 	cwd?: string;
@@ -28,6 +29,10 @@ export type AgentsContextLike = {
 	ui: {
 		notify(message: string, level?: "info" | "warning" | "error" | string): void;
 		confirm?(title: string, message: string): Promise<boolean> | boolean;
+		/** P8-3: present when the host UI supports widgets (interactive TUI). When available
+		 *  AND hasUI, agent-spawning commands run in the background with a live indicator;
+		 *  otherwise they fall back to the synchronous await path (zero behavior change). */
+		setWidget?(key: string, content: string[] | undefined, options?: { placement?: "aboveEditor" | "belowEditor" }): void;
 	};
 };
 
@@ -80,25 +85,54 @@ export function nextStepForRunBlock(record: AgentDiagnosticRecord, code: string)
 	return `/agents inspect ${record.name}`;
 }
 
-export async function executeChildRun(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string, profileOverride?: string): Promise<void> {
+/** P8-3: run the child and return the settle message+level WITHOUT notifying (so a background
+ *  run can notify on completion). Optional onProgress streams stdout lines to the widget.
+ *  onProgress is forwarded into the runner options; when absent the options are byte-identical
+ *  to the pre-P8 path (so the synchronous/tool callers are unchanged). */
+async function executeChildRunResult(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string, profileOverride?: string, onProgress?: (line: string) => void): Promise<BgRunSettle> {
 	try {
 		const childOptions = buildChildRunOptions(ctx);
 		const profiles = ctx.profileLibrary;
+		const progressOpt = onProgress ? { onProgress } : {};
 		const runOptions = {
 			...childOptions,
 			projectTrusted: ctx.projectTrusted,
 			projectRegistry: ctx.projectRegistry,
+			...progressOpt,
 		};
 		const result = ctx.agentsChildRunner
-			? await ctx.agentsChildRunner(agent, task, profileOverride ? { ...childOptions, profileOverride } : childOptions)
+			? await ctx.agentsChildRunner(agent, task, profileOverride ? { ...childOptions, profileOverride, ...progressOpt } : { ...childOptions, ...progressOpt })
 			: typeof agent === "string"
 				? await runBuiltInChildAgent(agent, task, runOptions, profiles, profileOverride)
 				: await runChildAgent(agent, task, runOptions, profiles, profileOverride);
-		ctx.ui.notify(formatChildAgentRunResult(result), result.status === "completed" ? "info" : "warning");
+		return { message: formatChildAgentRunResult(result), level: result.status === "completed" ? "info" : "warning" };
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		ctx.ui.notify(`Agent run failed before ${source} child execution completed: ${message}`, "error");
+		return { message: `Agent run failed before ${source} child execution completed: ${message}`, level: "error" };
 	}
+}
+
+/** Synchronous run + notify (the no-UI / tool fallback). Behavior unchanged from pre-P8. */
+export async function executeChildRun(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string, profileOverride?: string): Promise<void> {
+	const settle = await executeChildRunResult(agent, task, ctx, source, profileOverride);
+	ctx.ui.notify(settle.message, settle.level);
+}
+
+/** P8-3: background the run when the host has an interactive widget UI; otherwise await inline.
+ *  Backgrounding returns immediately so pi's composer stays live (REQ-1). The synchronous path
+ *  is taken when !hasUI OR the host lacks setWidget (REQ-8), keeping non-TUI/tool callers and the
+ *  existing test suites unchanged (their ctx.ui has no setWidget). */
+async function dispatchChildRun(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string, profileOverride?: string): Promise<void> {
+	if (ctx.hasUI && typeof ctx.ui.setWidget === "function") {
+		const label = typeof agent === "string" ? agent : agent.name;
+		startBackgroundRun({
+			ui: ctx.ui as BgRunUI,
+			label,
+			run: (handle) => executeChildRunResult(agent, task, ctx, source, profileOverride, handle.onProgress),
+		});
+		return;
+	}
+	await executeChildRun(agent, task, ctx, source, profileOverride);
 }
 
 export async function runAgentCommand(input: string, ctx: AgentsContextLike, diagnostics: AgentDiagnostics): Promise<void> {
@@ -110,7 +144,7 @@ export async function runAgentCommand(input: string, ctx: AgentsContextLike, dia
 	if (parsed.warning) ctx.ui.notify(parsed.warning, "warning");
 	if (isReservedBuiltInAgentName(parsed.name)) {
 		ctx.ui.notify(`Running built-in agent '${parsed.name}' with read-only tools.`, "info");
-		await executeChildRun(parsed.name, parsed.task, ctx, "built-in", parsed.profileOverride);
+		await dispatchChildRun(parsed.name, parsed.task, ctx, "built-in", parsed.profileOverride);
 		return;
 	}
 
@@ -182,7 +216,7 @@ export async function runResolvedTarget(record: RunnableRegisteredRecord, task: 
 		return;
 	}
 	ctx.ui.notify(`Running registered ${record.source} agent '${currentParsed.spec.name}' with read-only tools.`, "info");
-	await executeChildRun(currentParsed.spec, task, ctx, record.source, profileOverride);
+	await dispatchChildRun(currentParsed.spec, task, ctx, record.source, profileOverride);
 }
 
 /** P6-3b: parse /agents do input. Leading --profile is tokens[0] (no agent-name token). */
@@ -236,7 +270,7 @@ export async function runIntentCommand(input: string, ctx: AgentsContextLike, di
 		if (def && profileEffect(def) !== "none") profile = roleDefault;
 	}
 	if (chosen.source === "built-in") {
-		await executeChildRun(decision.agent, parsed.task, ctx, "built-in", profile);
+		await dispatchChildRun(decision.agent, parsed.task, ctx, "built-in", profile);
 	} else {
 		const resolved = await resolveRegisteredRunTarget(decision.agent, diagnostics);
 		if (!resolved.ok) { ctx.ui.notify(resolved.message, "warning"); return; }

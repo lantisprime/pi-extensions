@@ -7,6 +7,7 @@ import {
 	type AgentDiagnostics,
 } from "./diagnostics.ts";
 import { buildChildRunOptions, nextStepForRunBlock, resolveRegisteredRunTarget } from "./run-resolver.ts";
+import { startBackgroundRun, type BgRunUI } from "./bg-run.ts";
 import { isReservedBuiltInAgentName } from "./specs.ts";
 
 export const MAX_CHAIN_LENGTH = 3;
@@ -138,9 +139,12 @@ export function runChain(
 		agentsChildRunner?: ChildAgentRunner;
 		explicitToolContextLoaderPath?: string;
 		profileLibrary?: import("./profiles.ts").ModelProfileLibrary;
+		/** P8-3 (N2): per-line progress sink, applied to every step's child run. */
+		onProgress?: (line: string) => void;
 	},
 ): Promise<ChainRunOutcome> {
 	const childOptions = buildChildRunOptions(ctx);
+	const stepOptions = ctx.onProgress ? { ...childOptions, onProgress: ctx.onProgress } : childOptions;
 	const results: ChainStepResult[] = [];
 	let accumulatedHandoff = "";
 
@@ -157,11 +161,11 @@ export function runChain(
 			try {
 				if (ctx.agentsChildRunner) {
 					const childAgent = agent.source === "built-in" ? agent.name : agent.spec;
-					result = await ctx.agentsChildRunner(childAgent, promptTask, childOptions);
+					result = await ctx.agentsChildRunner(childAgent, promptTask, stepOptions);
 				} else if (agent.source === "built-in") {
-					result = await runBuiltInChildAgent(agent.name, promptTask, childOptions, ctx.profileLibrary);
+					result = await runBuiltInChildAgent(agent.name, promptTask, stepOptions, ctx.profileLibrary);
 				} else {
-					result = await runChildAgent(agent.spec, promptTask, childOptions, ctx.profileLibrary);
+					result = await runChildAgent(agent.spec, promptTask, stepOptions, ctx.profileLibrary);
 				}
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -218,6 +222,7 @@ export async function runChainCommand(
 		ui: {
 			notify(message: string, level?: "info" | "warning" | "error" | string): void;
 			confirm?(title: string, message: string): Promise<boolean> | boolean;
+			setWidget?(key: string, content: string[] | undefined, options?: { placement?: "aboveEditor" | "belowEditor" }): void;
 		};
 	},
 	diagnostics: AgentDiagnostics,
@@ -228,6 +233,8 @@ export async function runChainCommand(
 		return;
 	}
 
+	// Preflight stays inline (blocking) — it must complete before any run; the chain run itself
+	// is what backgrounds (N2). Preflight notifications fire before the background run starts.
 	ctx.ui.notify(`Chain preflight: checking ${parsed.agents.length} agents...`, "info");
 	const preflight = await preflightChain(parsed.agents, diagnostics);
 	if (!preflight.ok) {
@@ -237,17 +244,30 @@ export async function runChainCommand(
 	}
 
 	ctx.ui.notify(`Chain preflight passed: ${preflight.resolved.map((a) => a.name).join(", ")}. Running ${parsed.agents[0]}...`, "info");
-	const outcome = await runChain(preflight.resolved, parsed.task, ctx);
 
-	if (outcome.ok) {
-		const lines = [
-			"Chain complete:",
-			...outcome.results.map((r) =>
-				`- ${r.agentName}: ${r.status} (${r.durationMs}ms) — ${r.summaryText.slice(0, 200)}${r.summaryText.length > 200 ? "…" : ""}`,
-			),
-		];
-		ctx.ui.notify(lines.join("\n"), "info");
-	} else {
-		ctx.ui.notify(`Chain failed at agent '${outcome.agentName}' (${outcome.code}): ${outcome.message}`, "warning");
+	// Map a chain outcome to a settle message+level (used by both the bg and sync paths).
+	const settleFor = (outcome: ChainRunOutcome) => {
+		if (outcome.ok) {
+			const lines = [
+				"Chain complete:",
+				...outcome.results.map((r) =>
+					`- ${r.agentName}: ${r.status} (${r.durationMs}ms) — ${r.summaryText.slice(0, 200)}${r.summaryText.length > 200 ? "…" : ""}`,
+				),
+			];
+			return { message: lines.join("\n"), level: "info" as const };
+		}
+		return { message: `Chain failed at agent '${outcome.agentName}' (${outcome.code}): ${outcome.message}`, level: "warning" as const };
+	};
+
+	if (ctx.hasUI && typeof ctx.ui.setWidget === "function") {
+		startBackgroundRun({
+			ui: ctx.ui as BgRunUI,
+			label: `chain:${preflight.resolved.map((a) => a.name).join("→")}`,
+			run: async (handle) => settleFor(await runChain(preflight.resolved, parsed.task, { ...ctx, onProgress: handle.onProgress })),
+		});
+		return;
 	}
+
+	const settle = settleFor(await runChain(preflight.resolved, parsed.task, ctx));
+	ctx.ui.notify(settle.message, settle.level);
 }
