@@ -13,7 +13,7 @@ import { getBuiltInAgentSpec, isReservedBuiltInAgentName } from "./specs.ts";
 import type { ModelProfileLibrary } from "./profiles.ts";
 import type { ProjectAgentRegistry } from "./registry.ts";
 import { resolveRunIntent, profileEffect, INTENT_AUTORUN_CONFIDENCE, ROLE_DEFAULT_PROFILE, type IntentCandidate } from "./intent-router.ts";
-import { startBackgroundRun, type BgRunUI, type BgRunSettle } from "./bg-run.ts";
+import { startBackgroundRun, startBackgroundPhase, type BgRunUI, type BgRunSettle } from "./bg-run.ts";
 
 export type AgentsContextLike = {
 	cwd?: string;
@@ -260,7 +260,18 @@ export async function runIntentCommand(input: string, ctx: AgentsContextLike, di
 	}
 	const candidates = buildIntentCandidates(diagnostics);
 	if (candidates.length === 0) { ctx.ui.notify("No runnable agents to route to.", "warning"); return; }
-	const decision = await resolveRunIntent(parsed.task, candidates, { runClassifier: __classifierRunner.fn });
+	// The classifier runs synchronously (we need its pick before launching) so the composer is
+	// briefly held here. Animate a spinner during it so it doesn't read as a freeze; it transitions
+	// seamlessly into the chosen agent's run spinner.
+	const stopPhase = (ctx.hasUI && typeof ctx.ui.setWidget === "function")
+		? startBackgroundPhase(ctx.ui as BgRunUI, "routing — selecting agent…")
+		: () => {};
+	let decision;
+	try {
+		decision = await resolveRunIntent(parsed.task, candidates, { runClassifier: __classifierRunner.fn });
+	} finally {
+		stopPhase();
+	}
 	const chosen = candidates.find((c) => c.name === decision.agent);
 	if (!chosen) { ctx.ui.notify(`Router chose unknown agent '${decision.agent}'.`, "warning"); return; }
 	const tools = chosen.source === "built-in"

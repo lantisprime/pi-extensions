@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
 	startBackgroundRun,
+	startBackgroundPhase,
 	disposeBackgroundRuns,
 	__resetBackgroundRuns,
 	sanitizeProgressLine,
@@ -201,7 +202,25 @@ async function testIndexRegistersShutdownDispose() {
 	assert.match(src, /disposeBackgroundRuns\(/, "index.ts calls disposeBackgroundRuns on shutdown");
 }
 
+// P8-followup: a synchronous-phase spinner (e.g. intent classifier) animates then clears.
+async function testPhaseSpinnerAnimatesThenClears() {
+	__resetBackgroundRuns();
+	const ui = makeUI();
+	const timer = makeFakeTimer();
+	const stop = startBackgroundPhase(ui, "routing — selecting agent…", { now: () => 0, setInterval: timer.setInterval.bind(timer), clearInterval: timer.clearInterval.bind(timer) });
+	assert.ok(ui.lastWidget().content[0].includes("routing"), "phase label is shown");
+	const first = frameOf(ui.lastWidget());
+	timer.tick();
+	assert.notEqual(frameOf(ui.lastWidget()), first, "spinner animates during the blocking phase");
+	stop();
+	assert.deepEqual(ui.lastWidget(), { key: WIDGET_KEY, content: undefined, options: undefined }, "phase spinner cleared on stop");
+	assert.equal(timer.cleared, true, "interval stopped when idle");
+	stop(); // idempotent — second call is a no-op
+	__resetBackgroundRuns();
+}
+
 async function main() {
+	await testPhaseSpinnerAnimatesThenClears();
 	await testSpinnerFrameAdvances();
 	await testTailKeepsLastTwoLines();
 	await testProgressLineSanitized();

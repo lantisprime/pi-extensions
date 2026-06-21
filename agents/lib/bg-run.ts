@@ -168,6 +168,35 @@ export function startBackgroundRun(args: {
 		});
 }
 
+/** Show an animated spinner row for a SYNCHRONOUS phase that blocks the composer before a
+ *  background run starts — e.g. the /agents do intent classifier (which must finish picking an
+ *  agent first). The handler is still awaiting, but the event loop is free, so the spinner
+ *  interval keeps animating: the user sees "◐ routing…" instead of a frozen screen. Returns a
+ *  stop function (idempotent) that removes the row. Reuses the same widget + timer as runs, so
+ *  it transitions seamlessly into the agent's spinner. */
+export function startBackgroundPhase(ui: BgRunUI, label: string, opts?: { now?: () => number; setInterval?: typeof setInterval; clearInterval?: typeof clearInterval }): () => void {
+	if (opts) {
+		deps = {
+			now: opts.now ?? deps.now,
+			setIntervalFn: opts.setInterval ?? deps.setIntervalFn,
+			clearIntervalFn: opts.clearInterval ?? deps.clearIntervalFn,
+		};
+	}
+	activeUI = ui;
+	const entry: RunEntry = { id: ++idCounter, label, startedAt: deps.now(), tail: [] };
+	registry.set(entry.id, entry);
+	ensureTimer();
+	render();
+	let stopped = false;
+	return () => {
+		if (stopped) return;
+		stopped = true;
+		registry.delete(entry.id);
+		render();
+		stopTimerIfIdle();
+	};
+}
+
 /** Registered on session_shutdown — clears the timer and the widget so nothing leaks (REQ-11). */
 export function disposeBackgroundRuns(ui: Pick<BgRunUI, "setWidget">): void {
 	if (timer !== undefined) { deps.clearIntervalFn(timer); timer = undefined; }
