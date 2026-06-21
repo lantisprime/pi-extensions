@@ -3,6 +3,7 @@ import { canRunAgent } from "./can-run-agent.ts";
 import { runChildAgent, formatChildAgentRunResult, type ChildAgentRunner } from "./child-runner.ts";
 import { scanTextForAgentRisk, type RiskLevel } from "./security-scan.ts";
 import { resolveExplicitToolContextLoaderPath } from "./run-resolver.ts";
+import { startBackgroundRun, type BgRunUI } from "./bg-run.ts";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 
@@ -59,6 +60,7 @@ export type EphemeralRunHandlerContext = {
 	ui: {
 		notify(message: string, level?: "info" | "warning" | "error" | string): void;
 		confirm?(title: string, message: string): Promise<boolean> | boolean;
+		setWidget?(key: string, content: string[] | undefined, options?: { placement?: "aboveEditor" | "belowEditor" }): void;
 	};
 };
 
@@ -112,20 +114,31 @@ export async function runEphemeralCommand(input: string, ctx: EphemeralRunHandle
 	}
 	const stashed = { spec, task: args.task };
 	ctx.ui.notify(`Running ephemeral agent '${spec.name}' with base role '${args.baseRole}' and read-only tools.`, "info");
-	try {
-		const explicitToolContextLoaderPath = resolveExplicitToolContextLoaderPath(ctx);
-		const childOptions = {
-			cwd: ctx.cwd,
-			piCommand: ctx.agentsPiCommand,
-			...(explicitToolContextLoaderPath ? { explicitToolContextLoaderPath } : {}),
-		};
-		const result = ctx.agentsChildRunner
-			? await ctx.agentsChildRunner(spec, args.task, childOptions)
-			: await runChildAgent(spec, args.task, childOptions);
-		ctx.ui.notify(formatChildAgentRunResult(result), result.status === "completed" ? "info" : "warning");
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		ctx.ui.notify(`Ephemeral agent run failed: ${message}`, "error");
+	// P8-3: run + format settle without notifying (so a background run can notify on completion).
+	const runEphemeral = async (onProgress?: (line: string) => void) => {
+		try {
+			const explicitToolContextLoaderPath = resolveExplicitToolContextLoaderPath(ctx);
+			const childOptions = {
+				cwd: ctx.cwd,
+				piCommand: ctx.agentsPiCommand,
+				...(explicitToolContextLoaderPath ? { explicitToolContextLoaderPath } : {}),
+				...(onProgress ? { onProgress } : {}),
+			};
+			const result = ctx.agentsChildRunner
+				? await ctx.agentsChildRunner(spec, args.task, childOptions)
+				: await runChildAgent(spec, args.task, childOptions);
+			return { message: formatChildAgentRunResult(result), level: (result.status === "completed" ? "info" : "warning") as "info" | "warning" };
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return { message: `Ephemeral agent run failed: ${message}`, level: "error" as const };
+		}
+	};
+	if (ctx.hasUI && typeof ctx.ui.setWidget === "function") {
+		// Non-blocking: the stash is recorded immediately (below) so /agents save-temp still works.
+		startBackgroundRun({ ui: ctx.ui as BgRunUI, label: `run-temp:${args.baseRole}`, run: (handle) => runEphemeral(handle.onProgress) });
+	} else {
+		const settle = await runEphemeral(undefined);
+		ctx.ui.notify(settle.message, settle.level);
 	}
 	return stashed;
 }

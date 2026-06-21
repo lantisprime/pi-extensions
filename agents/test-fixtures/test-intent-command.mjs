@@ -1,8 +1,15 @@
 import assert from "node:assert";
-import { parseDoArgs, runIntentCommand, __classifierRunner } from "../lib/run-resolver.ts";
-import { promises as fs } from "node:fs";
+import { parseDoArgs, runIntentCommand, runAgentCommand, __classifierRunner } from "../lib/run-resolver.ts";
+import { __resetBackgroundRuns, WIDGET_KEY } from "../lib/bg-run.ts";
+import { promises as fs, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const flush = () => new Promise((r) => setImmediate(r));
+function completedResult(name) {
+  return { agentName: name, status: "completed", exitCode: 0, durationMs: 1, stdoutBytes: 0, stderrPreview: "", invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin", stdinText: "" } }, summary: { summaryText: "ok", toolCalls: [], errors: [], usage: undefined, cost: undefined, stopReason: undefined, model: undefined, provider: undefined, truncation: {} }, timedOut: false, outputLimitExceeded: false };
+}
 
 // ── Helpers ──
 
@@ -15,7 +22,7 @@ function makeCtx(overrides = {}) {
       calls.push({ agent, task, opts });
       return { agentName: typeof agent === "string" ? agent : agent.name, status: "completed", exitCode: 0, durationMs: 1, stdoutBytes: 0, stderrPreview: "", invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin", stdinText: "" } }, summary: { summaryText: "ok", toolCalls: [], errors: [], usage: undefined, cost: undefined, stopReason: undefined, model: undefined, provider: undefined, truncation: {} }, timedOut: false, outputLimitExceeded: false };
     },
-    ui: { notify: uiOverrides.notify || ((_msg, _level) => {}), confirm: uiOverrides.confirm || (async (_title, _message) => true) },
+    ui: { notify: uiOverrides.notify || ((_msg, _level) => {}), confirm: uiOverrides.confirm || (async (_title, _message) => true), ...(uiOverrides.setWidget ? { setWidget: uiOverrides.setWidget } : {}) },
     ...Object.fromEntries(Object.entries(overrides).filter(([k]) => k !== "ui")),
     _runnerCalls: calls,
   };
@@ -66,12 +73,59 @@ async function testDo_skipsNoOpRoleDefault() { stubClassifier("scout", 0.95); co
 async function testDo_explicitProfileOverridesRoleDefault() { stubClassifier("reviewer", 0.95); const ctx = makeCtx({ profileLibrary: { profiles: [{ name: "adversarial-review", model: "claude-opus", thinking: "high" }, { name: "custom", model: "custom-model" }] } }); await runIntentCommand("--profile custom review this", ctx, makeDiagnostics()); assert.equal(ctx._runnerCalls.length, 1); assert.equal(ctx._runnerCalls[0].opts.profileOverride, "custom"); }
 async function testDo_roleDefaultWithNoLibraryDoesNotFailClosed() { stubClassifier("reviewer", 0.95); const ctx = makeCtx({ profileLibrary: undefined }); await runIntentCommand("review this", ctx, makeDiagnostics()); assert.equal(ctx._runnerCalls.length, 1); assert.equal(ctx._runnerCalls[0].opts.profileOverride, undefined); }
 
+// ── Group 7: P8-3 non-blocking wiring ──
+
+// REQ-1: with hasUI + setWidget, the do handler returns BEFORE the child run settles.
+async function testHandlerReturnsBeforeChildSettles() {
+  __resetBackgroundRuns();
+  stubClassifier("scout", 0.95); // read-only + high confidence → auto-run, no confirm
+  const widgets = [], notifies = [];
+  let settled = false;
+  let release;
+  const gate = new Promise((res) => { release = res; });
+  const ctx = {
+    hasUI: true,
+    agentsChildRunner: async () => { await gate; settled = true; return completedResult("scout"); },
+    ui: { notify: (m, l) => notifies.push({ m, l }), confirm: async () => true, setWidget: (k, c) => widgets.push({ k, c }) },
+  };
+  await runIntentCommand("find files", ctx, makeDiagnostics());
+  assert.equal(settled, false, "child still running when handler returned (non-blocking)");
+  assert.ok(widgets.some((w) => Array.isArray(w.c)), "a progress widget was rendered while running");
+  assert.equal(notifies.some((n) => /completed|status:/.test(n.m)), false, "no child-result notify until the run settles");
+  release();
+  await flush(); await flush();
+  assert.equal(settled, true, "child settled after release");
+  assert.deepEqual(widgets[widgets.length - 1], { k: WIDGET_KEY, c: undefined }, "widget cleared after settle");
+  __resetBackgroundRuns();
+}
+
+// REQ-8: !hasUI falls back to the synchronous await path with ZERO widget calls (even if setWidget exists).
+async function testNoUiFallbackSynchronous() {
+  __resetBackgroundRuns();
+  const widgets = [], notifies = [];
+  const ctx = makeCtx({ hasUI: false, ui: { notify: (m) => notifies.push(m), setWidget: (k, c) => widgets.push({ k, c }) } });
+  await runAgentCommand("scout find files", ctx, makeDiagnostics());
+  assert.equal(ctx._runnerCalls.length, 1, "child ran synchronously");
+  assert.equal(widgets.length, 0, "no widget calls when !hasUI (REQ-8)");
+  assert.ok(notifies.some((m) => /read-only tools/.test(m) || /status:/.test(m)), "result notified synchronously");
+  __resetBackgroundRuns();
+}
+
+// REQ-9: the run_subagent tool path must not route through the backgrounding wiring.
+async function testToolPathDoesNotBackground() {
+  const src = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "lib", "subagent-tool.ts"), "utf8");
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  assert.equal(/startBackgroundRun/.test(code), false, "run_subagent must not call startBackgroundRun");
+  assert.equal(/dispatchChildRun/.test(code), false, "run_subagent must not route through dispatchChildRun");
+}
+
 async function main() {
   testParseDoArgs_basic(); testParseDoArgs_withProfile(); testParseDoArgs_emptyRejected(); testParseDoArgs_profileNoValueRejected(); testParseDoArgs_profileNoTaskRejected();
   await testDo_nonTuiFailClosed(); await testDo_nonTuiNeverSpawnsClassifier(); await testDo_emptyTaskUsage(); await testDo_classifierFallbackRuns();
   await testDo_builtInAutoRunHighConfidence(); await testDo_confirmLowConfidence(); await testDo_confirmDeclinedNoRun(); await testDo_autoRunRequiresReadOnlyTools();
   await testDo_registeredDispatchFailsClosedOnReReadError(); await testDo_gateDeniesUntrustedProject();
   await testDo_appliesRoleDefaultProfile(); await testDo_skipsNoOpRoleDefault(); await testDo_explicitProfileOverridesRoleDefault(); await testDo_roleDefaultWithNoLibraryDoesNotFailClosed();
-  console.log("OK: 19/19 tests passed");
+  await testHandlerReturnsBeforeChildSettles(); await testNoUiFallbackSynchronous(); await testToolPathDoesNotBackground();
+  console.log("OK: 22/22 tests passed");
 }
 main().catch((error) => { console.error(error); process.exit(1); });

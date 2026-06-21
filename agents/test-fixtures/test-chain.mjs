@@ -445,6 +445,34 @@ async function testRunSubagentRejectsChainParam() {
 
 // --- Main ---
 
+// P8-3 / N2 / REQ-12: threading onProgress through runChain must not alter handoff or results.
+async function testChainStepOnProgressDoesNotAlterHandoff() {
+	const make = () => {
+		const captured = [];
+		const runner = async (agent, task, options) => {
+			captured.push({ task, hasOnProgress: typeof options?.onProgress === "function" });
+			return {
+				agentName: typeof agent === "string" ? agent : agent.name,
+				status: "completed", durationMs: 10, stdoutBytes: 50, stderrPreview: "",
+				invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin" } },
+				summary: { eventsSeen: 1, malformedLines: 0, toolCalls: [], summaryText: `summary from ${typeof agent === "string" ? agent : agent.name}`, truncation: {}, errors: [] },
+				timedOut: false, outputLimitExceeded: false,
+			};
+		};
+		return { captured, runner };
+	};
+	const agents = [{ name: "scout", source: "built-in", spec: "scout" }, { name: "planner", source: "built-in", spec: "planner" }];
+	const a = make();
+	const without = await runChain(agents, "inspect the repo", { cwd: "/tmp", agentsChildRunner: a.runner });
+	const b = make();
+	const lines = [];
+	const withP = await runChain(agents, "inspect the repo", { cwd: "/tmp", agentsChildRunner: b.runner, onProgress: (l) => lines.push(l) });
+	assert.deepEqual(b.captured.map((c) => c.task), a.captured.map((c) => c.task), "per-step handoff task byte-identical with/without onProgress");
+	assert.deepEqual(withP.results, without.results, "chain results identical with/without onProgress");
+	assert.deepEqual(b.captured.map((c) => c.hasOnProgress), [true, true], "onProgress forwarded to every step when provided");
+	assert.deepEqual(a.captured.map((c) => c.hasOnProgress), [false, false], "no onProgress threaded when not provided");
+}
+
 async function main() {
 	const tests = [
 		// Group 1
@@ -466,6 +494,7 @@ async function main() {
 		// Group 4
 		["chainHandoffIncludesPriorSummary", testChainHandoffIncludesPriorSummary],
 		["chainAccumulatedHandoffBounded", testChainAccumulatedHandoffBounded],
+		["chainStepOnProgressDoesNotAlterHandoff", testChainStepOnProgressDoesNotAlterHandoff],
 		["chainStopsOnMidChainFailure", testChainStopsOnMidChainFailure],
 		["chainStopsOnMidChainHashMismatch", testChainStopsOnMidChainHashMismatch],
 		["chainStopsOnMidChainTimeout", testChainStopsOnMidChainTimeout],
