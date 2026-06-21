@@ -19,6 +19,7 @@ import {
 import { listBuiltInAgentSpecs, type AgentSource, type AgentSpec, type AgentValidationIssue } from "./specs.ts";
 import type { RiskLevel } from "./security-scan.ts";
 import { BUILT_IN_PROFILES } from "./profiles.ts";
+import { type IntentCandidate } from "./intent-router.ts";
 
 export const DEFAULT_DIAGNOSTIC_LIMITS = Object.freeze({
 	maxAgentsPerSource: 50,
@@ -403,4 +404,22 @@ function compareRegistryEntries(left: RegisteredAgent, right: RegisteredAgent): 
 
 function sourceRank(source: AgentSource): string {
 	return source === "built-in" ? "0" : source === "user" ? "1" : source === "project" ? "2" : "3";
+}
+
+/** P6-3b: build the candidate set for intent routing — built-in agents + runnable registered records. */
+export function buildIntentCandidates(d: AgentDiagnostics): IntentCandidate[] {
+	const builtIns = listBuiltInAgentSpecs().map((spec) => ({
+		name: spec.name,
+		source: "built-in" as const,
+		description: spec.description,
+		role: spec.name as "scout" | "planner" | "reviewer",
+	}));
+	const registered = d.records
+		.filter((r) => r.runnable && r.source !== "built-in")
+		.map((r) => ({
+			name: r.name,
+			source: (r.source === "user" ? "user" : "project") as "user" | "project",
+			description: (r.spec?.description ?? "").slice(0, 200),
+		}));
+	return [...builtIns, ...registered];
 }

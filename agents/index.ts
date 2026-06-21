@@ -12,12 +12,12 @@ export * from "./lib/jsonl-monitor.ts";
 export * from "./lib/registration.ts";
 export * from "./lib/profiles.ts";
 export * from "./lib/profile-discovery.ts";
-export { executeChildRun, nextStepForRunBlock, parseRunArgs, resolveRegisteredRunTarget, runAgentCommand, type AgentsContextLike, type RunnableRegisteredRecord } from "./lib/run-resolver.ts";
+export { executeChildRun, nextStepForRunBlock, parseDoArgs, parseRunArgs, resolveRegisteredRunTarget, runAgentCommand, runIntentCommand, runResolvedTarget, type AgentsContextLike, type RunnableRegisteredRecord } from "./lib/run-resolver.ts";
 
 import { buildProjectAgentRecommendation, collectAgentDiagnostics, formatAgentInspect, formatAgentsConfig, formatAgentsDoctor, formatAgentsList, formatAgentsRegistry, formatAgentsVerify } from "./lib/diagnostics.ts";
 import { runEphemeralCommand, saveTempCommand, type EphemeralRunHandlerContext } from "./lib/ephemeral.ts";
 import { registerAgent, registerProjectAgents, unregisterAgent } from "./lib/registration.ts";
-import { runAgentCommand } from "./lib/run-resolver.ts";
+import { runAgentCommand, runIntentCommand } from "./lib/run-resolver.ts";
 import { validateBuiltInAgentSpecs } from "./lib/specs.ts";
 import { registerSubagentTool } from "./lib/subagent-tool.ts";
 import { formatBuiltInProfilesList, toProfileLibrary, buildProfileLibrary, type ModelProfileLibrary, type ProfileLibraryBuildWarning } from "./lib/profiles.ts";
@@ -83,7 +83,7 @@ export default function agentsExtension(pi: ExtensionAPI) {
 	pi.registerCommand("agents", {
 		description: "Show P3 agent diagnostics and run built-in or registered agents",
 		getArgumentCompletions: (prefix: string) => {
-			const options = ["list", "built-ins", "config", "inspect", "registry", "verify", "doctor", "register", "register-project", "unregister", "run", "chain", "run-temp", "save-temp", "profiles"];
+			const options = ["list", "built-ins", "config", "inspect", "registry", "verify", "doctor", "register", "register-project", "unregister", "run", "do", "chain", "run-temp", "save-temp", "profiles"];
 			const trimmed = prefix.trim();
 			const filtered = options.filter((option) => option.startsWith(trimmed));
 			return filtered.length > 0 ? filtered.map((value) => ({ value, label: value })) : null;
@@ -159,6 +159,10 @@ export default function agentsExtension(pi: ExtensionAPI) {
 			}
 			if (parsed.action === "run") {
 				await runAgentCommand(parsed.rest, ctx, diagnostics);
+				return;
+			}
+			if (parsed.action === "do") {
+				await runIntentCommand(parsed.rest, ctx, diagnostics);
 				return;
 			}
 			if (parsed.action === "run-temp") {
