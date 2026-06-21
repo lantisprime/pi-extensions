@@ -2,7 +2,9 @@ import assert from "node:assert";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { loadGateConfig, classifyGateIntent } from "../lib/intent-gate.ts";
+import { loadGateConfig, classifyGateIntent, GATE_INSTRUCTIONS } from "../lib/intent-gate.ts";
+import { handleGateInput, __gateRunner } from "../index.ts";
+import { runIntentCommand } from "../lib/run-resolver.ts";
 
 // ── Helpers ──
 
@@ -230,6 +232,175 @@ async function testGate_implementationConfirm() {
 	} finally { await fs.rm(dir, { recursive: true, force: true }).catch(() => {}); }
 }
 
+// ── P7-2: Gate + hook wiring tests ─────────────────────────────────────
+
+const _origRunIntentCommand = runIntentCommand;
+
+async function withGateConfig(intents, body) {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-test-gate-p7-2-"));
+	const configDir = path.join(dir, ".pi");
+	await fs.mkdir(configDir);
+	const config = { version: 1, intents };
+	await fs.writeFile(path.join(configDir, "intent-workflows.json"), JSON.stringify(config), "utf-8");
+	try { await body(dir); }
+	finally {
+		await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+		__gateRunner.fn = _origRunIntentCommand;
+	}
+}
+
+function makeGateCtx(overrides = {}) {
+	return {
+		hasUI: true,
+		cwd: "/tmp",
+		ui: {
+			notify: () => {},
+			confirm: overrides.confirm !== undefined ? overrides.confirm : async () => true,
+		},
+		isProjectTrusted: overrides.isProjectTrusted !== undefined ? overrides.isProjectTrusted : () => true,
+		...overrides,
+	};
+}
+
+// REQ-4: review intent routes to agent via gate runner
+async function testGate_reviewRoutesToAgent() {
+	const intents = [{ id: "review", match: { phrases: ["review this"] }, workflow: { kind: "review" } }];
+	let runnerCalls = [];
+	__gateRunner.fn = async (task, ctx, diag) => { runnerCalls.push({ task, ctx, diag }); };
+
+	await withGateConfig(intents, async (dir) => {
+		const ctx = makeGateCtx({ cwd: dir });
+		const result = await handleGateInput("review this code", ctx);
+		assert.equal(result.action, "handled");
+		assert.equal(runnerCalls.length, 1, "gate runner called");
+		assert.ok(runnerCalls[0].task.includes("review this code"), "task passed through");
+		// Negative control: delete the config file → runner NOT called
+		await fs.unlink(path.join(dir, ".pi", "intent-workflows.json"));
+		runnerCalls = [];
+		const result2 = await handleGateInput("review this code", ctx);
+		assert.equal(result2.action, "continue", "pass-through when no config");
+		assert.equal(runnerCalls.length, 0, "runner not called without config");
+	});
+}
+
+// REQ-SEC-3: NL-routed prompts always confirm
+async function testGate_nlRoutingAlwaysConfirms() {
+	const intents = [{ id: "review", match: { phrases: ["review"] }, workflow: { kind: "review" } }];
+	__gateRunner.fn = async () => {};
+
+	await withGateConfig(intents, async (dir) => {
+		let confirmCalled = false;
+		const ctx = makeGateCtx({ cwd: dir, confirm: async () => { confirmCalled = true; return true; } });
+		await handleGateInput("review this", ctx);
+		assert.equal(confirmCalled, true, "confirm always called for NL routing");
+	});
+}
+
+// REQ-SEC-3: confirm declined → no child spawn
+async function testGate_nlRoutingConfirmDeclinedNoRun() {
+	const intents = [{ id: "review", match: { phrases: ["review"] }, workflow: { kind: "review" } }];
+	let runnerCalled = false;
+	__gateRunner.fn = async () => { runnerCalled = true; };
+
+	await withGateConfig(intents, async (dir) => {
+		const ctx = makeGateCtx({ cwd: dir, confirm: async () => false });
+		const result = await handleGateInput("review this", ctx);
+		assert.equal(result.action, "continue");
+		assert.equal(runnerCalled, false, "runner not called when confirm declined");
+	});
+}
+
+// REQ-4 / REQ-SEC-2: config profile threaded via --profile flag
+async function testGate_configProfileResolvedThroughLibrary() {
+	const intents = [{ id: "review", match: { phrases: ["review"] }, workflow: { kind: "review", profile: "security-profile" } }];
+	let runnerTask = "";
+	__gateRunner.fn = async (task) => { runnerTask = task; };
+
+	await withGateConfig(intents, async (dir) => {
+		const ctx = makeGateCtx({ cwd: dir });
+		await handleGateInput("review this code", ctx);
+		assert.ok(runnerTask.includes("--profile security-profile"), "profile flag prepended to runner task");
+	});
+}
+
+// REQ-5 / REQ-SEC-4: plan-only injects code-owned instruction
+async function testGate_nlPlanOnlyInjectsInstruction() {
+	const intents = [{ id: "plan", match: { phrases: ["create a plan"] }, workflow: { kind: "plan-only" } }];
+
+	await withGateConfig(intents, async (dir) => {
+		const ctx = makeGateCtx({ cwd: dir });
+		const result = await handleGateInput("create a plan for the migration", ctx);
+		assert.equal(result.action, "transform");
+		assert.ok(result.text.includes(GATE_INSTRUCTIONS.PLAN_ONLY), "instruction text injected");
+		assert.ok(result.text.includes("create a plan for the migration"), "original prompt preserved");
+	});
+}
+
+// REQ-5 / REQ-SEC-4: instruction text is code-owned (matches GATE_INSTRUCTIONS constant)
+async function testGate_planOnlyInstructionIsCodeOwned() {
+	const intents = [{ id: "plan", match: { phrases: ["make a plan"] }, workflow: { kind: "plan-only" } }];
+
+	await withGateConfig(intents, async (dir) => {
+		const ctx = makeGateCtx({ cwd: dir });
+		const result = await handleGateInput("make a plan for this", ctx);
+		assert.equal(result.action, "transform");
+		// Instruction text matches code-owned constant, not config-supplied
+		assert.equal(result.text.startsWith(GATE_INSTRUCTIONS.PLAN_ONLY), true,
+			"injected instruction must match the code-owned constant");
+		// Negative control: if we hardcoded different text, test catches it
+		assert.ok(!result.text.startsWith("Config-supplied-instruction"),
+			"instruction is not config-supplied");
+	});
+}
+
+// REQ-SEC-5: gate-routed children must disable context files
+async function testGate_routedChildDisablesContextFiles() {
+	const intents = [{ id: "review", match: { phrases: ["review"] }, workflow: { kind: "review" } }];
+	let capturedCtx = null;
+	__gateRunner.fn = async (task, ctx) => { capturedCtx = ctx; };
+
+	await withGateConfig(intents, async (dir) => {
+		const ctx = makeGateCtx({ cwd: dir });
+		await handleGateInput("review this", ctx);
+		assert.equal(capturedCtx.disableContextFiles, true, "disableContextFiles set on ctx");
+		// Negative control: without a matching config, ctx is unchanged
+		capturedCtx = null;
+		await fs.unlink(path.join(dir, ".pi", "intent-workflows.json"));
+		const ctx2 = makeGateCtx({ cwd: dir });
+		const result = await handleGateInput("review this", ctx2);
+		assert.equal(result.action, "continue");
+		assert.equal(ctx2.disableContextFiles, undefined, "disableContextFiles not set on pass-through");
+	});
+}
+
+// REQ-11 / REQ-SEC-7: implementation intent requires confirm
+async function testGate_implementationEnforcesConfirm() {
+	const intents = [{ id: "impl", match: { phrases: ["implement"] }, workflow: { kind: "implementation" } }];
+
+	await withGateConfig(intents, async (dir) => {
+		let confirmCalled = false;
+		let runnerCalled = false;
+		__gateRunner.fn = async () => { runnerCalled = true; };
+
+		// confirm → runner called
+		const ctx = makeGateCtx({ cwd: dir, confirm: async () => { confirmCalled = true; return true; } });
+		await handleGateInput("implement this feature", ctx);
+		assert.equal(confirmCalled, true, "confirm called for implementation");
+		assert.equal(runnerCalled, true, "runner called after confirm");
+
+		// decline → no runner
+		confirmCalled = false; runnerCalled = false;
+		await fs.writeFile(path.join(dir, ".pi", "intent-workflows.json"), JSON.stringify({ version: 1, intents }), "utf-8");
+		__gateRunner.fn = _origRunIntentCommand; // reset
+		__gateRunner.fn = async () => { runnerCalled = true; };
+		const ctx2 = makeGateCtx({ cwd: dir, confirm: async () => { confirmCalled = true; return false; } });
+		const result = await handleGateInput("implement this feature", ctx2);
+		assert.equal(confirmCalled, true, "confirm called on decline path too");
+		assert.equal(result.action, "continue", "pass-through after decline");
+		assert.equal(runnerCalled, false, "runner not called after confirm declined");
+	});
+}
+
 // ── Main ──
 
 async function main() {
@@ -251,7 +422,17 @@ async function main() {
 	await testGate_planOnlyInjectsInstruction();
 	await testGate_implementationConfirm();
 
-	console.log("OK: 14/14 tests passed");
+	// P7-2 Gate + hook wiring (7)
+	await testGate_reviewRoutesToAgent();
+	await testGate_nlRoutingAlwaysConfirms();
+	await testGate_nlRoutingConfirmDeclinedNoRun();
+	await testGate_configProfileResolvedThroughLibrary();
+	await testGate_nlPlanOnlyInjectsInstruction();
+	await testGate_planOnlyInstructionIsCodeOwned();
+	await testGate_routedChildDisablesContextFiles();
+	await testGate_implementationEnforcesConfirm();
+
+	console.log("OK: 22/22 tests passed");
 }
 
 main().catch((error) => { console.error(error); process.exit(1); });

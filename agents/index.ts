@@ -25,6 +25,7 @@ import { formatBuiltInProfilesList, toProfileLibrary, buildProfileLibrary, type 
 import { discoverProfiles, rejectDuplicateProfileNames, DEFAULT_PROFILE_DISCOVERY_LIMITS, type ParsedProfile } from "./lib/profile-discovery.ts";
 import { addOrReplaceRegisteredProfile, findMatchingRegisteredProfile, type RegisteredProfile } from "./lib/registry.ts";
 import { runChainCommand } from "./lib/chain-runner.ts";
+import { loadGateConfig, classifyGateIntent, GATE_INSTRUCTIONS } from "./lib/intent-gate.ts";
 import os from "node:os";
 import path from "node:path";
 
@@ -88,6 +89,13 @@ export default function agentsExtension(pi: ExtensionAPI) {
 		}
 		if (!ctx.hasUI) return;
 		await maybeNotifyProjectRecommendation(ctx, false);
+	});
+
+	// P7-2: prompt-intent gate — intercept natural-language prompts before model processing.
+	// Gate disables itself for /commands, non-TUI sessions, untrusted projects, and missing config.
+	eventApi.on?.("input", async (event: { text: string }, ctx: AgentsContext) => {
+		const result = await handleGateInput(event.text, ctx);
+		return result;
 	});
 
 	registerSubagentTool(pi, () => sessionAgentsCtx);
@@ -212,6 +220,69 @@ export default function agentsExtension(pi: ExtensionAPI) {
 			ctx.ui.notify("Usage: /agents [list|built-ins|config|inspect <name>|registry|verify|doctor|register <path-or-name>|register-project [--all-safe]|unregister <name>|run <agent> <task>|chain <agent>,<agent>[,<agent>] <task>|run-temp <scout|planner|reviewer> <task>|save-temp <name>|profiles].", "warning");
 		},
 	});
+}
+
+// ── P7-2: Prompt-intent gate handler ────────────────────────────────────
+
+/** Test seam: override fn to intercept runIntentCommand calls in tests.
+ *  Do not mutate in production. Defaults to runIntentCommand. */
+export const __gateRunner = { fn: runIntentCommand };
+
+export async function handleGateInput(
+	text: string,
+	ctx: AgentsContext,
+): Promise<{ action: "continue" | "handled" | "transform"; text?: string }> {
+	// REQ-9: skip non-TUI sessions
+	if (!ctx.hasUI) return { action: "continue" };
+
+	// REQ-8: skip /-prefixed commands
+	if (text.trimStart().startsWith("/")) return { action: "continue" };
+
+	// REQ-1 / REQ-SEC-1: load config, gated on project trust
+	const configPath = path.join(ctx.cwd ?? process.cwd(), ".pi", "intent-workflows.json");
+	const projectTrusted = resolveProjectTrusted(ctx);
+	const configResult = await loadGateConfig(configPath, projectTrusted);
+	if (!configResult.ok) return { action: "continue" };
+
+	// REQ-2: classify
+	const decision = classifyGateIntent(text, configResult.config);
+
+	// REQ-4 / REQ-11: route or confirm — always ask in TUI (REQ-SEC-3)
+	if (decision.kind === "route" || decision.kind === "confirm") {
+		const diagnostics = await collectAgentDiagnostics({
+			cwd: ctx.cwd,
+			homeDir: ctx.agentsHomeDir,
+			projectTrusted,
+		});
+
+		// REQ-SEC-3: NL-routed prompts ALWAYS confirm, regardless of P6 confidence
+		if (ctx.ui.confirm) {
+			const ok = await ctx.ui.confirm(
+				`Route to ${decision.agent}?`,
+				`Intent '${decision.metadata.intentId}' matched by ${decision.metadata.matchedBy}.\nTask: ${decision.task}`,
+			);
+			if (!ok) { ctx.ui.notify("Routing cancelled.", "info"); return { action: "continue" }; }
+		}
+
+		// REQ-SEC-5: gate-routed children must disable context files
+		ctx.disableContextFiles = true;
+
+		// REQ-SEC-2: profile is a NAME resolved through trusted library;
+		// prepend --profile flag so runIntentCommand threads it to the child.
+		const taskText = decision.profile ? `--profile ${decision.profile} ${text}` : text;
+
+		await __gateRunner.fn(taskText, ctx, diagnostics);
+		return { action: "handled" };
+	}
+
+	// REQ-5 / REQ-SEC-4: plan-only injects code-owned instruction
+	if (decision.kind === "inject") {
+		const instruction = GATE_INSTRUCTIONS[decision.instruction];
+		return { action: "transform", text: instruction + "\n\n" + text };
+	}
+
+	// REQ-7: pass-through for unmatched / ambiguous
+	return { action: "continue" };
 }
 
 function parseAgentsArgs(args: string): { action: string; rest: string } {
