@@ -442,3 +442,9 @@ function stableJson(value: unknown): string {
 		return String(value);
 	}
 }
+
+/** P6-2: thin exported wrapper over spawnAndCollect for the LLM classifier child.
+ *  Owns the spawn/now defaults so callers pass only limits. */
+export function collectChildProcess(invocation: ChildPiInvocation, limits: Omit<Parameters<typeof spawnAndCollect>[2], "spawn" | "now" | "cwd" | "env" | "stdoutTmpDir">): Promise<ChildAgentRunResult> {
+	return spawnAndCollect("intent-classifier", invocation, { ...limits, spawn: defaultSpawner, now: Date.now });
+}
