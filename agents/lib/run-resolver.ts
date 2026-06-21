@@ -4,13 +4,15 @@
 import { parseAgentMarkdownFile } from "./agent-markdown.ts";
 import { canRunAgent } from "./can-run-agent.ts";
 import {
+	buildIntentCandidates,
 	type AgentDiagnosticRecord,
 	type AgentDiagnostics,
 } from "./diagnostics.ts";
-import { formatChildAgentRunResult, runBuiltInChildAgent, runChildAgent, type ChildAgentRunner } from "./child-runner.ts";
-import { isReservedBuiltInAgentName } from "./specs.ts";
+import { collectChildProcess, formatChildAgentRunResult, runBuiltInChildAgent, runChildAgent, type ChildAgentRunner } from "./child-runner.ts";
+import { getBuiltInAgentSpec, isReservedBuiltInAgentName } from "./specs.ts";
 import type { ModelProfileLibrary } from "./profiles.ts";
 import type { ProjectAgentRegistry } from "./registry.ts";
+import { resolveRunIntent, profileEffect, INTENT_AUTORUN_CONFIDENCE, ROLE_DEFAULT_PROFILE, type IntentCandidate } from "./intent-router.ts";
 
 export type AgentsContextLike = {
 	cwd?: string;
@@ -179,4 +181,63 @@ export async function runResolvedTarget(record: RunnableRegisteredRecord, task: 
 	}
 	ctx.ui.notify(`Running registered ${record.source} agent '${currentParsed.spec.name}' with read-only tools.`, "info");
 	await executeChildRun(currentParsed.spec, task, ctx, record.source, profileOverride);
+}
+
+/** P6-3b: parse /agents do input. Leading --profile is tokens[0] (no agent-name token). */
+export function parseDoArgs(input: string): { ok: true; task: string; profileOverride?: string } | { ok: false; message: string } {
+	const usage = "Usage: /agents do [--profile <name>] <task>";
+	const trimmed = input.trim();
+	if (!trimmed) return { ok: false, message: usage };
+	const tokens = trimmed.split(/\s+/);
+	if (tokens[0] === "--profile") {
+		if (tokens.length < 2 || tokens[1].startsWith("--")) return { ok: false, message: usage };
+		const task = tokens.slice(2).join(" ").trim();
+		if (!task) return { ok: false, message: usage };
+		return { ok: true, task, profileOverride: tokens[1] };
+	}
+	return { ok: true, task: trimmed, profileOverride: undefined };
+}
+
+/** P6-3b: the /agents do command — route by intent, auto-run high-confidence read-only picks. */
+/** Tools allowed for auto-run (REQ-8 read-only rail). Case/whitespace-exact — fails closed. */
+const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
+
+/** Test-only seam: override fn in unit tests to intercept classifier calls.
+ *  Do not mutate in production. Defaults to collectChildProcess. */
+export const __classifierRunner = { fn: collectChildProcess };
+
+export async function runIntentCommand(input: string, ctx: AgentsContextLike, diagnostics: AgentDiagnostics): Promise<void> {
+	const parsed = parseDoArgs(input);
+	if (!parsed.ok) { ctx.ui.notify(parsed.message, "warning"); return; }
+	if (!ctx.hasUI) {
+		ctx.ui.notify("Intent routing needs interactive confirmation. Use /agents run <agent> <task>.", "warning");
+		return;
+	}
+	const candidates = buildIntentCandidates(diagnostics);
+	if (candidates.length === 0) { ctx.ui.notify("No runnable agents to route to.", "warning"); return; }
+	const decision = await resolveRunIntent(parsed.task, candidates, { runClassifier: __classifierRunner.fn });
+	const chosen = candidates.find((c) => c.name === decision.agent);
+	if (!chosen) { ctx.ui.notify(`Router chose unknown agent '${decision.agent}'.`, "warning"); return; }
+	const tools = chosen.source === "built-in"
+		? (getBuiltInAgentSpec(decision.agent)?.tools ?? [])
+		: (diagnostics.records.find((r) => r.name === decision.agent)?.spec?.tools ?? []);
+	const readOnly = tools.length > 0 && tools.every((t) => READ_ONLY_TOOLS.has(t));
+	const autoRun = decision.confidence >= INTENT_AUTORUN_CONFIDENCE && readOnly;
+	if (!autoRun) {
+		const ok = await ctx.ui.confirm(`Route to ${decision.agent}?`, `${decision.reason} (confidence ${decision.confidence.toFixed(2)})`);
+		if (!ok) { ctx.ui.notify("Routing cancelled.", "info"); return; }
+	}
+	let profile = parsed.profileOverride;
+	if (!profile && chosen.source === "built-in" && chosen.role) {
+		const roleDefault = ROLE_DEFAULT_PROFILE[chosen.role];
+		const def = ctx.profileLibrary?.profiles?.find((p) => p.name === roleDefault);
+		if (def && profileEffect(def) !== "none") profile = roleDefault;
+	}
+	if (chosen.source === "built-in") {
+		await executeChildRun(decision.agent, parsed.task, ctx, "built-in", profile);
+	} else {
+		const resolved = await resolveRegisteredRunTarget(decision.agent, diagnostics);
+		if (!resolved.ok) { ctx.ui.notify(resolved.message, "warning"); return; }
+		await runResolvedTarget(resolved.record, parsed.task, ctx, diagnostics, profile);
+	}
 }
