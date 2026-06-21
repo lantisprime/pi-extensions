@@ -264,7 +264,9 @@ export async function handleGateInput(
 		// C3: config-chosen agent = spawned agent — direct dispatch, no re-classification.
 		// Bypasses runIntentCommand's classifier + auto-run rail (SEC-3 satisfied).
 		// Profile passed structurally, not via string interpolation (SEC-2).
-		void __gateDispatch.fn(decision.agent, text, ctx, "built-in", decision.profile);
+		void __gateDispatch.fn(decision.agent, text, ctx, "built-in", decision.profile).catch((err) => {
+			ctx.ui.notify(`Gate dispatch failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+		});
 		return { action: "handled" };
 	}
 
