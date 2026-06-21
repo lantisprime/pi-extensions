@@ -50,35 +50,47 @@ export function sanitizeProgressLine(raw: string): string {
 	return stripped.length > MAX_TAIL_LINE_CHARS ? stripped.slice(0, MAX_TAIL_LINE_CHARS) : stripped;
 }
 
-/** Best-effort: reduce a JSONL stdout line to a short activity string. Never throws. */
+/** Max display width of a tail line (excl. indent). Kept short so a line never wraps to a second
+ *  terminal row — wrapping is what made the fixed-height widget grow and shove the editor down. */
+export const TAIL_DISPLAY_CHARS = 76;
+
+function clip(s: string): string | undefined {
+	const t = s.trim();
+	if (!t.length) return undefined;
+	return t.length > TAIL_DISPLAY_CHARS ? t.slice(0, TAIL_DISPLAY_CHARS - 1) + "…" : t;
+}
+
+function extractText(content: unknown): string | undefined {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return undefined;
+	const parts: string[] = [];
+	for (const p of content) {
+		if (p && typeof p === "object" && (p as Record<string, unknown>).type === "text" && typeof (p as Record<string, unknown>).text === "string") {
+			parts.push((p as Record<string, unknown>).text as string);
+		}
+	}
+	return parts.length ? parts.join(" ") : undefined;
+}
+
+/** Reduce a JSONL stdout line to a SHORT, meaningful activity string for the fixed-height tail.
+ *  Returns undefined for noise — message_start/update (thinking), turn markers, malformed lines —
+ *  so the tail shows only tool calls + final text. Short, single-row lines keep the widget height
+ *  stable (long raw-JSON lines wrapped and pushed the prompt/status bar down). */
 export function summarizeProgressLine(raw: string): string | undefined {
-	// Skip JSON.parse on very large lines (big tool-result events) — parsing megabyte lines per
-	// stdout chunk would block pi's event loop. The head is all the widget can show anyway.
-	if (raw.length > 2000) {
-		const s = sanitizeProgressLine(raw);
-		return s.length ? s : undefined;
-	}
+	if (raw.length > 4000) return undefined; // oversized event = noise; parsing it would also stall the loop
 	let parsed: unknown;
-	try {
-		parsed = JSON.parse(raw);
-	} catch {
-		const s = sanitizeProgressLine(raw);
-		return s.length ? s : undefined;
+	try { parsed = JSON.parse(raw); } catch { return undefined; }
+	if (!parsed || typeof parsed !== "object") return undefined;
+	const obj = parsed as Record<string, unknown>;
+	if (typeof obj.toolName === "string") {
+		const args = obj.args !== undefined ? sanitizeProgressLine(JSON.stringify(obj.args)).slice(0, 50) : "";
+		return clip(sanitizeProgressLine(`→ ${obj.toolName} ${args}`));
 	}
-	if (parsed && typeof parsed === "object") {
-		const obj = parsed as Record<string, unknown>;
-		if (typeof obj.toolName === "string") {
-			const args = obj.args !== undefined ? sanitizeProgressLine(JSON.stringify(obj.args)).slice(0, 60) : "";
-			return sanitizeProgressLine(`→ ${obj.toolName} ${args}`.trim());
-		}
-		const message = obj.message as { content?: unknown } | undefined;
-		if (obj.type === "message_end" && message && typeof message.content === "string") {
-			const s = sanitizeProgressLine(message.content.replace(/\n/g, " "));
-			return s.length ? s : undefined;
-		}
+	if (obj.type === "message_end" || obj.type === "turn_end") {
+		const text = extractText((obj.message as { content?: unknown } | undefined)?.content);
+		if (text) return clip(sanitizeProgressLine(text.replace(/\s+/g, " ")));
 	}
-	const s = sanitizeProgressLine(raw);
-	return s.length ? s : undefined;
+	return undefined;
 }
 
 function render(): void {

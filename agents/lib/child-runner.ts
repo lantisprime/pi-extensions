@@ -226,24 +226,40 @@ export function formatChildAgentRunResult(result: ChildAgentRunResult): string {
 	return lines.join("\n");
 }
 
-/** P8-followup: format a completed subagent run for injection into pi's conversation context
- *  (NL summary + a compact tool list). Distinct from formatChildAgentRunResult, which is the
- *  verbose operator toast. Kept short so it doesn't flood the parent agent's context budget. */
+/** P8-followup: format a subagent run for injection into pi's conversation context. On success:
+ *  NL summary + a compact tool list. On failure: frame the error so the parent LLM interprets it
+ *  in plain language and proposes next steps (instead of the user staring at a raw dump). Distinct
+ *  from formatChildAgentRunResult (the verbose operator toast); kept short to bound context spend. */
 export function formatAgentResultForContext(result: ChildAgentRunResult): string {
+	const toolList = () => {
+		if (result.summary.toolCalls.length === 0) return [];
+		const out = ["", `Tool calls (${result.summary.toolCalls.length}):`];
+		for (const tool of result.summary.toolCalls.slice(0, 20)) out.push(`- ${tool.name}: ${tool.argsPreview}`.trimEnd());
+		if (result.summary.toolCalls.length > 20) out.push(`- … +${result.summary.toolCalls.length - 20} more`);
+		return out;
+	};
+
+	if (result.status !== "completed") {
+		// Failure: ask pi to interpret and advise in natural language.
+		const lines = [
+			`The \`${result.agentName}\` subagent did NOT complete (status: ${result.status}). In plain language, explain what likely went wrong and recommend the single best next step for me to take.`,
+			"",
+			result.error ? `Error: ${result.error}` : `It ended with status "${result.status}" after ${result.durationMs}ms.`,
+		];
+		const next = suggestNextAction(result);
+		if (next) lines.push("", `Heuristic hint (verify before suggesting): ${next}`);
+		lines.push(...toolList());
+		return lines.join("\n");
+	}
+
 	const summary = result.summary.summaryText?.trim();
 	const lines = [
-		`The \`${result.agentName}\` subagent finished (status: ${result.status}). Use its findings to help with my task.`,
+		`The \`${result.agentName}\` subagent finished (status: completed). Use its findings to help with my task.`,
 		"",
 		"Summary:",
 		summary && summary.length > 0 ? summary : "(the subagent produced no natural-language summary)",
 	];
-	if (result.summary.toolCalls.length > 0) {
-		lines.push("", `Tool calls (${result.summary.toolCalls.length}):`);
-		for (const tool of result.summary.toolCalls.slice(0, 20)) {
-			lines.push(`- ${tool.name}: ${tool.argsPreview}`.trimEnd());
-		}
-		if (result.summary.toolCalls.length > 20) lines.push(`- … +${result.summary.toolCalls.length - 20} more`);
-	}
+	lines.push(...toolList());
 	return lines.join("\n");
 }
 

@@ -262,11 +262,18 @@ export async function runChainCommand(
 
 	// P8-followup: on success, feed the per-step findings into pi's conversation (best-effort).
 	const handleOutcome = (outcome: ChainRunOutcome) => {
-		if (outcome.ok && typeof ctx.deliverResult === "function") {
-			const lines = [
-				`The agent chain (${preflight.resolved.map((a) => a.name).join(" → ")}) finished. Use its findings to help with my task.`,
-				...outcome.results.map((r) => `\n[${r.agentName}] ${r.status}:\n${r.summaryText || "(no summary)"}`),
-			];
+		if (typeof ctx.deliverResult === "function") {
+			const chainName = preflight.resolved.map((a) => a.name).join(" → ");
+			const lines = outcome.ok
+				? [
+						`The agent chain (${chainName}) finished. Use its findings to help with my task.`,
+						...outcome.results.map((r) => `\n[${r.agentName}] ${r.status}:\n${r.summaryText || "(no summary)"}`),
+					]
+				: [
+						`The agent chain (${chainName}) FAILED at '${outcome.agentName}' (${outcome.code}). In plain language, explain what likely went wrong and recommend the single best next step.`,
+						"",
+						`Error: ${outcome.message}`,
+					];
 			try { ctx.deliverResult(lines.join("\n")); } catch { /* best-effort */ }
 		}
 		return settleFor(outcome);

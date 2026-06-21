@@ -128,8 +128,9 @@ export async function runEphemeralCommand(input: string, ctx: EphemeralRunHandle
 			const result = ctx.agentsChildRunner
 				? await ctx.agentsChildRunner(spec, args.task, childOptions)
 				: await runChildAgent(spec, args.task, childOptions);
-			// P8-followup: feed a completed run's findings into pi's conversation (best-effort).
-			if (result.status === "completed" && typeof ctx.deliverResult === "function") {
+			// P8-followup: feed the run into pi's conversation — findings on success, framed error
+			// for pi to interpret on failure (best-effort).
+			if (typeof ctx.deliverResult === "function") {
 				try { ctx.deliverResult(formatAgentResultForContext(result)); } catch { /* best-effort */ }
 			}
 			return { message: formatChildAgentRunResult(result), level: (result.status === "completed" ? "info" : "warning") as "info" | "warning" };

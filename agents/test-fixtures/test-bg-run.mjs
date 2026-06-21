@@ -76,13 +76,15 @@ async function testTailKeepsLastTwoLines() {
 	startBackgroundRun({ ui, label: "run:scout", run: (h) => { handle = h; return d.promise; }, now: () => 0, setInterval: timer.setInterval.bind(timer), clearInterval: timer.clearInterval.bind(timer) });
 	await flush(); // let run() execute so `handle` is set
 	const widgetsBefore = ui.widgets.length;
-	handle.onProgress("line1");
-	handle.onProgress("line2");
-	handle.onProgress("line3");
+	const tool = (name) => JSON.stringify({ toolName: name }); // real progress lines are JSONL
+	handle.onProgress(tool("a"));
+	handle.onProgress(tool("b"));
+	handle.onProgress(tool("c"));
+	handle.onProgress('{"type":"message_update","assistantMessageEvent":{"type":"thinking_start"}}'); // noise → skipped
 	// Throttle: onProgress updates the tail buffer but must NOT render (no setWidget flood).
 	assert.equal(ui.widgets.length, widgetsBefore, "onProgress does not render per line (redraws are throttled to the interval)");
 	timer.tick(); // the spinner interval renders the latest tail
-	assert.deepEqual(tailLines(ui.lastWidget()), ["   line2", "   line3"], "only the last two activity lines are kept");
+	assert.deepEqual(tailLines(ui.lastWidget()), ["   → b", "   → c"], "keeps last two MEANINGFUL lines; noise (thinking) is skipped");
 	d.resolve({ message: "ok", level: "info" });
 	await flush();
 	__resetBackgroundRuns();

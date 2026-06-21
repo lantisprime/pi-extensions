@@ -110,8 +110,9 @@ async function executeChildRunResult(agent: Parameters<ChildAgentRunner>[0], tas
 			: typeof agent === "string"
 				? await runBuiltInChildAgent(agent, task, runOptions, profiles, profileOverride)
 				: await runChildAgent(agent, task, runOptions, profiles, profileOverride);
-		// P8-followup: feed a completed run's findings into pi's conversation (best-effort).
-		if (result.status === "completed" && typeof ctx.deliverResult === "function") {
+		// P8-followup: feed the run into pi's conversation (best-effort) — findings on success, or a
+		// framed error for pi to interpret + advise on failure (timeout/spawn/exit).
+		if (typeof ctx.deliverResult === "function") {
 			try { ctx.deliverResult(formatAgentResultForContext(result)); } catch { /* delivery best-effort */ }
 		}
 		return { message: formatChildAgentRunResult(result), level: result.status === "completed" ? "info" : "warning" };

@@ -132,15 +132,17 @@ async function testDoDeliversResultToContext() {
   assert.match(delivered[0], /Summary:/);
 }
 
-// Non-completed runs must NOT inject into context.
-async function testDoDoesNotDeliverOnNonCompleted() {
+// A failed run injects a FRAMED error so pi interprets it and advises (not just a raw dump).
+async function testDoDeliversFailureForInterpretation() {
   stubClassifier("scout", 0.95);
   const delivered = [];
   const ctx = makeCtx();
-  ctx.agentsChildRunner = async (agent) => ({ agentName: typeof agent === "string" ? agent : agent.name, status: "failed", exitCode: 1, durationMs: 1, stdoutBytes: 0, stderrPreview: "", invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin", stdinText: "" } }, summary: { summaryText: "", toolCalls: [], errors: [], usage: undefined, cost: undefined, stopReason: undefined, model: undefined, provider: undefined, truncation: {} }, timedOut: false, outputLimitExceeded: false });
+  ctx.agentsChildRunner = async (agent) => ({ agentName: typeof agent === "string" ? agent : agent.name, status: "timed-out", exitCode: 143, durationMs: 120000, stdoutBytes: 0, stderrPreview: "", invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin", stdinText: "" } }, summary: { summaryText: "", toolCalls: [], errors: [], usage: undefined, cost: undefined, stopReason: undefined, model: undefined, provider: undefined, truncation: {} }, timedOut: true, outputLimitExceeded: false });
   ctx.deliverResult = (content) => delivered.push(content);
   await runIntentCommand("review this", ctx, makeDiagnostics());
-  assert.equal(delivered.length, 0, "a failed run does not inject into pi's context");
+  assert.equal(delivered.length, 1, "a failed run is injected for interpretation");
+  assert.match(delivered[0], /did NOT complete \(status: timed-out\)/);
+  assert.match(delivered[0], /recommend the single best next step/);
 }
 
 async function main() {
@@ -150,7 +152,7 @@ async function main() {
   await testDo_registeredDispatchFailsClosedOnReReadError(); await testDo_gateDeniesUntrustedProject();
   await testDo_appliesRoleDefaultProfile(); await testDo_skipsNoOpRoleDefault(); await testDo_explicitProfileOverridesRoleDefault(); await testDo_roleDefaultWithNoLibraryDoesNotFailClosed();
   await testHandlerReturnsBeforeChildSettles(); await testNoUiFallbackSynchronous(); await testToolPathDoesNotBackground();
-  await testDoDeliversResultToContext(); await testDoDoesNotDeliverOnNonCompleted();
+  await testDoDeliversResultToContext(); await testDoDeliversFailureForInterpretation();
   console.log("OK: 24/24 tests passed");
 }
 main().catch((error) => { console.error(error); process.exit(1); });
