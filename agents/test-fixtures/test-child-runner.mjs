@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { Buffer } from "node:buffer";
-import { formatChildAgentRunResult, formatAgentResultForContext, runBuiltInChildAgent, runChildAgent } from "../lib/child-runner.ts";
+import { formatChildAgentRunResult, formatAgentResultForContext, suggestNextAction, runBuiltInChildAgent, runChildAgent } from "../lib/child-runner.ts";
 
 function jsonLine(value) {
 	return `${JSON.stringify(value)}\n`;
@@ -341,9 +341,22 @@ async function testFormatAgentResultForContext() {
 	assert.match(empty, /no natural-language summary/);
 }
 
+// P8-followup: failed runs surface a concrete next-best-action.
+async function testSuggestNextAction() {
+	const base = { agentName: "x", status: "spawn-error", durationMs: 0, stdoutBytes: 0, stderrPreview: "", invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin", stdinText: "" } }, summary: { summaryText: "", toolCalls: [], errors: [], truncation: {} }, timedOut: false, outputLimitExceeded: false };
+	assert.match(suggestNextAction({ ...base, error: "project trust is not active; project profiles cannot be used" }), /activate project trust/);
+	assert.match(suggestNextAction({ ...base, error: "profile 'plan-review' requested but no profile library is available" }), /profile library unavailable/);
+	assert.match(suggestNextAction({ ...base, status: "timed-out", timedOut: true, durationMs: 120000 }), /timed out after 120000ms/);
+	assert.match(suggestNextAction({ ...base, status: "failed", exitCode: 2 }), /exit 2/);
+	assert.equal(suggestNextAction({ ...base, status: "completed" }), undefined, "no suggestion on a clean run");
+	// the formatted result includes the → next line on failure
+	assert.match(formatChildAgentRunResult({ ...base, error: "project trust is not active" }), /→ next: activate project trust/);
+}
+
 async function main() {
 	await testCompletedBuiltInRunUsesSafeArgvAndStdin();
 	await testFormatAgentResultForContext();
+	await testSuggestNextAction();
 	await testRejectsNonBuiltInAgentsBeforeSpawn();
 	await testGenericRegisteredRunUsesSpecPromptAndLimits();
 	await testRegisteredRunRejectsOversizedTaskBeforeSpawn();

@@ -42,6 +42,9 @@ type AgentsContext = {
 	profileLibrary?: ModelProfileLibrary;
 	profileLibraryWarnings?: ProfileLibraryBuildWarning[];
 	isProjectTrusted?: () => boolean;
+	// Resolved trust + registry for the run path (project-profile trust check needs these).
+	projectTrusted?: boolean;
+	projectRegistry?: import("./lib/registry.ts").ProjectAgentRegistry;
 	ui: {
 		notify(message: string, level?: "info" | "warning" | "error" | string): void;
 		confirm?(title: string, message: string): Promise<boolean> | boolean;
@@ -114,6 +117,12 @@ export default function agentsExtension(pi: ExtensionAPI) {
 				ctx.deliverResult = (content: string) => sendUserMessage(content, { deliverAs: "followUp" });
 			}
 			const diagnostics = await collectAgentDiagnostics({ cwd: ctx.cwd, homeDir: ctx.agentsHomeDir, projectTrusted: resolveProjectTrusted(ctx) });
+			// Thread the resolved trust + project registry onto ctx so the run path's project-profile
+			// trust check sees them (the per-command ctx only carries isProjectTrusted(), not the
+			// resolved booleans). Without this, a registered project agent with a project `profile:`
+			// fails with "project trust is not active" even though its gate already passed.
+			ctx.projectTrusted = diagnostics.projectTrusted;
+			ctx.projectRegistry = diagnostics.projectRegistry;
 			if (parsed.action === "list" || parsed.action === "built-ins") {
 				if (parsed.action === "list") await maybeNotifyProjectRecommendation(ctx, true, diagnostics);
 				ctx.ui.notify(`P3 agents diagnostics: child execution is available via /agents run <built-in-or-registered> <task>.\n${formatAgentsList(diagnostics)}`, "info");
