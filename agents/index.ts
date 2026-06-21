@@ -99,6 +99,14 @@ export default function agentsExtension(pi: ExtensionAPI) {
 		},
 		handler: async (args, ctx) => {
 			const parsed = parseAgentsArgs(args);
+			// The profile library is built once at session_start and stashed on sessionAgentsCtx.
+			// When pi hands the command a fresh ctx, ctx.profileLibrary is undefined — agents with a
+			// mandatory `profile:` (e.g. a registered project agent) then fail with "no profile
+			// library available". Re-attach the session library so profile resolution works.
+			if (!ctx.profileLibrary && sessionAgentsCtx?.profileLibrary) {
+				ctx.profileLibrary = sessionAgentsCtx.profileLibrary;
+				ctx.profileLibraryWarnings = sessionAgentsCtx.profileLibraryWarnings;
+			}
 			// P8-followup: deliver a completed subagent's result into pi's conversation (triggers a
 			// turn so pi reacts to the findings). deliverAs:"followUp" queues politely if pi is busy.
 			const sendUserMessage = (pi as ExtensionAPI & { sendUserMessage?: (content: string, options?: { deliverAs?: "steer" | "followUp" }) => void }).sendUserMessage;
