@@ -55,11 +55,30 @@ No write, edit, bash, or `run_subagent` tools are allowed by default.
 ### Running agents
 
 ```
-/agents run <agent> <task>           Run a single built-in or registered agent
+/agents run <agent> [--profile <name>] <task>  Run a built-in or registered agent
+/agents do [--profile <name>] <task>           Route a task to the best agent by intent
 /agents run-temp <scout|planner|reviewer> <task>  One-shot ephemeral run (not registered)
 /agents save-temp <name>             Save a temp agent for inspection/debug
 /agents chain <a>,<b>[,<c>] <task>   Run up to 3 agents in sequence with handoff
 ```
+
+### Intent routing
+
+`/agents do <task>` lets Pi pick the agent for you. An LLM classifier runs in a
+sandboxed child `pi` (`--no-tools`, `--no-session`) and returns the best match
+from the built-in and registered agents.
+
+- A high-confidence pick whose tools are all read-only runs without a prompt.
+  Below that threshold, Pi asks before running.
+- If the classifier fails or returns an unknown agent, a deterministic keyword
+  heuristic picks the agent instead.
+- Built-in picks use their role-default profile; `--profile <name>` overrides it.
+- In headless or non-TUI runs, `/agents do` fails closed before the classifier
+  starts, because it needs interactive confirmation. Use `/agents run <agent>`
+  there.
+
+See the [user manual](../docs/USER_MANUAL.md#intent-based-agent-routing) for a
+full walkthrough.
 
 ### Profiles
 
@@ -72,6 +91,24 @@ No write, edit, bash, or `run_subagent` tools are allowed by default.
 Profiles carry model/capability hints (`model`, `thinking`) and are resolved with
 agent spec precedence (higher trumps lower): user > built-in, project > user. Three built-in profiles ship
 with the extension: `fast-local`, `reasoning-deep`, `adversarial-review`.
+
+A profile that sets neither `model` nor `thinking` has no effect; `/agents
+profiles` and `/agents inspect` label it `effect: none (Pi default)`. Built-in
+agents started through `/agents do` apply their role-default profile, and a
+no-op default is skipped.
+
+### Disambiguation
+
+Agent names and profile names share one namespace, which can be confusing. The
+extension surfaces the overlaps:
+
+- `/agents doctor` warns when a registered agent name matches a built-in profile
+  name (for example, an agent named `reasoning-deep`). `/agents run <name>` uses
+  the agent, not the profile.
+- `/agents profiles` and `/agents inspect` mark no-op profiles `effect: none
+  (Pi default)`.
+- `/agents run` warns when `--profile` is not directly after the agent name and
+  treats the misplaced token as task text.
 
 ## Agent spec format
 

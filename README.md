@@ -22,6 +22,7 @@ This project contains custom [Pi](https://pi.dev) extensions.
 |---|---|---|
 | Defense in depth | Prompt Shield, Permission Policy | `/prompt-shield mode block-dangerous` + `/permissions mode ask` |
 | Custom agents | P3 Agents | Write spec → `/agents register <path>` → `/agents run <agent>` |
+| Intent routing | P3 Agents | `/agents do "review this plan for bugs"` (auto-routes to reviewer) |
 | Review pipeline | P3 Agents (chain) | `/agents chain scout,planner,reviewer <task>` |
 | Safe web research | Web Search | Use `secure_web_search` tool (no raw `curl`) |
 | Command guidance | Tool Context Loader | Drop a `.pi/runbooks/*.md` file → `/tool-context-loader rescan` |
@@ -356,6 +357,7 @@ Defines, registers, vets, and runs constrained child Pi agents.
 Features:
 
 - Three built-in agents: `scout`, `planner`, `reviewer` — all read-only (`read`, `grep`, `find`, `ls`)
+- Intent-based routing via `/agents do <task>` — LLM classifier picks the right agent, auto-runs high-confidence read-only picks, confirms below threshold. Falls back to deterministic keyword heuristic on classifier failure
 - `run_subagent` LLM-callable tool for single read-only child runs
 - User/project agent registration with Markdown frontmatter specs
 - Deterministic security scanner: safe/suspicious/dangerous classification; dangerous specs never register
@@ -381,6 +383,7 @@ Commands:
 /agents register-project [--all-safe]
 /agents unregister <name>
 /agents run <agent> <task>
+/agents do <task>
 /agents chain <agent>,<agent>[,<agent>] <task>
 /agents run-temp <scout|planner|reviewer> <task>
 /agents save-temp <name>
