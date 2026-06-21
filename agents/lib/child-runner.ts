@@ -1,6 +1,7 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { promises as fs, createWriteStream, type WriteStream } from "node:fs";
 import { Buffer } from "node:buffer";
+import { StringDecoder } from "node:string_decoder";
 import path from "node:path";
 import os from "node:os";
 import { buildChildPiArgs, getPiInvocation, type ChildPiArgsOptions, type ChildPiInvocation } from "./child-args.ts";
@@ -64,6 +65,9 @@ export type RunBuiltInChildAgentOptions = ChildPiArgsOptions & {
 	stdoutTmpDir?: string;
 	/** P3f-4: runtime profile override (used when no positional profileOverride is passed). */
 	profileOverride?: string;
+	/** P8-1: called once per complete stdout line (newline-delimited) as the child streams.
+	 *  Display-only progress sink; default undefined = strict no-op (zero behavior change). */
+	onProgress?: (line: string) => void;
 };
 
 export type RunChildAgentOptions = RunBuiltInChildAgentOptions;
@@ -169,6 +173,7 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 			resolvedModel,
 			resolvedThinking,
 			stdoutTmpDir: options.stdoutTmpDir,
+			onProgress: options.onProgress,
 		});
 	} finally {
 		if (sysDir) await fs.rm(sysDir, { recursive: true, force: true });
@@ -215,6 +220,8 @@ async function spawnAndCollect(agentName: string, invocation: ChildPiInvocation,
 	killSignal: NodeJS.Signals | string;
 	forceKillAfterMs: number;
 	stdoutTmpDir?: string;
+	/** P8-1: per-complete-stdout-line progress sink (display-only); default undefined = no-op. */
+	onProgress?: (line: string) => void;
 }): Promise<ChildAgentRunResult> {
 	// P3f-4: validate limits are finite positive integers (reject NaN/Infinity/non-positive)
 	const validateFinitePositive = (name: string, value: number) => {
@@ -287,6 +294,31 @@ async function spawnAndCollect(agentName: string, invocation: ChildPiInvocation,
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
 
+	// P8-1: progress line buffering — wholly separate from stdoutBytes/spill/watermark so it
+	// cannot perturb byte accounting or truncation (REQ-12). StringDecoder handles multi-byte
+	// UTF-8 split across chunk boundaries; only complete (newline-delimited) lines are emitted,
+	// with the trailing partial flushed on close (REQ-6 / N3).
+	const progressDecoder = options.onProgress ? new StringDecoder("utf8") : undefined;
+	let progressLineBuf = "";
+	const emitProgress = (buffer: Buffer) => {
+		if (!options.onProgress || !progressDecoder) return;
+		progressLineBuf += progressDecoder.write(buffer);
+		let nl = progressLineBuf.indexOf("\n");
+		while (nl !== -1) {
+			options.onProgress(progressLineBuf.slice(0, nl));
+			progressLineBuf = progressLineBuf.slice(nl + 1);
+			nl = progressLineBuf.indexOf("\n");
+		}
+	};
+	const flushProgress = () => {
+		if (!options.onProgress || !progressDecoder) return;
+		progressLineBuf += progressDecoder.end();
+		if (progressLineBuf.length > 0) {
+			options.onProgress(progressLineBuf);
+			progressLineBuf = "";
+		}
+	};
+
 	const killChild = () => {
 		if (killIssued || closed) return;
 		killIssued = true;
@@ -312,6 +344,8 @@ async function spawnAndCollect(agentName: string, invocation: ChildPiInvocation,
 		if (!spillStreamFinal.destroyed && !spillStreamFinal.writableEnded && !closed) {
 			spillStreamFinal.write(buffer);
 		}
+		// P8-1: emit complete lines to the progress sink (no-op when onProgress absent).
+		emitProgress(buffer);
 		// Safety watermark: kill runaway at stdoutSafetyBytes (50× limit, clamped to 256MB)
 		if (stdoutBytes > stdoutSafetyBytes) {
 			outputLimitExceeded = true;
@@ -326,6 +360,8 @@ async function spawnAndCollect(agentName: string, invocation: ChildPiInvocation,
 		const finish = async (status: ChildAgentRunStatus, details: { code?: number | null; signal?: string | null; error?: string } = {}) => {
 			if (closed) return;
 			closed = true;
+			// P8-1: flush any trailing partial line (no final newline) to the progress sink (REQ-6).
+			flushProgress();
 			if (timer) clearTimeout(timer);
 			if (forceKillTimer) clearTimeout(forceKillTimer);
 			// P3f-4: end the spill stream and await its finish/close before reading

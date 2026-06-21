@@ -243,6 +243,86 @@ async function testSpawnErrorAndInvalidLimits() {
 	await assert.rejects(() => runBuiltInChildAgent("scout", "task", { forceKillAfterMs: 0, spawn: () => new FakeChild() }), /forceKillAfterMs must be a finite positive integer/);
 }
 
+// P8-1: onProgress fires once per complete (newline-delimited) stdout line; partial lines
+// buffered across chunks; multi-byte UTF-8 split across chunks reassembled (REQ-6).
+async function testOnProgressLineBuffering() {
+	const lines = [];
+	const result = await runBuiltInChildAgent("scout", "task", {
+		onProgress: (line) => lines.push(line),
+		spawn: () => {
+			const child = new FakeChild();
+			queueMicrotask(() => {
+				child.stdout.emit("data", Buffer.from("a\nb"));
+				child.stdout.emit("data", Buffer.from("c\n"));
+				child.close(0, null);
+			});
+			return child;
+		},
+	});
+	assert.equal(result.status, "completed");
+	assert.deepEqual(lines, ["a", "bc"], "complete lines emitted once each; partial buffered across chunks");
+
+	// Multi-byte UTF-8 (€ = e2 82 ac) split across two chunks must reassemble via StringDecoder.
+	const mb = [];
+	const euro = Buffer.from("€\n", "utf8");
+	await runBuiltInChildAgent("scout", "task", {
+		onProgress: (line) => mb.push(line),
+		spawn: () => {
+			const child = new FakeChild();
+			queueMicrotask(() => {
+				child.stdout.emit("data", euro.subarray(0, 2));
+				child.stdout.emit("data", euro.subarray(2));
+				child.close(0, null);
+			});
+			return child;
+		},
+	});
+	assert.deepEqual(mb, ["€"], "multi-byte char split across chunks reassembled");
+}
+
+// P8-1 / N3: a trailing partial line (no final newline) is flushed on close, not dropped (EC2).
+async function testTrailingPartialLineFlushedOnClose() {
+	const lines = [];
+	const result = await runBuiltInChildAgent("scout", "task", {
+		onProgress: (line) => lines.push(line),
+		spawn: () => {
+			const child = new FakeChild();
+			queueMicrotask(() => {
+				child.stdout.emit("data", Buffer.from("abc")); // no trailing newline
+				child.close(0, null);
+			});
+			return child;
+		},
+	});
+	assert.equal(result.status, "completed");
+	assert.deepEqual(lines, ["abc"], "trailing partial line flushed on close, not dropped");
+}
+
+// P8-1 / N3 / REQ-12: onProgress must not perturb stdoutBytes or truncation accounting.
+async function testOnProgressDoesNotChangeStdoutBytes() {
+	const stdoutSeq = [
+		Buffer.from(jsonLine({ type: "session", id: "s1", version: 3, cwd: "/tmp" })),
+		Buffer.from(jsonLine({ type: "message_end", message: { role: "assistant", content: "Summary\nDone" } })),
+	];
+	const run = (onProgress) => runBuiltInChildAgent("scout", "task", {
+		...(onProgress ? { onProgress } : {}),
+		spawn: () => {
+			const child = new FakeChild();
+			queueMicrotask(() => {
+				for (const b of stdoutSeq) child.stdout.emit("data", b);
+				child.close(0, null);
+			});
+			return child;
+		},
+	});
+	const without = await run(undefined);
+	const captured = [];
+	const withCb = await run((line) => captured.push(line));
+	assert.equal(withCb.stdoutBytes, without.stdoutBytes, "stdoutBytes identical with/without onProgress");
+	assert.deepEqual(withCb.summary.truncation, without.summary.truncation, "truncation identical with/without onProgress");
+	assert.ok(captured.length >= 2, "onProgress still fired for the JSONL lines");
+}
+
 async function main() {
 	await testCompletedBuiltInRunUsesSafeArgvAndStdin();
 	await testRejectsNonBuiltInAgentsBeforeSpawn();
@@ -254,6 +334,9 @@ async function main() {
 	await testOutputLimitKillsChildAndBoundsStdout();
 	await testStdoutBelowSafetyWatermarkDoesNotKill();
 	await testSpawnErrorAndInvalidLimits();
+	await testOnProgressLineBuffering();
+	await testTrailingPartialLineFlushedOnClose();
+	await testOnProgressDoesNotChangeStdoutBytes();
 	console.log("agents child runner tests passed");
 }
 
