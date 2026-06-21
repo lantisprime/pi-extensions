@@ -54,6 +54,7 @@ function testParseDoArgs_withProfile() { const r = parseDoArgs("--profile fast-l
 function testParseDoArgs_emptyRejected() { assert.equal(parseDoArgs("").ok, false); }
 function testParseDoArgs_profileNoValueRejected() { assert.equal(parseDoArgs("--profile").ok, false); }
 function testParseDoArgs_profileNoTaskRejected() { assert.equal(parseDoArgs("--profile fast-local").ok, false); }
+function testParseDoArgs_timeout() { const r = parseDoArgs("--timeout 120 review this"); assert.equal(r.ok, true); if (r.ok) { assert.equal(r.timeoutMs, 120000); assert.equal(r.task, "review this"); } const r2 = parseDoArgs("--profile fast --timeout 90 do it"); assert.equal(r2.ok, true); if (r2.ok) { assert.equal(r2.profileOverride, "fast"); assert.equal(r2.timeoutMs, 90000); } assert.equal(parseDoArgs("--timeout 0 x").ok, false); }
 
 // ── Group 5: gate + autonomy ──
 async function testDo_nonTuiFailClosed() { const m = []; const ctx = makeCtx({ hasUI: false, ui: { notify: (x) => m.push(x) } }); await runIntentCommand("review this", ctx, makeDiagnostics()); assert.ok(m.some((x) => x.includes("interactive confirmation")), "non-TUI"); }
@@ -146,13 +147,13 @@ async function testDoDeliversFailureForInterpretation() {
 }
 
 async function main() {
-  testParseDoArgs_basic(); testParseDoArgs_withProfile(); testParseDoArgs_emptyRejected(); testParseDoArgs_profileNoValueRejected(); testParseDoArgs_profileNoTaskRejected();
+  testParseDoArgs_basic(); testParseDoArgs_withProfile(); testParseDoArgs_emptyRejected(); testParseDoArgs_profileNoValueRejected(); testParseDoArgs_profileNoTaskRejected(); testParseDoArgs_timeout();
   await testDo_nonTuiFailClosed(); await testDo_nonTuiNeverSpawnsClassifier(); await testDo_emptyTaskUsage(); await testDo_classifierFallbackRuns();
   await testDo_builtInAutoRunHighConfidence(); await testDo_confirmLowConfidence(); await testDo_confirmDeclinedNoRun(); await testDo_autoRunRequiresReadOnlyTools();
   await testDo_registeredDispatchFailsClosedOnReReadError(); await testDo_gateDeniesUntrustedProject();
   await testDo_appliesRoleDefaultProfile(); await testDo_skipsNoOpRoleDefault(); await testDo_explicitProfileOverridesRoleDefault(); await testDo_roleDefaultWithNoLibraryDoesNotFailClosed();
   await testHandlerReturnsBeforeChildSettles(); await testNoUiFallbackSynchronous(); await testToolPathDoesNotBackground();
   await testDoDeliversResultToContext(); await testDoDeliversFailureForInterpretation();
-  console.log("OK: 24/24 tests passed");
+  console.log("OK: 25/25 tests passed");
 }
 main().catch((error) => { console.error(error); process.exit(1); });

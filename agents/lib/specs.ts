@@ -109,7 +109,8 @@ export const DEFAULT_INPUT_CONTRACT: AgentInputContract = Object.freeze({
 });
 
 export const DEFAULT_LIMITS: AgentLimits = Object.freeze({
-	timeoutMs: 120_000,
+	// Default child-agent timeout: 5 minutes. Overridable per run via `/agents run|do --timeout <seconds>`.
+	timeoutMs: 300_000,
 	// 8 MiB: the reducer bounds stdout to this BEFORE parsing, and the agent's final
 	// natural-language summary is the LAST event in the stream — a 1 MiB cap truncated it
 	// away on chatty runs (many/large tool results). Tool-result previews stay capped by

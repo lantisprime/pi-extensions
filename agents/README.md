@@ -55,8 +55,8 @@ No write, edit, bash, or `run_subagent` tools are allowed by default.
 ### Running agents
 
 ```
-/agents run <agent> [--profile <name>] <task>  Run a built-in or registered agent
-/agents do [--profile <name>] <task>           Route a task to the best agent by intent
+/agents run <agent> [--profile <name>] [--timeout <seconds>] <task>  Run a built-in or registered agent
+/agents do [--profile <name>] [--timeout <seconds>] <task>           Route a task to the best agent by intent
 /agents run-temp <scout|planner|reviewer> <task>  One-shot ephemeral run (not registered)
 /agents save-temp <name>             Save a temp agent for inspection/debug
 /agents chain <a>,<b>[,<c>] <task>   Run up to 3 agents in sequence with handoff

@@ -94,19 +94,21 @@ export function nextStepForRunBlock(record: AgentDiagnosticRecord, code: string)
  *  run can notify on completion). Optional onProgress streams stdout lines to the widget.
  *  onProgress is forwarded into the runner options; when absent the options are byte-identical
  *  to the pre-P8 path (so the synchronous/tool callers are unchanged). */
-async function executeChildRunResult(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string, profileOverride?: string, onProgress?: (line: string) => void): Promise<BgRunSettle> {
+async function executeChildRunResult(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string, profileOverride?: string, onProgress?: (line: string) => void, timeoutMs?: number): Promise<BgRunSettle> {
 	try {
 		const childOptions = buildChildRunOptions(ctx);
 		const profiles = ctx.profileLibrary;
 		const progressOpt = onProgress ? { onProgress } : {};
+		const timeoutOpt = timeoutMs ? { timeoutMs } : {};
 		const runOptions = {
 			...childOptions,
 			projectTrusted: ctx.projectTrusted,
 			projectRegistry: ctx.projectRegistry,
 			...progressOpt,
+			...timeoutOpt,
 		};
 		const result = ctx.agentsChildRunner
-			? await ctx.agentsChildRunner(agent, task, profileOverride ? { ...childOptions, profileOverride, ...progressOpt } : { ...childOptions, ...progressOpt })
+			? await ctx.agentsChildRunner(agent, task, profileOverride ? { ...childOptions, profileOverride, ...progressOpt, ...timeoutOpt } : { ...childOptions, ...progressOpt, ...timeoutOpt })
 			: typeof agent === "string"
 				? await runBuiltInChildAgent(agent, task, runOptions, profiles, profileOverride)
 				: await runChildAgent(agent, task, runOptions, profiles, profileOverride);
@@ -123,8 +125,8 @@ async function executeChildRunResult(agent: Parameters<ChildAgentRunner>[0], tas
 }
 
 /** Synchronous run + notify (the no-UI / tool fallback). Behavior unchanged from pre-P8. */
-export async function executeChildRun(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string, profileOverride?: string): Promise<void> {
-	const settle = await executeChildRunResult(agent, task, ctx, source, profileOverride);
+export async function executeChildRun(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string, profileOverride?: string, timeoutMs?: number): Promise<void> {
+	const settle = await executeChildRunResult(agent, task, ctx, source, profileOverride, undefined, timeoutMs);
 	ctx.ui.notify(settle.message, settle.level);
 }
 
@@ -132,17 +134,17 @@ export async function executeChildRun(agent: Parameters<ChildAgentRunner>[0], ta
  *  Backgrounding returns immediately so pi's composer stays live (REQ-1). The synchronous path
  *  is taken when !hasUI OR the host lacks setWidget (REQ-8), keeping non-TUI/tool callers and the
  *  existing test suites unchanged (their ctx.ui has no setWidget). */
-async function dispatchChildRun(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string, profileOverride?: string): Promise<void> {
+async function dispatchChildRun(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string, profileOverride?: string, timeoutMs?: number): Promise<void> {
 	if (ctx.hasUI && typeof ctx.ui.setWidget === "function") {
 		const label = typeof agent === "string" ? agent : agent.name;
 		startBackgroundRun({
 			ui: ctx.ui as BgRunUI,
 			label,
-			run: (handle) => executeChildRunResult(agent, task, ctx, source, profileOverride, handle.onProgress),
+			run: (handle) => executeChildRunResult(agent, task, ctx, source, profileOverride, handle.onProgress, timeoutMs),
 		});
 		return;
 	}
-	await executeChildRun(agent, task, ctx, source, profileOverride);
+	await executeChildRun(agent, task, ctx, source, profileOverride, timeoutMs);
 }
 
 export async function runAgentCommand(input: string, ctx: AgentsContextLike, diagnostics: AgentDiagnostics): Promise<void> {
@@ -154,7 +156,7 @@ export async function runAgentCommand(input: string, ctx: AgentsContextLike, dia
 	if (parsed.warning) ctx.ui.notify(parsed.warning, "warning");
 	if (isReservedBuiltInAgentName(parsed.name)) {
 		ctx.ui.notify(`Running built-in agent '${parsed.name}' with read-only tools.`, "info");
-		await dispatchChildRun(parsed.name, parsed.task, ctx, "built-in", parsed.profileOverride);
+		await dispatchChildRun(parsed.name, parsed.task, ctx, "built-in", parsed.profileOverride, parsed.timeoutMs);
 		return;
 	}
 
@@ -163,48 +165,59 @@ export async function runAgentCommand(input: string, ctx: AgentsContextLike, dia
 		ctx.ui.notify(resolved.message, "warning");
 		return;
 	}
-	await runResolvedTarget(resolved.record, parsed.task, ctx, diagnostics, parsed.profileOverride);
+	await runResolvedTarget(resolved.record, parsed.task, ctx, diagnostics, parsed.profileOverride, parsed.timeoutMs);
 }
 
-export function parseRunArgs(input: string): { ok: true; name: string; task: string; profileOverride?: string; warning?: string } | { ok: false; message: string } {
-	const usage = "Usage: /agents run <agent> [--profile <name>] <task>";
+export function parseRunArgs(input: string): { ok: true; name: string; task: string; profileOverride?: string; timeoutMs?: number; warning?: string } | { ok: false; message: string } {
+	const usage = "Usage: /agents run <agent> [--profile <name>] [--timeout <seconds>] <task>";
 	const trimmed = input.trim();
 	if (!trimmed) return { ok: false, message: usage };
 
-	// Extract optional --profile <name> that must come immediately after the agent name.
-	// Forms: "<agent> --profile <name> <task>" or "<agent> <task>".
-	// Mid-task --profile is part of the task, not an override.
 	const tokens = trimmed.split(/\s+/);
 	const name = tokens[0];
 	if (!name) return { ok: false, message: usage };
 
-	let profileOverride: string | undefined;
-	let rest: string;
-	if (tokens.length >= 2 && tokens[1] === "--profile") {
-		// <agent> --profile ...
-		if (tokens.length < 3) return { ok: false, message: usage }; // no value after --profile
-		const profileValue = tokens[2];
-		if (profileValue.startsWith("--")) return { ok: false, message: usage }; // option-looking value
-		profileOverride = profileValue;
-		rest = tokens.slice(3).join(" ");
-	} else {
-		rest = tokens.slice(1).join(" ");
-	}
-	const warning = (tokens[1] !== "--profile" && tokens.slice(1).some((t) => t === "--profile")) ? "--profile must come right after the agent name; treated as task text" : undefined;
-
-	// Reject repeated --profile token (token-level, so task text containing "--profile"
-	// as a substring like "--profiled" is NOT rejected)
-	if (profileOverride && tokens.slice(3).some((t) => t === "--profile")) return { ok: false, message: usage };
-
-	const task = rest.trim();
+	// Consume leading --profile/--timeout flags (any order, immediately after the agent name).
+	// A flag appearing mid-task is part of the task, with a warning (preserves prior --profile behavior).
+	const leading = parseLeadingRunFlags(tokens, 1, usage);
+	if (!leading.ok) return { ok: false, message: usage };
+	const restTokens = tokens.slice(leading.taskStart);
+	const warning = restTokens.some((t) => t === "--profile" || t === "--timeout")
+		? "--profile/--timeout must come right after the agent name; treated as task text"
+		: undefined;
+	const task = restTokens.join(" ").trim();
 	if (!task) return { ok: false, message: usage };
-	return { ok: true, name, task, profileOverride, warning };
+	return { ok: true, name, task, profileOverride: leading.profileOverride, timeoutMs: leading.timeoutMs, warning };
+}
+
+/** Consume leading --profile <name> / --timeout <seconds> flags from tokens[start..]. Any order,
+ *  each at most once. Returns the index where the task begins. --timeout is in SECONDS (1..3600). */
+function parseLeadingRunFlags(tokens: string[], start: number, _usage: string): { ok: true; profileOverride?: string; timeoutMs?: number; taskStart: number } | { ok: false } {
+	let i = start;
+	let profileOverride: string | undefined;
+	let timeoutMs: number | undefined;
+	while (i < tokens.length && (tokens[i] === "--profile" || tokens[i] === "--timeout")) {
+		const flag = tokens[i];
+		const value = tokens[i + 1];
+		if (value === undefined || value.startsWith("--")) return { ok: false };
+		if (flag === "--profile") {
+			if (profileOverride !== undefined) return { ok: false }; // repeated
+			profileOverride = value;
+		} else {
+			if (timeoutMs !== undefined) return { ok: false }; // repeated
+			const sec = Number(value);
+			if (!Number.isInteger(sec) || sec <= 0 || sec > 3600) return { ok: false };
+			timeoutMs = sec * 1000;
+		}
+		i += 2;
+	}
+	return { ok: true, profileOverride, timeoutMs, taskStart: i };
 }
 
 /** P6-3a: extract the registered-run tail of runAgentCommand into a reusable function.
  *  Zero behavior change — same parse/re-read/gate/execute sequence.
  *  Called by runAgentCommand (existing) and runIntentCommand (P6-3b). */
-export async function runResolvedTarget(record: RunnableRegisteredRecord, task: string, ctx: AgentsContextLike, diagnostics: AgentDiagnostics, profileOverride?: string): Promise<void> {
+export async function runResolvedTarget(record: RunnableRegisteredRecord, task: string, ctx: AgentsContextLike, diagnostics: AgentDiagnostics, profileOverride?: string, timeoutMs?: number): Promise<void> {
 	let currentParsed: Awaited<ReturnType<typeof parseAgentMarkdownFile>>;
 	try {
 		currentParsed = await parseAgentMarkdownFile(record.filePath, { source: record.source });
@@ -226,22 +239,20 @@ export async function runResolvedTarget(record: RunnableRegisteredRecord, task: 
 		return;
 	}
 	ctx.ui.notify(`Running registered ${record.source} agent '${currentParsed.spec.name}' with read-only tools.`, "info");
-	await dispatchChildRun(currentParsed.spec, task, ctx, record.source, profileOverride);
+	await dispatchChildRun(currentParsed.spec, task, ctx, record.source, profileOverride, timeoutMs);
 }
 
-/** P6-3b: parse /agents do input. Leading --profile is tokens[0] (no agent-name token). */
-export function parseDoArgs(input: string): { ok: true; task: string; profileOverride?: string } | { ok: false; message: string } {
-	const usage = "Usage: /agents do [--profile <name>] <task>";
+/** P6-3b: parse /agents do input. Leading --profile/--timeout flags (no agent-name token). */
+export function parseDoArgs(input: string): { ok: true; task: string; profileOverride?: string; timeoutMs?: number } | { ok: false; message: string } {
+	const usage = "Usage: /agents do [--profile <name>] [--timeout <seconds>] <task>";
 	const trimmed = input.trim();
 	if (!trimmed) return { ok: false, message: usage };
 	const tokens = trimmed.split(/\s+/);
-	if (tokens[0] === "--profile") {
-		if (tokens.length < 2 || tokens[1].startsWith("--")) return { ok: false, message: usage };
-		const task = tokens.slice(2).join(" ").trim();
-		if (!task) return { ok: false, message: usage };
-		return { ok: true, task, profileOverride: tokens[1] };
-	}
-	return { ok: true, task: trimmed, profileOverride: undefined };
+	const leading = parseLeadingRunFlags(tokens, 0, usage); // flags start at index 0 (no agent name)
+	if (!leading.ok) return { ok: false, message: usage };
+	const task = tokens.slice(leading.taskStart).join(" ").trim();
+	if (!task) return { ok: false, message: usage };
+	return { ok: true, task, profileOverride: leading.profileOverride, timeoutMs: leading.timeoutMs };
 }
 
 /** P6-3b: the /agents do command — route by intent, auto-run high-confidence read-only picks. */
@@ -291,10 +302,10 @@ export async function runIntentCommand(input: string, ctx: AgentsContextLike, di
 		if (def && profileEffect(def) !== "none") profile = roleDefault;
 	}
 	if (chosen.source === "built-in") {
-		await dispatchChildRun(decision.agent, parsed.task, ctx, "built-in", profile);
+		await dispatchChildRun(decision.agent, parsed.task, ctx, "built-in", profile, parsed.timeoutMs);
 	} else {
 		const resolved = await resolveRegisteredRunTarget(decision.agent, diagnostics);
 		if (!resolved.ok) { ctx.ui.notify(resolved.message, "warning"); return; }
-		await runResolvedTarget(resolved.record, parsed.task, ctx, diagnostics, profile);
+		await runResolvedTarget(resolved.record, parsed.task, ctx, diagnostics, profile, parsed.timeoutMs);
 	}
 }
