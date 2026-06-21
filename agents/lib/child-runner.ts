@@ -207,6 +207,27 @@ export function formatChildAgentRunResult(result: ChildAgentRunResult): string {
 	return lines.join("\n");
 }
 
+/** P8-followup: format a completed subagent run for injection into pi's conversation context
+ *  (NL summary + a compact tool list). Distinct from formatChildAgentRunResult, which is the
+ *  verbose operator toast. Kept short so it doesn't flood the parent agent's context budget. */
+export function formatAgentResultForContext(result: ChildAgentRunResult): string {
+	const summary = result.summary.summaryText?.trim();
+	const lines = [
+		`The \`${result.agentName}\` subagent finished (status: ${result.status}). Use its findings to help with my task.`,
+		"",
+		"Summary:",
+		summary && summary.length > 0 ? summary : "(the subagent produced no natural-language summary)",
+	];
+	if (result.summary.toolCalls.length > 0) {
+		lines.push("", `Tool calls (${result.summary.toolCalls.length}):`);
+		for (const tool of result.summary.toolCalls.slice(0, 20)) {
+			lines.push(`- ${tool.name}: ${tool.argsPreview}`.trimEnd());
+		}
+		if (result.summary.toolCalls.length > 20) lines.push(`- … +${result.summary.toolCalls.length - 20} more`);
+	}
+	return lines.join("\n");
+}
+
 async function spawnAndCollect(agentName: string, invocation: ChildPiInvocation, options: {
 	cwd?: string;
 	env?: NodeJS.ProcessEnv;

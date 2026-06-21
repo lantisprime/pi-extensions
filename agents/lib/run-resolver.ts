@@ -8,7 +8,7 @@ import {
 	type AgentDiagnosticRecord,
 	type AgentDiagnostics,
 } from "./diagnostics.ts";
-import { collectChildProcess, formatChildAgentRunResult, runBuiltInChildAgent, runChildAgent, type ChildAgentRunner } from "./child-runner.ts";
+import { collectChildProcess, formatChildAgentRunResult, formatAgentResultForContext, runBuiltInChildAgent, runChildAgent, type ChildAgentRunner } from "./child-runner.ts";
 import { getBuiltInAgentSpec, isReservedBuiltInAgentName } from "./specs.ts";
 import type { ModelProfileLibrary } from "./profiles.ts";
 import type { ProjectAgentRegistry } from "./registry.ts";
@@ -22,6 +22,7 @@ export type AgentsContextLike = {
 	agentsPiCommand?: string;
 	agentsChildRunner?: ChildAgentRunner;
 	explicitToolContextLoaderPath?: string;
+	disableContextFiles?: boolean;
 	profileLibrary?: ModelProfileLibrary;
 	projectTrusted?: boolean;
 	projectRegistry?: ProjectAgentRegistry;
@@ -34,6 +35,9 @@ export type AgentsContextLike = {
 		 *  otherwise they fall back to the synchronous await path (zero behavior change). */
 		setWidget?(key: string, content: string[] | undefined, options?: { placement?: "aboveEditor" | "belowEditor" }): void;
 	};
+	/** P8-followup: inject a completed subagent's result into pi's conversation (triggers a turn
+	 *  so pi reacts to the findings). Wired in index.ts to pi.sendUserMessage; absent in non-TUI. */
+	deliverResult?: (content: string) => void;
 };
 
 export type RunnableRegisteredRecord = AgentDiagnosticRecord & {
@@ -55,6 +59,7 @@ export function buildChildRunOptions(ctx: { cwd?: string; agentsPiCommand?: stri
 	return {
 		cwd: ctx.cwd,
 		piCommand: ctx.agentsPiCommand,
+		...(ctx.disableContextFiles ? { disableContextFiles: true } : {}),
 		...(explicitToolContextLoaderPath ? { explicitToolContextLoaderPath } : {}),
 	};
 }
@@ -105,6 +110,10 @@ async function executeChildRunResult(agent: Parameters<ChildAgentRunner>[0], tas
 			: typeof agent === "string"
 				? await runBuiltInChildAgent(agent, task, runOptions, profiles, profileOverride)
 				: await runChildAgent(agent, task, runOptions, profiles, profileOverride);
+		// P8-followup: feed a completed run's findings into pi's conversation (best-effort).
+		if (result.status === "completed" && typeof ctx.deliverResult === "function") {
+			try { ctx.deliverResult(formatAgentResultForContext(result)); } catch { /* delivery best-effort */ }
+		}
 		return { message: formatChildAgentRunResult(result), level: result.status === "completed" ? "info" : "warning" };
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);

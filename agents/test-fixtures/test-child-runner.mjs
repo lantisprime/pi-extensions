@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { Buffer } from "node:buffer";
-import { formatChildAgentRunResult, runBuiltInChildAgent, runChildAgent } from "../lib/child-runner.ts";
+import { formatChildAgentRunResult, formatAgentResultForContext, runBuiltInChildAgent, runChildAgent } from "../lib/child-runner.ts";
 
 function jsonLine(value) {
 	return `${JSON.stringify(value)}\n`;
@@ -323,8 +323,27 @@ async function testOnProgressDoesNotChangeStdoutBytes() {
 	assert.ok(captured.length >= 2, "onProgress still fired for the JSONL lines");
 }
 
+// P8-followup: formatAgentResultForContext = NL summary + compact tool list, for pi's context.
+async function testFormatAgentResultForContext() {
+	const base = {
+		agentName: "scout", status: "completed", durationMs: 1, stdoutBytes: 0, stderrPreview: "",
+		invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin", stdinText: "" } },
+		summary: { summaryText: "Found the bug in foo.ts", toolCalls: [{ name: "read", argsPreview: '{"path":"foo.ts"}' }, { name: "grep", argsPreview: "bug" }], errors: [], truncation: {} },
+		timedOut: false, outputLimitExceeded: false,
+	};
+	const out = formatAgentResultForContext(base);
+	assert.match(out, /`scout` subagent finished/);
+	assert.match(out, /Found the bug in foo\.ts/);
+	assert.match(out, /Tool calls \(2\):/);
+	assert.match(out, /- read: \{"path":"foo\.ts"\}/);
+	// empty summary → explicit placeholder (not silently blank)
+	const empty = formatAgentResultForContext({ ...base, summary: { ...base.summary, summaryText: "" } });
+	assert.match(empty, /no natural-language summary/);
+}
+
 async function main() {
 	await testCompletedBuiltInRunUsesSafeArgvAndStdin();
+	await testFormatAgentResultForContext();
 	await testRejectsNonBuiltInAgentsBeforeSpawn();
 	await testGenericRegisteredRunUsesSpecPromptAndLimits();
 	await testRegisteredRunRejectsOversizedTaskBeforeSpawn();

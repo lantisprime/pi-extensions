@@ -119,6 +119,30 @@ async function testToolPathDoesNotBackground() {
   assert.equal(/dispatchChildRun/.test(code), false, "run_subagent must not route through dispatchChildRun");
 }
 
+// P8-followup: a completed do-run injects its result (NL summary + tools) into pi's context.
+async function testDoDeliversResultToContext() {
+  stubClassifier("scout", 0.95);
+  const delivered = [];
+  const ctx = makeCtx();
+  ctx.deliverResult = (content) => delivered.push(content);
+  await runIntentCommand("review this code", ctx, makeDiagnostics());
+  assert.equal(ctx._runnerCalls.length, 1);
+  assert.equal(delivered.length, 1, "completed run delivers exactly one context message");
+  assert.match(delivered[0], /`scout` subagent finished/);
+  assert.match(delivered[0], /Summary:/);
+}
+
+// Non-completed runs must NOT inject into context.
+async function testDoDoesNotDeliverOnNonCompleted() {
+  stubClassifier("scout", 0.95);
+  const delivered = [];
+  const ctx = makeCtx();
+  ctx.agentsChildRunner = async (agent) => ({ agentName: typeof agent === "string" ? agent : agent.name, status: "failed", exitCode: 1, durationMs: 1, stdoutBytes: 0, stderrPreview: "", invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin", stdinText: "" } }, summary: { summaryText: "", toolCalls: [], errors: [], usage: undefined, cost: undefined, stopReason: undefined, model: undefined, provider: undefined, truncation: {} }, timedOut: false, outputLimitExceeded: false });
+  ctx.deliverResult = (content) => delivered.push(content);
+  await runIntentCommand("review this", ctx, makeDiagnostics());
+  assert.equal(delivered.length, 0, "a failed run does not inject into pi's context");
+}
+
 async function main() {
   testParseDoArgs_basic(); testParseDoArgs_withProfile(); testParseDoArgs_emptyRejected(); testParseDoArgs_profileNoValueRejected(); testParseDoArgs_profileNoTaskRejected();
   await testDo_nonTuiFailClosed(); await testDo_nonTuiNeverSpawnsClassifier(); await testDo_emptyTaskUsage(); await testDo_classifierFallbackRuns();
@@ -126,6 +150,7 @@ async function main() {
   await testDo_registeredDispatchFailsClosedOnReReadError(); await testDo_gateDeniesUntrustedProject();
   await testDo_appliesRoleDefaultProfile(); await testDo_skipsNoOpRoleDefault(); await testDo_explicitProfileOverridesRoleDefault(); await testDo_roleDefaultWithNoLibraryDoesNotFailClosed();
   await testHandlerReturnsBeforeChildSettles(); await testNoUiFallbackSynchronous(); await testToolPathDoesNotBackground();
-  console.log("OK: 22/22 tests passed");
+  await testDoDeliversResultToContext(); await testDoDoesNotDeliverOnNonCompleted();
+  console.log("OK: 24/24 tests passed");
 }
 main().catch((error) => { console.error(error); process.exit(1); });

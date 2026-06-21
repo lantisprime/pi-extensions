@@ -1,6 +1,6 @@
 import { getBuiltInAgentSpec, isReservedBuiltInAgentName, isValidAgentName, type AgentSpec } from "./specs.ts";
 import { canRunAgent } from "./can-run-agent.ts";
-import { runChildAgent, formatChildAgentRunResult, type ChildAgentRunner } from "./child-runner.ts";
+import { runChildAgent, formatChildAgentRunResult, formatAgentResultForContext, type ChildAgentRunner } from "./child-runner.ts";
 import { scanTextForAgentRisk, type RiskLevel } from "./security-scan.ts";
 import { resolveExplicitToolContextLoaderPath } from "./run-resolver.ts";
 import { startBackgroundRun, type BgRunUI } from "./bg-run.ts";
@@ -62,6 +62,7 @@ export type EphemeralRunHandlerContext = {
 		confirm?(title: string, message: string): Promise<boolean> | boolean;
 		setWidget?(key: string, content: string[] | undefined, options?: { placement?: "aboveEditor" | "belowEditor" }): void;
 	};
+	deliverResult?: (content: string) => void;
 };
 
 export type EphemeralDiagnosticsLike = {
@@ -127,6 +128,10 @@ export async function runEphemeralCommand(input: string, ctx: EphemeralRunHandle
 			const result = ctx.agentsChildRunner
 				? await ctx.agentsChildRunner(spec, args.task, childOptions)
 				: await runChildAgent(spec, args.task, childOptions);
+			// P8-followup: feed a completed run's findings into pi's conversation (best-effort).
+			if (result.status === "completed" && typeof ctx.deliverResult === "function") {
+				try { ctx.deliverResult(formatAgentResultForContext(result)); } catch { /* best-effort */ }
+			}
 			return { message: formatChildAgentRunResult(result), level: (result.status === "completed" ? "info" : "warning") as "info" | "warning" };
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);

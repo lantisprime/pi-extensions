@@ -48,6 +48,8 @@ type AgentsContext = {
 		// P8: interactive widget surface used for the live background-run indicator.
 		setWidget?(key: string, content: string[] | undefined, options?: { placement?: "aboveEditor" | "belowEditor" }): void;
 	};
+	// P8-followup: inject a completed subagent result into pi's conversation (set in the handler).
+	deliverResult?: (content: string) => void;
 };
 
 export default function agentsExtension(pi: ExtensionAPI) {
@@ -97,6 +99,12 @@ export default function agentsExtension(pi: ExtensionAPI) {
 		},
 		handler: async (args, ctx) => {
 			const parsed = parseAgentsArgs(args);
+			// P8-followup: deliver a completed subagent's result into pi's conversation (triggers a
+			// turn so pi reacts to the findings). deliverAs:"followUp" queues politely if pi is busy.
+			const sendUserMessage = (pi as ExtensionAPI & { sendUserMessage?: (content: string, options?: { deliverAs?: "steer" | "followUp" }) => void }).sendUserMessage;
+			if (typeof sendUserMessage === "function") {
+				ctx.deliverResult = (content: string) => sendUserMessage(content, { deliverAs: "followUp" });
+			}
 			const diagnostics = await collectAgentDiagnostics({ cwd: ctx.cwd, homeDir: ctx.agentsHomeDir, projectTrusted: resolveProjectTrusted(ctx) });
 			if (parsed.action === "list" || parsed.action === "built-ins") {
 				if (parsed.action === "list") await maybeNotifyProjectRecommendation(ctx, true, diagnostics);
@@ -173,14 +181,14 @@ export default function agentsExtension(pi: ExtensionAPI) {
 				return;
 			}
 			if (parsed.action === "run-temp") {
-				const ephCtx: EphemeralRunHandlerContext = { cwd: ctx.cwd, hasUI: ctx.hasUI, agentsPiCommand: ctx.agentsPiCommand, agentsChildRunner: ctx.agentsChildRunner, agentsLastEphemeralSpec: ctx.agentsLastEphemeralSpec, ui: ctx.ui };
+				const ephCtx: EphemeralRunHandlerContext = { cwd: ctx.cwd, hasUI: ctx.hasUI, agentsPiCommand: ctx.agentsPiCommand, agentsChildRunner: ctx.agentsChildRunner, agentsLastEphemeralSpec: ctx.agentsLastEphemeralSpec, ui: ctx.ui, deliverResult: ctx.deliverResult };
 				const stashed = await runEphemeralCommand(parsed.rest, ephCtx);
 				if (stashed) ctx.agentsLastEphemeralSpec = stashed;
 				return;
 			}
 			if (parsed.action === "save-temp") {
 				const userAgentsDir = diagnostics.userAgentsDir;
-				const ephCtx: EphemeralRunHandlerContext = { cwd: ctx.cwd, hasUI: ctx.hasUI, agentsPiCommand: ctx.agentsPiCommand, agentsChildRunner: ctx.agentsChildRunner, agentsLastEphemeralSpec: ctx.agentsLastEphemeralSpec, ui: ctx.ui };
+				const ephCtx: EphemeralRunHandlerContext = { cwd: ctx.cwd, hasUI: ctx.hasUI, agentsPiCommand: ctx.agentsPiCommand, agentsChildRunner: ctx.agentsChildRunner, agentsLastEphemeralSpec: ctx.agentsLastEphemeralSpec, ui: ctx.ui, deliverResult: ctx.deliverResult };
 				await saveTempCommand(parsed.rest, ephCtx, { projectTrusted: diagnostics.projectTrusted, userAgentsDir });
 				return;
 			}

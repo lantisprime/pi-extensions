@@ -110,7 +110,11 @@ export const DEFAULT_INPUT_CONTRACT: AgentInputContract = Object.freeze({
 
 export const DEFAULT_LIMITS: AgentLimits = Object.freeze({
 	timeoutMs: 120_000,
-	maxStdoutBytes: 1_048_576,
+	// 8 MiB: the reducer bounds stdout to this BEFORE parsing, and the agent's final
+	// natural-language summary is the LAST event in the stream — a 1 MiB cap truncated it
+	// away on chatty runs (many/large tool results). Tool-result previews stay capped by
+	// maxResultChars, so raising this captures the summary without bloating the reduction.
+	maxStdoutBytes: 8_388_608,
 	maxStderrChars: 4_000,
 	maxResultChars: DEFAULT_MAX_SUMMARY_CHARS,
 	maxJsonLineBytes: 262_144,
