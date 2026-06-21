@@ -223,7 +223,7 @@ async function maybeNotifyProjectRecommendation(ctx: AgentsContext, force: boole
 
 // ── P3f-3: Profile list and registration helpers ─────────────────────────
 
-function formatProfileList(ctx: AgentsContext, diagnostics: Awaited<ReturnType<typeof collectAgentDiagnostics>>): string {
+export function formatProfileList(ctx: AgentsContext, diagnostics: Awaited<ReturnType<typeof collectAgentDiagnostics>>): string {
 	const library = ctx.profileLibrary;
 	const lines = ["Agent profiles:"];
 	if (!library || library.profiles.length === 0) {
@@ -237,6 +237,7 @@ function formatProfileList(ctx: AgentsContext, diagnostics: Awaited<ReturnType<t
 		const parts = [`  ${profile.name} [${source}]`];
 		if (profile.model) parts.push(`model=${profile.model}`);
 		if (profile.thinking) parts.push(`thinking=${profile.thinking}`);
+		if (!profile.model && !profile.thinking) parts.push("effect: none (Pi default)");
 		if (profile.purpose) parts.push(`(${profile.purpose})`);
 		lines.push(parts.join(" "));
 	}
