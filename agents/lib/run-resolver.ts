@@ -116,29 +116,7 @@ export async function runAgentCommand(input: string, ctx: AgentsContextLike, dia
 		ctx.ui.notify(resolved.message, "warning");
 		return;
 	}
-	const record = resolved.record;
-	let currentParsed: Awaited<ReturnType<typeof parseAgentMarkdownFile>>;
-	try {
-		currentParsed = await parseAgentMarkdownFile(record.filePath, { source: record.source });
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		ctx.ui.notify(`Agent '${parsed.name}' is not runnable: failed to re-read current spec bytes: ${message}. Next: /agents inspect ${parsed.name}`, "warning");
-		return;
-	}
-	if (!currentParsed.spec || currentParsed.status === "invalid" || currentParsed.status === "dangerous" || currentParsed.status === "shadowed") {
-		ctx.ui.notify(`Agent '${parsed.name}' is not runnable: current spec status=${currentParsed.status}. Next: /agents inspect ${parsed.name}`, "warning");
-		return;
-	}
-	const gate = await canRunAgent(
-		{ parsed: currentParsed, canonicalPath: record.canonicalPath },
-		{ projectTrusted: diagnostics.projectTrusted, projectRoot: diagnostics.projectRoot, userRegistry: diagnostics.userRegistry, projectRegistry: diagnostics.projectRegistry, homeDir: ctx.agentsHomeDir },
-	);
-	if (!gate.ok) {
-		ctx.ui.notify(`Agent '${parsed.name}' is not runnable: ${gate.reason}. Next: ${nextStepForRunBlock(record, gate.code)}`, "warning");
-		return;
-	}
-	ctx.ui.notify(`Running registered ${record.source} agent '${currentParsed.spec.name}' with read-only tools.`, "info");
-	await executeChildRun(currentParsed.spec, parsed.task, ctx, record.source, parsed.profileOverride);
+	await runResolvedTarget(resolved.record, parsed.task, ctx, diagnostics, parsed.profileOverride);
 }
 
 export function parseRunArgs(input: string): { ok: true; name: string; task: string; profileOverride?: string } | { ok: false; message: string } {
@@ -173,4 +151,32 @@ export function parseRunArgs(input: string): { ok: true; name: string; task: str
 	const task = rest.trim();
 	if (!task) return { ok: false, message: usage };
 	return { ok: true, name, task, profileOverride };
+}
+
+/** P6-3a: extract the registered-run tail of runAgentCommand into a reusable function.
+ *  Zero behavior change — same parse/re-read/gate/execute sequence.
+ *  Called by runAgentCommand (existing) and runIntentCommand (P6-3b). */
+export async function runResolvedTarget(record: RunnableRegisteredRecord, task: string, ctx: AgentsContextLike, diagnostics: AgentDiagnostics, profileOverride?: string): Promise<void> {
+	let currentParsed: Awaited<ReturnType<typeof parseAgentMarkdownFile>>;
+	try {
+		currentParsed = await parseAgentMarkdownFile(record.filePath, { source: record.source });
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		ctx.ui.notify(`Agent '${record.name}' is not runnable: failed to re-read current spec bytes: ${message}. Next: /agents inspect ${record.name}`, "warning");
+		return;
+	}
+	if (!currentParsed.spec || currentParsed.status === "invalid" || currentParsed.status === "dangerous" || currentParsed.status === "shadowed") {
+		ctx.ui.notify(`Agent '${record.name}' is not runnable: current spec status=${currentParsed.status}. Next: /agents inspect ${record.name}`, "warning");
+		return;
+	}
+	const gate = await canRunAgent(
+		{ parsed: currentParsed, canonicalPath: record.canonicalPath },
+		{ projectTrusted: diagnostics.projectTrusted, projectRoot: diagnostics.projectRoot, userRegistry: diagnostics.userRegistry, projectRegistry: diagnostics.projectRegistry, homeDir: ctx.agentsHomeDir },
+	);
+	if (!gate.ok) {
+		ctx.ui.notify(`Agent '${record.name}' is not runnable: ${gate.reason}. Next: ${nextStepForRunBlock(record, gate.code)}`, "warning");
+		return;
+	}
+	ctx.ui.notify(`Running registered ${record.source} agent '${currentParsed.spec.name}' with read-only tools.`, "info");
+	await executeChildRun(currentParsed.spec, task, ctx, record.source, profileOverride);
 }
