@@ -48,6 +48,12 @@ export function sanitizeProgressLine(raw: string): string {
 
 /** Best-effort: reduce a JSONL stdout line to a short activity string. Never throws. */
 export function summarizeProgressLine(raw: string): string | undefined {
+	// Skip JSON.parse on very large lines (big tool-result events) — parsing megabyte lines per
+	// stdout chunk would block pi's event loop. The head is all the widget can show anyway.
+	if (raw.length > 2000) {
+		const s = sanitizeProgressLine(raw);
+		return s.length ? s : undefined;
+	}
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(raw);
@@ -140,11 +146,14 @@ export function startBackgroundRun(args: {
 
 	const handle: BgRunHandle = {
 		onProgress(line: string) {
+			// Update the tail buffer ONLY — do NOT render here. A chatty agent emits many stdout
+			// lines in bursts; rendering per line floods setWidget with synchronous TUI redraws and
+			// starves pi's input loop (keystrokes lag). The spinner interval (every SPINNER_INTERVAL_MS)
+			// renders the latest tail, so redraws are capped regardless of stdout volume.
 			const summary = summarizeProgressLine(line);
 			if (!summary) return;
 			entry.tail.push(summary);
 			if (entry.tail.length > 2) entry.tail = entry.tail.slice(-2);
-			render();
 		},
 	};
 

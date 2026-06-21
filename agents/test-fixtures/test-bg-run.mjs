@@ -74,9 +74,13 @@ async function testTailKeepsLastTwoLines() {
 	const d = deferred();
 	startBackgroundRun({ ui, label: "run:scout", run: (h) => { handle = h; return d.promise; }, now: () => 0, setInterval: timer.setInterval.bind(timer), clearInterval: timer.clearInterval.bind(timer) });
 	await flush(); // let run() execute so `handle` is set
+	const widgetsBefore = ui.widgets.length;
 	handle.onProgress("line1");
 	handle.onProgress("line2");
 	handle.onProgress("line3");
+	// Throttle: onProgress updates the tail buffer but must NOT render (no setWidget flood).
+	assert.equal(ui.widgets.length, widgetsBefore, "onProgress does not render per line (redraws are throttled to the interval)");
+	timer.tick(); // the spinner interval renders the latest tail
 	assert.deepEqual(tailLines(ui.lastWidget()), ["   line2", "   line3"], "only the last two activity lines are kept");
 	d.resolve({ message: "ok", level: "info" });
 	await flush();
