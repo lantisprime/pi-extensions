@@ -190,6 +190,13 @@ async function testNoInputInterception() {
 	assert.equal(/\bcustom\s*\(/.test(code), false, "bg-run must not open a focus-stealing custom() overlay");
 }
 
+// P8-4: index.ts must wire disposeBackgroundRuns to session_shutdown (REQ-11 integration).
+async function testIndexRegistersShutdownDispose() {
+	const src = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "index.ts"), "utf8");
+	assert.match(src, /on\?\.\(\s*"session_shutdown"/, "index.ts registers a session_shutdown handler");
+	assert.match(src, /disposeBackgroundRuns\(/, "index.ts calls disposeBackgroundRuns on shutdown");
+}
+
 async function main() {
 	await testSpinnerFrameAdvances();
 	await testTailKeepsLastTwoLines();
@@ -200,6 +207,7 @@ async function main() {
 	await testCapDecrementsOnReject();
 	await testShutdownClearsTimerAndWidget();
 	await testNoInputInterception();
+	await testIndexRegistersShutdownDispose();
 	console.log("agents bg-run tests passed");
 }
 

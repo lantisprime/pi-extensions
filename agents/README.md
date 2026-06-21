@@ -80,6 +80,16 @@ from the built-in and registered agents.
 See the [user manual](../docs/USER_MANUAL.md#intent-based-agent-routing) for a
 full walkthrough.
 
+### Background runs and the live indicator
+
+In an interactive TUI, the agent-spawning commands (`/agents do`, `run`, `chain`,
+`run-temp`) run **non-blocking**: the child agent runs in the background while the
+prompt stays free, so you can keep typing — follow-up prompts queue through Pi's
+normal input handling. A small widget above the editor shows a spinner and the
+last couple of lines of the agent's activity; it clears and a result notification
+fires when the run finishes (up to 5 concurrent runs). In non-TUI/headless mode
+these commands fall back to the original blocking behavior.
+
 ### Profiles
 
 ```
