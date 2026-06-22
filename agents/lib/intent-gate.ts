@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { Worker } from "node:worker_threads";
 
 // ── Types ──
 
@@ -84,7 +85,9 @@ export async function loadGateConfig(configPath: string, trusted: boolean): Prom
 		if (!match || !Array.isArray(match.phrases)) return { ok: false, reason: "invalid" };
 		const phrases = match.phrases.filter((p): p is string => typeof p === "string");
 
-		// P7-3: validate regex patterns (REQ-SEC-6)
+		// P7-3: bound optional regex patterns at load-time (REQ-SEC-6).
+		// Runtime matching is isolated in a terminate-able worker; do not rely on
+		// denylist heuristics for ReDoS safety.
 		const regexRaw = match.regex;
 		let regex: string[] | undefined;
 		if (regexRaw !== undefined) {
@@ -93,8 +96,6 @@ export async function loadGateConfig(configPath: string, trusted: boolean): Prom
 			if (patterns.length > 10) return { ok: false, reason: "unsafe-regex" };
 			for (const pattern of patterns) {
 				if (pattern.length > 256) return { ok: false, reason: "unsafe-regex" };
-				// Reject nested quantifiers that risk catastrophic backtracking
-				if (/\([^)]*[+*{][^)]*\)[+*{]/.test(pattern)) return { ok: false, reason: "unsafe-regex" };
 			}
 			regex = patterns;
 		}
@@ -126,6 +127,63 @@ export async function loadGateConfig(configPath: string, trusted: boolean): Prom
 	return { ok: true, config: { version: 1, intents: entries } };
 }
 
+function matchRegexEntriesWithTimeout(text: string, config: IntentGateConfig, timeoutMs: number): number[] {
+	const tasks = config.intents
+		.map((entry, entryIndex) => ({ entryIndex, patterns: entry.match.regex ?? [] }))
+		.filter((task) => task.patterns.length > 0);
+	if (tasks.length === 0) return [];
+
+	// Slot 0 is worker status: 0 = running, 1 = done, 2 = worker error.
+	// Slots 1..n map to config.intents[index] and hold 1 when any regex matched.
+	const shared = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * (config.intents.length + 1));
+	const state = new Int32Array(shared);
+	let worker: Worker;
+	try {
+		worker = new Worker(REGEX_WORKER_SOURCE, { eval: true, workerData: { text, tasks, shared } });
+		worker.once("error", () => {});
+	} catch {
+		return [];
+	}
+
+	const waitResult = Atomics.wait(state, 0, 0, Math.max(1, timeoutMs));
+	if (waitResult === "timed-out") {
+		void worker.terminate().catch(() => {});
+		return [];
+	}
+
+	void worker.terminate().catch(() => {});
+	if (Atomics.load(state, 0) !== 1) return [];
+
+	const matches: number[] = [];
+	for (let i = 0; i < config.intents.length; i++) {
+		if (Atomics.load(state, i + 1) === 1) matches.push(i);
+	}
+	return matches;
+}
+
+const REGEX_WORKER_SOURCE = `
+const { workerData } = require("node:worker_threads");
+const state = new Int32Array(workerData.shared);
+try {
+	for (const task of workerData.tasks) {
+		for (const pattern of task.patterns) {
+			try {
+				if (new RegExp(pattern, "i").test(workerData.text)) {
+					Atomics.store(state, task.entryIndex + 1, 1);
+					break;
+				}
+			} catch {
+				// Invalid runtime regex: skip this pattern.
+			}
+		}
+	}
+	Atomics.store(state, 0, 1);
+} catch {
+	Atomics.store(state, 0, 2);
+}
+Atomics.notify(state, 0, 1);
+`;
+
 // ── Intent classification ──
 
 export function classifyGateIntent(prompt: string, config: IntentGateConfig): GateDecision {
@@ -149,24 +207,12 @@ export function classifyGateIntent(prompt: string, config: IntentGateConfig): Ga
 		}
 	}
 
-	// P7-3: Regex matching (REQ-2, REQ-SEC-6). Soft timeout — can't abort a single
-	// catastrophic regex mid-execution, but prevents additional regex runs after 100ms.
-	const regexStart = BigInt(Date.now());
-	for (const entry of config.intents) {
-		const patterns = entry.match.regex;
-		if (!patterns || patterns.length === 0) continue;
-		for (const pattern of patterns) {
-			const elapsed = Number(BigInt(Date.now()) - regexStart);
-			if (elapsed > 100) break;
-			try {
-				if (new RegExp(pattern, "i").test(text)) {
-					matchedEntries.push({ entry, matchedBy: "regex" });
-					break; // first regex match wins per entry
-				}
-			} catch {
-				// Invalid regex at runtime → skip, treat as no-match for this pattern
-			}
-		}
+	// P7-3: Regex matching (REQ-2, REQ-SEC-6). Run all regex evaluation in a
+	// terminate-able worker so a catastrophic JS regex can stall for at most the
+	// configured budget instead of hanging the input gate.
+	for (const entryIndex of matchRegexEntriesWithTimeout(text, config, 100)) {
+		const entry = config.intents[entryIndex];
+		if (entry) matchedEntries.push({ entry, matchedBy: "regex" });
 	}
 
 	if (matchedEntries.length === 0) return { kind: "pass-through" };
