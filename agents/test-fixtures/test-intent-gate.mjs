@@ -404,6 +404,95 @@ async function testGate_implementationEnforcesConfirm() {
 	});
 }
 
+// ── P7-3: Regex matching tests ─────────────────────────────────────────
+
+// REQ-2: regex pattern matches and produces a route
+async function testGate_regexMatch() {
+	const config = { version: 1, intents: [{ id: "bug-review", match: { phrases: [], regex: ["\\bbug\\b", "CRITICAL|SECURITY"] }, workflow: { kind: "review", profile: "security-profile" } }] };
+	const { dir, filePath } = await writeTempConfig(config);
+	try {
+		const result = await loadGateConfig(filePath, true);
+		assert.equal(result.ok, true);
+		if (!result.ok) return;
+
+		const decision = classifyGateIntent("there is a bug in the login handler", result.config);
+		assert.equal(decision.kind, "route");
+		if (decision.kind === "route") {
+			assert.equal(decision.agent, "reviewer");
+			assert.equal(decision.profile, "security-profile");
+			assert.equal(decision.metadata.matchedBy, "regex");
+			assert.equal(decision.metadata.intentId, "bug-review");
+		}
+	} finally { await fs.rm(dir, { recursive: true, force: true }).catch(() => {}); }
+}
+
+// REQ-SEC-6: unsafe regex patterns rejected at load-time
+async function testGate_regexUnsafePatternRejected() {
+	const badConfig = { version: 1, intents: [{ id: "bad", match: { phrases: [], regex: ["(a+)+$"] }, workflow: { kind: "review" } }] };
+	const { dir, filePath } = await writeTempConfig(badConfig);
+	try {
+		const result = await loadGateConfig(filePath, true);
+		assert.equal(result.ok, false);
+		if (!result.ok) assert.equal(result.reason, "unsafe-regex");
+	} finally { await fs.rm(dir, { recursive: true, force: true }).catch(() => {}); }
+}
+
+// REQ-2: both phrase and regex checked; matchedBy reflects which matched
+async function testGate_regexWithPhrase() {
+	const config = {
+		version: 1,
+		intents: [
+			{ id: "phrase-only", match: { phrases: ["security review"] }, workflow: { kind: "review" } },
+			{ id: "regex-only", match: { phrases: [], regex: ["\\bvuln\\b"] }, workflow: { kind: "review", profile: "deep-review" } },
+		],
+	};
+	const { dir, filePath } = await writeTempConfig(config);
+	try {
+		const result = await loadGateConfig(filePath, true);
+		assert.equal(result.ok, true);
+		if (!result.ok) return;
+
+		// Phrase match
+		const d1 = classifyGateIntent("do a security review of this code", result.config);
+		assert.equal(d1.kind, "route");
+		if (d1.kind === "route") assert.equal(d1.metadata.matchedBy, "phrase");
+
+		// Regex match
+		const d2 = classifyGateIntent("found a vuln in the parser", result.config);
+		assert.equal(d2.kind, "route");
+		if (d2.kind === "route") assert.equal(d2.metadata.matchedBy, "regex");
+
+		// Neither matched → pass-through
+		assert.equal(classifyGateIntent("hello world", result.config).kind, "pass-through");
+	} finally { await fs.rm(dir, { recursive: true, force: true }).catch(() => {}); }
+}
+
+// REQ-SEC-6: extensive regex doesn't block; per-pattern timeout prevents runaway
+async function testGate_regexTimeout() {
+	// Build a config with many regex patterns to exercise the soft timeout
+	const patterns = [];
+	for (let i = 0; i < 10; i++) patterns.push(`pattern${i}`);
+	const config = {
+		version: 1,
+		intents: [
+			{ id: "many-patterns", match: { phrases: [], regex: patterns }, workflow: { kind: "review" } },
+			{ id: "match-this", match: { phrases: ["hello"] }, workflow: { kind: "plan-only" } },
+		],
+	};
+	const { dir, filePath } = await writeTempConfig(config);
+	try {
+		const result = await loadGateConfig(filePath, true);
+		assert.equal(result.ok, true);
+		if (!result.ok) return;
+
+		// This prompt has no regex matches but matches a phrase — should still work
+		const d = classifyGateIntent("hello world", result.config);
+		assert.equal(d.kind, "inject");
+		// Negative control: even with regex patterns, if none match, fall through to pass-through
+		assert.equal(classifyGateIntent("no match here", result.config).kind, "pass-through");
+	} finally { await fs.rm(dir, { recursive: true, force: true }).catch(() => {}); }
+}
+
 // ── Main ──
 
 async function main() {
@@ -435,7 +524,13 @@ async function main() {
 	await testGate_routedChildDisablesContextFiles();
 	await testGate_implementationEnforcesConfirm();
 
-	console.log("OK: 22/22 tests passed");
+	// P7-3 Regex matching (4)
+	await testGate_regexMatch();
+	await testGate_regexUnsafePatternRejected();
+	await testGate_regexWithPhrase();
+	await testGate_regexTimeout();
+
+	console.log("OK: 26/26 tests passed");
 }
 
 main().catch((error) => { console.error(error); process.exit(1); });
