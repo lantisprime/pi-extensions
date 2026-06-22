@@ -426,9 +426,9 @@ async function testGate_regexMatch() {
 	} finally { await fs.rm(dir, { recursive: true, force: true }).catch(() => {}); }
 }
 
-// REQ-SEC-6: unsafe regex patterns rejected at load-time
-async function testGate_regexUnsafePatternRejected() {
-	const badConfig = { version: 1, intents: [{ id: "bad", match: { phrases: [], regex: ["(a+)+$"] }, workflow: { kind: "review" } }] };
+// REQ-SEC-6: regex bounds rejected at load-time
+async function testGate_regexBoundsRejected() {
+	const badConfig = { version: 1, intents: [{ id: "bad", match: { phrases: [], regex: ["x".repeat(257)] }, workflow: { kind: "review" } }] };
 	const { dir, filePath } = await writeTempConfig(badConfig);
 	try {
 		const result = await loadGateConfig(filePath, true);
@@ -467,29 +467,30 @@ async function testGate_regexWithPhrase() {
 	} finally { await fs.rm(dir, { recursive: true, force: true }).catch(() => {}); }
 }
 
-// REQ-SEC-6: extensive regex doesn't block; per-pattern timeout prevents runaway
+// REQ-SEC-6: catastrophic regex is terminated by the worker timeout, not run on the main thread
 async function testGate_regexTimeout() {
-	// Build a config with many regex patterns to exercise the soft timeout
-	const patterns = [];
-	for (let i = 0; i < 10; i++) patterns.push(`pattern${i}`);
 	const config = {
 		version: 1,
 		intents: [
-			{ id: "many-patterns", match: { phrases: [], regex: patterns }, workflow: { kind: "review" } },
+			{ id: "catastrophic", match: { phrases: [], regex: ["(a|aa)+$"] }, workflow: { kind: "review" } },
 			{ id: "match-this", match: { phrases: ["hello"] }, workflow: { kind: "plan-only" } },
 		],
 	};
 	const { dir, filePath } = await writeTempConfig(config);
 	try {
 		const result = await loadGateConfig(filePath, true);
-		assert.equal(result.ok, true);
+		assert.equal(result.ok, true, "alternation-overlap regex is accepted but isolated at runtime");
 		if (!result.ok) return;
 
-		// This prompt has no regex matches but matches a phrase — should still work
-		const d = classifyGateIntent("hello world", result.config);
-		assert.equal(d.kind, "inject");
-		// Negative control: even with regex patterns, if none match, fall through to pass-through
-		assert.equal(classifyGateIntent("no match here", result.config).kind, "pass-through");
+		const prompt = "hello " + "a".repeat(34) + "!";
+		const started = Date.now();
+		const d = classifyGateIntent(prompt, result.config);
+		const elapsed = Date.now() - started;
+		assert.equal(d.kind, "inject", "phrase match survives timed-out regex worker");
+		assert.ok(elapsed < 1000, `regex worker timeout should bound classification, elapsed=${elapsed}ms`);
+
+		// Negative control: catastrophic regex alone times out and is treated as no-match.
+		assert.equal(classifyGateIntent("a".repeat(34) + "!", result.config).kind, "pass-through");
 	} finally { await fs.rm(dir, { recursive: true, force: true }).catch(() => {}); }
 }
 
@@ -526,7 +527,7 @@ async function main() {
 
 	// P7-3 Regex matching (4)
 	await testGate_regexMatch();
-	await testGate_regexUnsafePatternRejected();
+	await testGate_regexBoundsRejected();
 	await testGate_regexWithPhrase();
 	await testGate_regexTimeout();
 
