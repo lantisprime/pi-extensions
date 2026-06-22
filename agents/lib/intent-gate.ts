@@ -42,7 +42,7 @@ export const GATE_INSTRUCTIONS: Record<GateInstruction, string> = {
 
 export type ConfigResult =
 	| { ok: true; config: IntentGateConfig }
-	| { ok: false; reason: "missing" | "invalid" | "untrusted" | "inline-model" | "unknown-kind" };
+	| { ok: false; reason: "missing" | "invalid" | "untrusted" | "inline-model" | "unknown-kind" | "unsafe-regex" };
 
 export async function loadGateConfig(configPath: string, trusted: boolean): Promise<ConfigResult> {
 	if (!trusted) return { ok: false, reason: "untrusted" };
@@ -84,6 +84,21 @@ export async function loadGateConfig(configPath: string, trusted: boolean): Prom
 		if (!match || !Array.isArray(match.phrases)) return { ok: false, reason: "invalid" };
 		const phrases = match.phrases.filter((p): p is string => typeof p === "string");
 
+		// P7-3: validate regex patterns (REQ-SEC-6)
+		const regexRaw = match.regex;
+		let regex: string[] | undefined;
+		if (regexRaw !== undefined) {
+			if (!Array.isArray(regexRaw)) return { ok: false, reason: "invalid" };
+			const patterns = regexRaw.filter((r): r is string => typeof r === "string");
+			if (patterns.length > 10) return { ok: false, reason: "unsafe-regex" };
+			for (const pattern of patterns) {
+				if (pattern.length > 256) return { ok: false, reason: "unsafe-regex" };
+				// Reject nested quantifiers that risk catastrophic backtracking
+				if (/\([^)]*[+*{][^)]*\)[+*{]/.test(pattern)) return { ok: false, reason: "unsafe-regex" };
+			}
+			regex = patterns;
+		}
+
 		const workflow = entryObj.workflow as Record<string, unknown> | undefined;
 		if (!workflow || typeof workflow.kind !== "string") return { ok: false, reason: "invalid" };
 
@@ -97,7 +112,7 @@ export async function loadGateConfig(configPath: string, trusted: boolean): Prom
 
 		const gateEntry: IntentGateEntry = {
 			id: entryObj.id as string,
-			match: { phrases },
+			match: { phrases, ...(regex ? { regex } : {}) },
 			workflow: { kind } as IntentGateEntry["workflow"],
 		};
 
@@ -120,8 +135,8 @@ export function classifyGateIntent(prompt: string, config: IntentGateConfig): Ga
 	const text = prompt.trim();
 	if (!text) return { kind: "pass-through" };
 
-	// Phrase matching: scan ALL entries, collect matches, check for ambiguity
-	const matchedEntries: { entry: IntentGateEntry; matchedBy: "phrase" }[] = [];
+	// Phrase matching: scan ALL entries, collect matches
+	const matchedEntries: { entry: IntentGateEntry; matchedBy: "phrase" | "regex" }[] = [];
 
 	for (const entry of config.intents) {
 		for (const phrase of entry.match.phrases) {
@@ -130,6 +145,26 @@ export function classifyGateIntent(prompt: string, config: IntentGateConfig): Ga
 			if (re.test(text)) {
 				matchedEntries.push({ entry, matchedBy: "phrase" });
 				break; // first phrase match wins per entry; continue to next entry
+			}
+		}
+	}
+
+	// P7-3: Regex matching (REQ-2, REQ-SEC-6). Soft timeout — can't abort a single
+	// catastrophic regex mid-execution, but prevents additional regex runs after 100ms.
+	const regexStart = BigInt(Date.now());
+	for (const entry of config.intents) {
+		const patterns = entry.match.regex;
+		if (!patterns || patterns.length === 0) continue;
+		for (const pattern of patterns) {
+			const elapsed = Number(BigInt(Date.now()) - regexStart);
+			if (elapsed > 100) break;
+			try {
+				if (new RegExp(pattern, "i").test(text)) {
+					matchedEntries.push({ entry, matchedBy: "regex" });
+					break; // first regex match wins per entry
+				}
+			} catch {
+				// Invalid regex at runtime → skip, treat as no-match for this pattern
 			}
 		}
 	}
