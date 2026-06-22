@@ -12,6 +12,7 @@ Implementation should proceed in small PRs where each slice has a narrow objecti
 
 Completed and merged:
 
+### P3 Agent Scaffold (COMPLETE)
 - P3b-1: core spec model and built-ins, PR #18, commit `9f213f7`
 - P3b-2: Markdown parser and deterministic scanner, PR #19, commit `c5bb433`
 - P3b-3: registry and runtime gate, PR #20, commit `44e2b43`
@@ -27,11 +28,27 @@ Completed and merged:
 - P3f-2: model profiles wiring, PR #35, commit `8c7243a`
 - P3d-2: command-only chain mode, PR #36, commit `bf1a240`
 - P3f-3: profile file discovery + hash-registration, PR #37, commit `4f0a87b`
-- P6-1: intent router core, PR #50
-- P6-0a: getPiInvocation binary resolution, PR #50
-- P6-0b: role→system-prompt transport (APPROVED 4-round review), PR #50
 
-Current slices:
+### P6 Intent Routing (COMPLETE)
+- P6-0a: getPiInvocation binary resolution, PR #50
+- P6-0b: role→system-prompt transport, PR #50
+- P6-1: pure intent router core, PR #50
+- P6-2: LLM classifier spawn + fallback, PR #58, commit `cc5ca7c`
+- P6-3a: runResolvedTarget extraction, PR #59, commit `df19e14`
+- P6-3b: /agents do wiring, PR #60, commit `cee56ac`
+- P6-4: disambiguation hardening, PR #61, commit `09dfe5e`
+
+### P7 Prompt-Intent Gate (2 of 3)
+- P7-1: config loader + phrase matcher + gate decision engine, PR #64, commit `8d06a9c`
+- P7-2: input hook wiring + confirm flow + disableContextFiles, PR #67, commit `4d61dcd`
+
+### P8 Responsive Agent UX (COMPLETE)
+- P8: non-blocking in-process agent runs + live TUI feedback, PR #65, commit `f599fdd`
+- P8 follow-ups: UX/results/error/timeout, PR #66, commit `b481c58`
+
+Current slice: **P7-3** (regex matching under timeout + metadata, 4 tests planned)
+
+Deferred: **P4R** (Background Agents Remediation, plan at agents/docs/P4_REMEDIATION_PLAN.md)
 
 - P3e: docs, README, user manual, smoke, PR #38, commit `04695e6`
 - P3f-4: runtime profile override + stdout spill, PR #41, commit `4473431`

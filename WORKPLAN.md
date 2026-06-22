@@ -9,12 +9,24 @@ The canonical `pi-extensions` workplan now lives in episodic memory.
 NOT hardcode an episode ID here — it drifts on every revision. The active head is
 the source of truth; older entries in the chain are `superseded`.
 
-## Active implementation (P6 Intent Routing)
+## Active implementation (P7 Prompt-Intent Gate)
 
-- **PR #50 merged.** P6-1 (intent router core), P6-0a (getPiInvocation), P6-0b (role→system-prompt transport) on main.
-- **P6-2 merged (cc5ca7c).** LLM classifier spawn + heuristic fallback on main.
-- **P6-3a merged (df19e14).** runResolvedTarget extraction on main. Next: P6-3b (/agents do wiring).
-- **P6 plan:** `agents/docs/P6_INTENT_ROUTING_PLAN.md` — executor-ready, 5 review passes.
+P7 in progress — 2 of 3 slices complete.
+
+- Current episode ID: `20260621-142943-p7-1-p7-2-merged-pr-64-67-p7-3-regex-mat-2875`
+- Tags include: `canonical-workplan`, `workplan`, `p7`, `p7-3-next`, `p4r-deferred`
+- Summary: P7-1 + P7-2 merged (PR #64, #67); P7-3 regex matching next
+
+### Completed P7 slices
+- P7-1: Config loader + phrase matcher + gate decision engine (PR #64, 8d06a9c)
+- P7-2: Input hook wiring + confirm flow + disableContextFiles (PR #67, 4d61dcd)
+
+### Next
+- P7-3: Regex matching under timeout + metadata (4 tests planned)
+
+### Completed tracks
+- P6 Intent Routing (7 slices, PRs #50, #58, #59, #60, #61)
+- P8 Responsive Agent UX (PR #65, #66)
 
 ## Active design docs (track 2)
 
