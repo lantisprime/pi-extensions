@@ -17,6 +17,16 @@ const RESERVATION_FILE = ".reserved";
 const DONE_FILE = "done";
 const O_NOFOLLOW = (fsConstants as { O_NOFOLLOW?: number }).O_NOFOLLOW;
 
+// N1: getpwuid-based home — ignores $HOME, unlike os.homedir().
+export function resolveTrustedHome(): string {
+	return os.userInfo().homedir;
+}
+
+export function assertManifestIdentityMatchesRuntime(m: BgRunManifest, trusted: { homeDir: string }): void {
+	if (m.options.homeDir !== trusted.homeDir) throw new Error("manifest homeDir does not match trusted runtime");
+	// cwd is advisory identity only — NOT compared (N6).
+}
+
 export type BgRunStatus = "reserved" | "running" | "completed" | "failed" | "timed-out" | "stopped" | "unknown";
 const VALID_BG_RUN_STATUSES = new Set<BgRunStatus>(["reserved", "running", "completed", "failed", "timed-out", "stopped", "unknown"]);
 
@@ -85,15 +95,15 @@ export type CleanupBgStateOptions = {
 	removeEventFiles?: boolean;
 };
 
-export function getBgStateDir(homeDir = os.homedir()): string {
+export function getBgStateDir(homeDir = resolveTrustedHome()): string {
 	return path.join(homeDir, ".pi", "agent", "bg");
 }
 
-export function getBgSessionMacPath(homeDir = os.homedir()): string {
+export function getBgSessionMacPath(homeDir = resolveTrustedHome()): string {
 	return path.join(getBgStateDir(homeDir), SESSION_MAC_FILE);
 }
 
-export function getBgRunPaths(runId: string, homeDir = os.homedir()): BgRunPaths {
+export function getBgRunPaths(runId: string, homeDir = resolveTrustedHome()): BgRunPaths {
 	assertValidRunId(runId);
 	const stateDir = getBgStateDir(homeDir);
 	const runDir = path.join(stateDir, runId);
@@ -109,7 +119,7 @@ export function getBgRunPaths(runId: string, homeDir = os.homedir()): BgRunPaths
 	};
 }
 
-export async function ensureBgStateDir(homeDir = os.homedir()): Promise<string> {
+export async function ensureBgStateDir(homeDir = resolveTrustedHome()): Promise<string> {
 	const stateDir = getBgStateDir(homeDir);
 	await fs.mkdir(homeDir, { recursive: true, mode: 0o700 });
 	await ensureDirectoryNoSymlink(path.join(homeDir, ".pi"), 0o700);
@@ -118,7 +128,7 @@ export async function ensureBgStateDir(homeDir = os.homedir()): Promise<string> 
 	return stateDir;
 }
 
-export async function readOrCreateSessionMacKey(homeDir = os.homedir(), randomBytes: (size: number) => Buffer = cryptoRandomBytes): Promise<Buffer> {
+export async function readOrCreateSessionMacKey(homeDir = resolveTrustedHome(), randomBytes: (size: number) => Buffer = cryptoRandomBytes): Promise<Buffer> {
 	await ensureBgStateDir(homeDir);
 	await assertBgStateRootSafe(getBgStateDir(homeDir));
 	const keyPath = getBgSessionMacPath(homeDir);
@@ -141,13 +151,13 @@ export async function readOrCreateSessionMacKey(homeDir = os.homedir(), randomBy
 	}
 }
 
-export async function readSessionMacKey(homeDir = os.homedir()): Promise<Buffer> {
+export async function readSessionMacKey(homeDir = resolveTrustedHome()): Promise<Buffer> {
 	await assertBgStateRootSafe(getBgStateDir(homeDir));
 	const keyPath = getBgSessionMacPath(homeDir);
 	return parseSessionMac(await readUtf8FileNoSymlink(keyPath, "session MAC key", { requirePrivate: true }), keyPath);
 }
 
-export async function deleteSessionMacKey(homeDir = os.homedir()): Promise<void> {
+export async function deleteSessionMacKey(homeDir = resolveTrustedHome()): Promise<void> {
 	await assertBgStateRootSafe(getBgStateDir(homeDir));
 	const keyPath = getBgSessionMacPath(homeDir);
 	await assertNoSymlink(keyPath, "session MAC key");
@@ -183,7 +193,7 @@ export function generateBgRunId(randomBytes: (size: number) => Buffer = cryptoRa
 }
 
 export async function createBgRunState(options: CreateBgRunOptions = {}): Promise<BgRunPaths> {
-	const homeDir = options.homeDir ?? os.homedir();
+	const homeDir = options.homeDir ?? resolveTrustedHome();
 	await ensureBgStateDir(homeDir);
 	const maxConcurrentRuns = options.maxConcurrentRuns ?? DEFAULT_BG_MAX_CONCURRENT_RUNS;
 	const maxAttempts = options.maxAttempts ?? 16;
@@ -222,7 +232,7 @@ export async function createBgRunState(options: CreateBgRunOptions = {}): Promis
 	throw new Error(`could not allocate background run id after ${maxAttempts} attempts: ${String(lastError)}`);
 }
 
-export async function listBgRuns(homeDir = os.homedir()): Promise<BgRunSummary[]> {
+export async function listBgRuns(homeDir = resolveTrustedHome()): Promise<BgRunSummary[]> {
 	const stateDir = await ensureBgStateDir(homeDir);
 	let entries: string[];
 	try {
@@ -259,7 +269,7 @@ export async function listBgRuns(homeDir = os.homedir()): Promise<BgRunSummary[]
 	return runs.sort((a, b) => b.updatedAtMs - a.updatedAtMs || a.runId.localeCompare(b.runId));
 }
 
-export async function countActiveBgRuns(homeDir = os.homedir()): Promise<number> {
+export async function countActiveBgRuns(homeDir = resolveTrustedHome()): Promise<number> {
 	const runs = await listBgRuns(homeDir);
 	return runs.filter((run) => run.reserved && !run.done).length;
 }
@@ -355,7 +365,7 @@ async function writeJsonAtomic(filePath: string, value: unknown, mode = 0o600): 
 }
 
 export async function cleanupBgStateOnSessionStart(options: CleanupBgStateOptions = {}): Promise<{ prunedRunIds: string[]; removedPromptFiles: string[]; removedEventFiles: string[] }> {
-	const homeDir = options.homeDir ?? os.homedir();
+	const homeDir = options.homeDir ?? resolveTrustedHome();
 	const keepRecentRuns = options.keepRecentRuns ?? DEFAULT_BG_KEEP_RECENT_RUNS;
 	if (!Number.isInteger(keepRecentRuns) || keepRecentRuns < 0) throw new Error("keepRecentRuns must be a non-negative integer");
 	const removePromptFiles = options.removePromptFiles ?? true;
