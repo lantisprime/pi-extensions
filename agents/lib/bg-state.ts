@@ -464,7 +464,6 @@ export async function cleanupBgStateOnSessionStart(options: CleanupBgStateOption
 	const keepRecentRuns = options.keepRecentRuns ?? DEFAULT_BG_KEEP_RECENT_RUNS;
 	if (!Number.isInteger(keepRecentRuns) || keepRecentRuns < 0) throw new Error("keepRecentRuns must be a non-negative integer");
 	const removePromptFiles = options.removePromptFiles ?? true;
-	const removeEventFiles = options.removeEventFiles ?? true;
 	await reapStaleBgRuns(homeDir);
 	const runs = await listBgRuns(homeDir);
 	const completed = runs.filter((run) => run.done).sort((a, b) => b.updatedAtMs - a.updatedAtMs);
@@ -485,12 +484,8 @@ export async function cleanupBgStateOnSessionStart(options: CleanupBgStateOption
 				removedPromptFiles.push(promptPath);
 			}
 		}
-		if (removeEventFiles && run.done) {
-			if (await existsRegularFileNoSymlink(run.eventsPath)) {
-				await fs.rm(run.eventsPath, { force: true });
-				removedEventFiles.push(run.eventsPath);
-			}
-		}
+		// P4R-6: events.jsonl is retained for kept runs; pruned runs already lose it
+	// with their whole dir. (removeEventFiles option removed — always retain.)
 	}
 
 	await retireSessionMacKeyIfFullyIdle(homeDir);

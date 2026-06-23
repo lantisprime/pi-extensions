@@ -37,10 +37,14 @@ security invariants must be preserved.
 > manifest `homeDir` as identity verified against trusted runtime (reject on
 > mismatch). Read the remediation plan for the authoritative design.
 
-The manifest carries only identity — agent name, canonical path, expected hash —
-plus the task text. It does **not** carry execution authority. A separate
-worker process re-derives all authority decisions from disk and trusted
-runtime sources, identical to the sync P3 path.
+The manifest carries identity — agent name, canonical path, expected hash —
+plus the task text and options (cwd, homeDir, maxDurationSec). **homeDir is
+identity verified against `resolveTrustedHome()` (`os.userInfo().homedir`)
+and rejected on mismatch.** All authority roots (bg dir, registry, MAC key,
+results, events) are sourced from `resolveTrustedHome()`, never from `$HOME`,
+`os.homedir()`, or a manifest field. A separate worker process re-derives
+authority decisions from disk and trusted runtime sources, identical to the
+sync P3 path. **First cut: user-registered agents only.**
 
 ```json
 // ~/.pi/agent/bg/<runId>/manifest.json (0600, signed with per-session MAC)
