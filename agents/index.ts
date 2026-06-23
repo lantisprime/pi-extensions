@@ -26,6 +26,7 @@ import { discoverProfiles, rejectDuplicateProfileNames, DEFAULT_PROFILE_DISCOVER
 import { addOrReplaceRegisteredProfile, findMatchingRegisteredProfile, type RegisteredProfile } from "./lib/registry.ts";
 import { runChainCommand } from "./lib/chain-runner.ts";
 import { loadGateConfig, classifyGateIntent, GATE_INSTRUCTIONS } from "./lib/intent-gate.ts";
+import { reapStaleBgRuns, resolveTrustedHome } from "./lib/bg-state.ts";
 import os from "node:os";
 import path from "node:path";
 
@@ -62,8 +63,9 @@ export default function agentsExtension(pi: ExtensionAPI) {
 	const eventApi = pi as ExtensionAPI & { on?: (name: string, handler: (event: unknown, ctx: AgentsContext) => Promise<void> | void) => void };
 	let sessionAgentsCtx: AgentsContext | undefined;
 	// P8-4: clear any live background-run spinner timer + widget when the session shuts down.
-	eventApi.on?.("session_shutdown", (_event, ctx) => {
+	eventApi.on?.("session_shutdown", async (_event, ctx) => {
 		disposeBackgroundRuns(ctx?.ui ?? { setWidget: () => {} });
+		await reapStaleBgRuns(resolveTrustedHome()); // free slots only — NOT key retirement (N5)
 	});
 	eventApi.on?.("session_start", async (_event, ctx) => {
 		sessionAgentsCtx = ctx;

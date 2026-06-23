@@ -22,6 +22,7 @@ import {
   readSessionMacKey,
   reapStaleBgRuns,
   resolveTrustedHome,
+  retireSessionMacKeyIfFullyIdle,
   signBgManifest,
   signBgPayload,
   verifyBgManifest,
@@ -671,6 +672,28 @@ async function testWritePathStillRefuses() {
   });
 }
 
+// ── P4R-5 Group 5: MAC key lifecycle ──
+
+async function testMacKeyRetainedWhileAnyRun() {
+  await withTempHome(async (home) => {
+    await readOrCreateSessionMacKey(home, () => Buffer.alloc(32, 5));
+    await createBgRunState({ homeDir: home, runId: "bg-mac-001", effectiveTimeoutSec: 86_400 });
+    assert.equal(await retireSessionMacKeyIfFullyIdle(home), false);
+    await fs.stat(getBgSessionMacPath(home));
+  });
+}
+
+async function testMacKeyRetiredOnlyWhenFullyIdle() {
+  await withTempHome(async (home) => {
+    await readOrCreateSessionMacKey(home, () => Buffer.alloc(32, 5));
+    const paths = await createBgRunState({ homeDir: home, runId: "bg-mac-002", effectiveTimeoutSec: 60 });
+    await writeBgResult(paths, { version: 1, runId: paths.runId, status: "completed" });
+    await markBgRunDone(paths);
+    assert.equal(await retireSessionMacKeyIfFullyIdle(home), true);
+    await assert.rejects(() => fs.stat(getBgSessionMacPath(home)), /ENOENT/);
+  });
+}
+
 async function main() {
   console.log("P4-1 bg-state tests");
   await test("state directory and paths", testStateDirectoryAndPaths);
@@ -718,6 +741,10 @@ async function main() {
   await test("list quarantines not omits", testListQuarantinesNotOmits);
   await test("quarantined counts active", testQuarantinedCountsActive);
   await test("write path still refuses", testWritePathStillRefuses);
+
+  // Group 4: P4R-5 MAC key lifecycle
+  await test("MAC key retained while any run", testMacKeyRetainedWhileAnyRun);
+  await test("MAC key retired only when fully idle", testMacKeyRetiredOnlyWhenFullyIdle);
   console.log("agents bg-state tests passed");
 }
 

@@ -359,6 +359,16 @@ export async function reapStaleBgRuns(
 	return { reapedRunIds };
 }
 
+export async function retireSessionMacKeyIfFullyIdle(homeDir = resolveTrustedHome()): Promise<boolean> {
+	const runs = await listBgRuns(homeDir);
+	for (const run of runs) {
+		if (run.quarantined) return false;
+		if (run.reserved && !run.done) return false;
+	}
+	await deleteSessionMacKey(homeDir);
+	return true;
+}
+
 export async function writeBgManifest(paths: BgRunPaths, manifest: BgRunManifest): Promise<void> {
 	assertSameRun(paths, manifest.runId);
 	await assertWritableReservedRun(paths);
@@ -483,6 +493,7 @@ export async function cleanupBgStateOnSessionStart(options: CleanupBgStateOption
 		}
 	}
 
+	await retireSessionMacKeyIfFullyIdle(homeDir);
 	return { prunedRunIds, removedPromptFiles, removedEventFiles };
 }
 
