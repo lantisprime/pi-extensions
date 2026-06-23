@@ -510,19 +510,7 @@ async function ensureDirectoryNoSymlink(dirPath: string, mode: number): Promise<
 		if ((error as { code?: string }).code !== "ENOENT") throw error;
 	}
 	await fs.mkdir(dirPath, { mode });
-	try {
-		await assertPrivateDirectorySafe(dirPath, "state directory");
-	} catch (mkdirError) {
-		// EEXIST: another concurrent call created the dir between lstat and mkdir.
-		// Re-validate: ensure it's a directory (not a symlink) with correct mode.
-		const mkErr = mkdirError as { code?: string };
-		if (mkErr.code !== "EEXIST") throw mkdirError;
-		const stat = await fs.lstat(dirPath);
-		if (stat.isSymbolicLink()) throw new Error(`refusing symlinked directory: ${dirPath}`);
-		if (!stat.isDirectory()) throw new Error(`path is not a directory: ${dirPath}`);
-		await fs.chmod(dirPath, mode);
-		await assertPrivateDirectorySafe(dirPath, "state directory");
-	}
+	await assertPrivateDirectorySafe(dirPath, "state directory");
 }
 
 async function assertNoSymlink(targetPath: string, label: string): Promise<void> {
