@@ -80,12 +80,22 @@ export type BgRunSummary = BgRunPaths & {
 	status: BgRunStatus;
 };
 
+export type BgReservation = {
+	pid: number;
+	ownerHandle?: string;
+	startedAtMs: number;
+	effectiveTimeoutSec: number;
+	keyGenId: string;
+};
+
 export type CreateBgRunOptions = {
 	homeDir?: string;
 	runId?: string;
 	generateRunId?: () => string;
 	maxConcurrentRuns?: number;
 	maxAttempts?: number;
+	ownerHandle?: string;
+	effectiveTimeoutSec?: number; // optional-with-default: missing ⇒ BG_MAX_DURATION_SEC (REQ-5)
 };
 
 export type CleanupBgStateOptions = {
@@ -212,7 +222,14 @@ export async function createBgRunState(options: CreateBgRunOptions = {}): Promis
 		try {
 			await assertBgStateRootSafe(paths.stateDir);
 			await fs.mkdir(paths.runDir, { mode: 0o700 });
-			await fs.writeFile(paths.reservationPath, `${process.pid}\n`, { mode: 0o600, flag: "wx" });
+			const reservation: BgReservation = {
+				pid: process.pid,
+				ownerHandle: options.ownerHandle,
+				startedAtMs: Date.now(),
+				effectiveTimeoutSec: options.effectiveTimeoutSec ?? BG_MAX_DURATION_SEC,
+				keyGenId: keyGenIdFromKey(await readOrCreateSessionMacKey(homeDir)),
+			};
+			await fs.writeFile(paths.reservationPath, `${JSON.stringify(reservation)}\n`, { mode: 0o600, flag: "wx" });
 			const activeAfter = await countActiveBgRuns(homeDir);
 			if (activeAfter > maxConcurrentRuns) {
 				await fs.rm(paths.runDir, { recursive: true, force: true });
@@ -230,6 +247,39 @@ export async function createBgRunState(options: CreateBgRunOptions = {}): Promis
 		}
 	}
 	throw new Error(`could not allocate background run id after ${maxAttempts} attempts: ${String(lastError)}`);
+}
+
+async function readReservation(paths: BgRunPaths): Promise<BgReservation> {
+	const fallback: BgReservation = { pid: 0, startedAtMs: Date.now(), effectiveTimeoutSec: BG_MAX_DURATION_SEC, keyGenId: "" };
+	let raw: string;
+	try {
+		raw = await readUtf8FileNoSymlink(paths.reservationPath, "reservation file");
+	} catch (error) {
+		void error;
+		return fallback;
+	}
+	let r: Record<string, unknown>;
+	try {
+		r = JSON.parse(raw);
+	} catch (error) {
+		if (!(error instanceof SyntaxError)) throw error;
+		return fallback;
+	}
+	const startedAtMs = (typeof r.startedAtMs === "number" && Number.isFinite(r.startedAtMs) && r.startedAtMs <= Date.now())
+		? r.startedAtMs : Date.now();
+	const effectiveTimeoutSec = (Number.isInteger(r.effectiveTimeoutSec) && (r.effectiveTimeoutSec as number) > 0)
+		? (r.effectiveTimeoutSec as number) : BG_MAX_DURATION_SEC;
+	return {
+		pid: typeof r.pid === "number" ? r.pid : 0,
+		ownerHandle: typeof r.ownerHandle === "string" ? r.ownerHandle : undefined,
+		startedAtMs,
+		effectiveTimeoutSec,
+		keyGenId: typeof r.keyGenId === "string" ? r.keyGenId : "",
+	};
+}
+
+function isReservationExpired(r: BgReservation): boolean {
+	return Date.now() - r.startedAtMs > r.effectiveTimeoutSec * 1000 + BG_REAP_GRACE_MS;
 }
 
 export async function listBgRuns(homeDir = resolveTrustedHome()): Promise<BgRunSummary[]> {
@@ -271,7 +321,37 @@ export async function listBgRuns(homeDir = resolveTrustedHome()): Promise<BgRunS
 
 export async function countActiveBgRuns(homeDir = resolveTrustedHome()): Promise<number> {
 	const runs = await listBgRuns(homeDir);
-	return runs.filter((run) => run.reserved && !run.done).length;
+	const active = await Promise.all(runs.map(async (run) => {
+		if (run.done) return false;
+		if (!run.reserved) return false;
+		return !isReservationExpired(await readReservation(getBgRunPaths(run.runId, homeDir)));
+	}));
+	return active.filter(Boolean).length;
+}
+
+export async function reapStaleBgRuns(
+	homeDir = resolveTrustedHome(),
+	opts?: { isAlive?: (h: string) => boolean },
+): Promise<{ reapedRunIds: string[] }> {
+	const reapedRunIds: string[] = [];
+	for (const run of await listBgRuns(homeDir)) {
+		if (run.done || !run.reserved) continue;
+		const paths = getBgRunPaths(run.runId, homeDir);
+		const r = await readReservation(paths);
+		const expired = isReservationExpired(r);
+		const dead = opts?.isAlive && r.ownerHandle ? !opts.isAlive(r.ownerHandle) : false;
+		if (!expired && !dead) continue;
+		try {
+			await writeBgResult(paths, { version: 1, runId: run.runId, status: expired ? "timed-out" : "stopped" });
+			await markBgRunDone(paths);
+			reapedRunIds.push(run.runId);
+		} catch (error) {
+			const code = (error as { code?: string }).code;
+			if (code === "ENOENT" || code === "EEXIST" || /already done|not reserved/.test(String((error as Error).message))) continue;
+			throw error;
+		}
+	}
+	return { reapedRunIds };
 }
 
 export async function writeBgManifest(paths: BgRunPaths, manifest: BgRunManifest): Promise<void> {
@@ -370,6 +450,7 @@ export async function cleanupBgStateOnSessionStart(options: CleanupBgStateOption
 	if (!Number.isInteger(keepRecentRuns) || keepRecentRuns < 0) throw new Error("keepRecentRuns must be a non-negative integer");
 	const removePromptFiles = options.removePromptFiles ?? true;
 	const removeEventFiles = options.removeEventFiles ?? true;
+	await reapStaleBgRuns(homeDir);
 	const runs = await listBgRuns(homeDir);
 	const completed = runs.filter((run) => run.done).sort((a, b) => b.updatedAtMs - a.updatedAtMs);
 	const prunedRunIds: string[] = [];
