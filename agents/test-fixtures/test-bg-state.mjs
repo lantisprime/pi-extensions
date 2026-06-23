@@ -237,7 +237,9 @@ async function testSymlinkedRunDirRefused() {
     await fs.mkdir(outside);
     await fs.symlink(outside, path.join(getBgStateDir(home), "bg-test-0007"));
     await assert.rejects(() => createBgRunState({ homeDir: home, runId: "bg-test-0007" }), /refusing symlinked background run directory/);
-    await assert.rejects(() => listBgRuns(home), /refusing symlinked background run directory/);
+    const runs = await listBgRuns(home);
+    const q = runs.find((r) => r.runId === "bg-test-0007");
+    assert.ok(q && q.quarantined === true);
   });
 }
 
@@ -634,6 +636,41 @@ async function testReaperNeverSignals() {
   });
 }
 
+// ── P4R-2 Group 2: tolerant + honest listing ──
+
+async function testListQuarantinesNotOmits() {
+  await withTempHome(async (home, root) => {
+    await ensureBgStateDir(home);
+    const outside = path.join(root, "outside-run");
+    await fs.mkdir(outside);
+    await fs.symlink(outside, path.join(getBgStateDir(home), "bg-quar-001"));
+    const runs = await listBgRuns(home);
+    const q = runs.find((r) => r.runId === "bg-quar-001");
+    assert.ok(q && q.quarantined === true);
+  });
+}
+
+async function testQuarantinedCountsActive() {
+  await withTempHome(async (home, root) => {
+    await ensureBgStateDir(home);
+    const outside = path.join(root, "outside-run-2");
+    await fs.mkdir(outside);
+    await fs.symlink(outside, path.join(getBgStateDir(home), "bg-quar-002"));
+    assert.equal(await countActiveBgRuns(home), 1);
+  });
+}
+
+async function testWritePathStillRefuses() {
+  await withTempHome(async (home) => {
+    const paths = await createBgRunState({ homeDir: home, runId: "bg-quar-003", effectiveTimeoutSec: 60 });
+    const outside = path.join(home, "outside-reservation");
+    await fs.writeFile(outside, "x\n");
+    await fs.rm(paths.reservationPath, { force: true });
+    await fs.symlink(outside, paths.reservationPath);
+    await assert.rejects(() => writeBgResult(paths, { version: 1, runId: paths.runId, status: "completed" }), /refusing symlinked state path|not reserved/);
+  });
+}
+
 async function main() {
   console.log("P4-1 bg-state tests");
   await test("state directory and paths", testStateDirectoryAndPaths);
@@ -645,7 +682,8 @@ async function main() {
   await test("manifest/result require reservation", testManifestAndResultRequireReservation);
   await test("run id collision retry", testRunIdCollisionRetriesAndExplicitCollisionFails);
   await test("concurrency limit", testConcurrencyLimit);
-  await test("symlinked run dir refused", testSymlinkedRunDirRefused);
+  // Now quarantines instead of throwing; write path still refuses
+  await test("symlinked run dir quarantined", testSymlinkedRunDirRefused);
   await test("done directory and invalid result status are unknown", testDoneDirectoryAndInvalidResultStatusAreUnknown);
   await test("done plus reserved rejects further writes", testDonePlusReservedRejectsFurtherWrites);
   await test("lifecycle writers reject symlink targets", testLifecycleWritersRejectSymlinkTargets);
@@ -675,6 +713,11 @@ async function main() {
   await test("reap expired frees slot with no signal", testReapExpiredFreesSlotNoSignal);
   await test("reap uses injected isAlive", testReapUsesInjectedIsAlive);
   await test("reaper never signals", testReaperNeverSignals);
+
+  // Group 2: P4R-2 tolerant + honest listing
+  await test("list quarantines not omits", testListQuarantinesNotOmits);
+  await test("quarantined counts active", testQuarantinedCountsActive);
+  await test("write path still refuses", testWritePathStillRefuses);
   console.log("agents bg-state tests passed");
 }
 

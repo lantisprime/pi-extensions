@@ -78,6 +78,7 @@ export type BgRunSummary = BgRunPaths & {
 	reserved: boolean;
 	done: boolean;
 	status: BgRunStatus;
+	quarantined?: boolean;
 };
 
 export type BgReservation = {
@@ -303,7 +304,10 @@ export async function listBgRuns(homeDir = resolveTrustedHome()): Promise<BgRunS
 			if ((error as { code?: string }).code === "ENOENT") continue;
 			throw error;
 		}
-		if (stat.isSymbolicLink()) throw new Error(`refusing symlinked background run directory: ${paths.runDir}`);
+		if (stat.isSymbolicLink()) {
+			runs.push({ ...paths, createdAtMs: 0, updatedAtMs: 0, reserved: true, done: false, status: "unknown", quarantined: true });
+			continue;
+		}
 		if (!stat.isDirectory()) continue;
 		const reserved = await existsRegularFileNoSymlink(paths.reservationPath);
 		const done = await existsRegularFileNoSymlink(paths.donePath);
@@ -323,6 +327,7 @@ export async function countActiveBgRuns(homeDir = resolveTrustedHome()): Promise
 	const runs = await listBgRuns(homeDir);
 	const active = await Promise.all(runs.map(async (run) => {
 		if (run.done) return false;
+		if (run.quarantined) return true;            // active-unless-proven-done (REQ-7)
 		if (!run.reserved) return false;
 		return !isReservationExpired(await readReservation(getBgRunPaths(run.runId, homeDir)));
 	}));
