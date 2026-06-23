@@ -13,11 +13,15 @@ import {
   getBgRunPaths,
   getBgSessionMacPath,
   getBgStateDir,
+  keyGenIdFromKey,
   listBgRuns,
   markBgRunDone,
+  readBgManifest,
   readOrCreateSessionMacKey,
   readSessionMacKey,
+  signBgManifest,
   signBgPayload,
+  verifyBgManifest,
   verifyBgPayloadMac,
   writeBgManifest,
   writeBgResult,
@@ -331,6 +335,163 @@ async function testCleanupPrunesCompletedAndRemovesPromptFiles() {
   });
 }
 
+// ── P4R-3 Group 3: manifest integrity + schema + keyGenId ──
+
+async function testCanonicalRejectsNonFinite() {
+  await withTempHome(async (home) => {
+    const key = await readOrCreateSessionMacKey(home, () => Buffer.alloc(32, 1));
+    assert.throws(() => signBgPayload({ x: Infinity }, key), /non-finite number/);
+    assert.throws(() => signBgPayload({ x: -Infinity }, key), /non-finite number/);
+    assert.throws(() => signBgPayload({ x: NaN }, key), /non-finite number/);
+  });
+}
+
+async function testManifestSignRoundTrip() {
+  await withTempHome(async (home) => {
+    const key = await readOrCreateSessionMacKey(home, () => Buffer.alloc(32, 2));
+    const manifest = {
+      version: 1,
+      runId: "bg-test-roundtrip",
+      identity: { agentName: "scout", canonicalPath: "/tmp/agent.md", expectedHash: "b".repeat(64) },
+      task: "check security",
+      options: { cwd: "/tmp/work", homeDir: home, maxDurationSec: 60 },
+      keyGenId: keyGenIdFromKey(key),
+    };
+    const mac = signBgManifest(manifest, key);
+    const withMac = { ...manifest, mac };
+    assert.equal(verifyBgManifest(withMac, key), true);
+  });
+}
+
+async function testManifestTamperFails() {
+  await withTempHome(async (home) => {
+    const key = await readOrCreateSessionMacKey(home, () => Buffer.alloc(32, 3));
+    const manifest = {
+      version: 1,
+      runId: "bg-test-tamper",
+      identity: { agentName: "scout", canonicalPath: "/tmp/agent.md", expectedHash: "c".repeat(64) },
+      task: "scan",
+      options: { cwd: "/tmp/work", homeDir: home },
+      keyGenId: keyGenIdFromKey(key),
+    };
+    const mac = signBgManifest(manifest, key);
+    const withMac = { ...manifest, mac };
+    assert.equal(verifyBgManifest(withMac, key), true);
+    // Tamper the task
+    assert.equal(verifyBgManifest({ ...withMac, task: "different task" }, key), false);
+  });
+}
+
+async function testManifestWrongKeyFails() {
+  await withTempHome(async (home) => {
+    const key = await readOrCreateSessionMacKey(home, () => Buffer.alloc(32, 4));
+    const wrongKey = Buffer.alloc(32, 5);
+    const manifest = {
+      version: 1,
+      runId: "bg-test-wrongkey",
+      identity: { agentName: "scout", canonicalPath: "/tmp/agent.md", expectedHash: "d".repeat(64) },
+      task: "audit",
+      options: { cwd: "/tmp/work", homeDir: home },
+      keyGenId: keyGenIdFromKey(key),
+    };
+    const mac = signBgManifest(manifest, key);
+    const withMac = { ...manifest, mac };
+    assert.equal(verifyBgManifest(withMac, wrongKey), false);
+  });
+}
+
+async function testReadManifestValid() {
+  await withTempHome(async (home) => {
+    const key = await readOrCreateSessionMacKey(home, () => Buffer.alloc(32, 6));
+    const paths = await createBgRunState({ homeDir: home, runId: "bg-test-read-valid" });
+    const manifest = {
+      version: 1,
+      runId: paths.runId,
+      identity: { agentName: "reviewer", canonicalPath: "/tmp/reviewer.md", expectedHash: "e".repeat(64) },
+      task: "review code",
+      options: { cwd: "/tmp/project", homeDir: home, maxDurationSec: 90 },
+      keyGenId: keyGenIdFromKey(key),
+    };
+    const mac = signBgManifest(manifest, key);
+    await writeBgManifest(paths, { ...manifest, mac });
+    const read = await readBgManifest(paths);
+    assert.equal(read.version, 1);
+    assert.equal(read.runId, paths.runId);
+    assert.equal(read.identity.agentName, "reviewer");
+    assert.equal(read.task, "review code");
+    assert.equal(read.mac, mac);
+  });
+}
+
+async function testReadManifestRejectsUnknownField() {
+  await withTempHome(async (home) => {
+    const paths = await createBgRunState({ homeDir: home, runId: "bg-test-read-unknown" });
+    const badManifest = {
+      version: 1,
+      runId: paths.runId,
+      identity: { agentName: "x", canonicalPath: "/tmp/x.md", expectedHash: "f".repeat(64) },
+      task: "x",
+      options: { cwd: "/tmp", homeDir: home },
+      mac: "a".repeat(64),
+      keyGenId: "aaaaaaaa",
+      extraField: "should be rejected",
+    };
+    await fs.writeFile(paths.manifestPath, JSON.stringify(badManifest), { mode: 0o600 });
+    await assert.rejects(() => readBgManifest(paths), /unknown manifest key/);
+  });
+}
+
+async function testReadManifestTaskTooLarge() {
+  await withTempHome(async (home) => {
+    const paths = await createBgRunState({ homeDir: home, runId: "bg-test-read-large" });
+    const badManifest = {
+      version: 1,
+      runId: paths.runId,
+      identity: { agentName: "x", canonicalPath: "/tmp/x.md", expectedHash: "01".repeat(32) },
+      task: "x".repeat(70_000),
+      options: { cwd: "/tmp", homeDir: home },
+      mac: "b".repeat(64),
+      keyGenId: "bbbbbbbb",
+    };
+    await fs.writeFile(paths.manifestPath, JSON.stringify(badManifest), { mode: 0o600 });
+    await assert.rejects(() => readBgManifest(paths), /exceeds max bytes/);
+  });
+}
+
+async function testReadManifestBadTimeout() {
+  await withTempHome(async (home) => {
+    const paths = await createBgRunState({ homeDir: home, runId: "bg-test-read-timeout" });
+    const badManifest = {
+      version: 1,
+      runId: paths.runId,
+      identity: { agentName: "x", canonicalPath: "/tmp/x.md", expectedHash: "02".repeat(32) },
+      task: "x",
+      options: { cwd: "/tmp", homeDir: home, maxDurationSec: 999999 },
+      mac: "c".repeat(64),
+      keyGenId: "cccccccc",
+    };
+    await fs.writeFile(paths.manifestPath, JSON.stringify(badManifest), { mode: 0o600 });
+    await assert.rejects(() => readBgManifest(paths), /maxDurationSec/);
+  });
+}
+
+async function testKeyGenMismatchRejected() {
+  await withTempHome(async (home) => {
+    const key = await readOrCreateSessionMacKey(home, () => Buffer.alloc(32, 7));
+    const manifest = {
+      version: 1,
+      runId: "bg-test-keygen",
+      identity: { agentName: "scout", canonicalPath: "/tmp/agent.md", expectedHash: "03".repeat(32) },
+      task: "scan",
+      options: { cwd: "/tmp/work", homeDir: home },
+      keyGenId: "deadbeef", // wrong keyGenId
+    };
+    const mac = signBgManifest(manifest, key);
+    const withMac = { ...manifest, mac };
+    assert.equal(verifyBgManifest(withMac, key), false);
+  });
+}
+
 async function main() {
   console.log("P4-1 bg-state tests");
   await test("state directory and paths", testStateDirectoryAndPaths);
@@ -347,6 +508,17 @@ async function main() {
   await test("done plus reserved rejects further writes", testDonePlusReservedRejectsFurtherWrites);
   await test("lifecycle writers reject symlink targets", testLifecycleWritersRejectSymlinkTargets);
   await test("cleanup prunes completed runs and prompt files", testCleanupPrunesCompletedAndRemovesPromptFiles);
+
+  // Group 3: P4R-3 manifest integrity + schema + keyGenId
+  await test("canonical rejects non-finite numbers", testCanonicalRejectsNonFinite);
+  await test("manifest sign round-trip", testManifestSignRoundTrip);
+  await test("manifest tamper fails", testManifestTamperFails);
+  await test("manifest wrong key fails", testManifestWrongKeyFails);
+  await test("read manifest valid", testReadManifestValid);
+  await test("read manifest rejects unknown field", testReadManifestRejectsUnknownField);
+  await test("read manifest rejects oversized task", testReadManifestTaskTooLarge);
+  await test("read manifest rejects bad timeout", testReadManifestBadTimeout);
+  await test("keyGenId mismatch rejected", testKeyGenMismatchRejected);
   console.log("agents bg-state tests passed");
 }
 

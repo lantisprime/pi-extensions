@@ -38,17 +38,21 @@ Completed and merged:
 - P6-3b: /agents do wiring, PR #60, commit `cee56ac`
 - P6-4: disambiguation hardening, PR #61, commit `09dfe5e`
 
-### P7 Prompt-Intent Gate (2 of 3)
+### P7 Prompt-Intent Gate (COMPLETE)
 - P7-1: config loader + phrase matcher + gate decision engine, PR #64, commit `8d06a9c`
 - P7-2: input hook wiring + confirm flow + disableContextFiles, PR #67, commit `4d61dcd`
+- P7-3: regex matching under timeout + worker timeout fix, PR #69/#70, commits `ed12dc1`/`c5fe526`
 
 ### P8 Responsive Agent UX (COMPLETE)
 - P8: non-blocking in-process agent runs + live TUI feedback, PR #65, commit `f599fdd`
 - P8 follow-ups: UX/results/error/timeout, PR #66, commit `b481c58`
 
-Current slice: **P7-3** (regex matching under timeout + metadata, 4 tests planned)
-
-Deferred: **P4R** (Background Agents Remediation, plan at agents/docs/P4_REMEDIATION_PLAN.md)
+### P4R Background Agents Remediation (NEXT)
+- Plan: agents/docs/P4_REMEDIATION_PLAN.md — v3 GO consensus
+- 6 remediation slices all editing `agents/lib/bg-state.ts`: P4R-3 -> P4R-0 -> P4R-1 -> P4R-2 -> P4R-5 -> P4R-6
+- First cut: user-registered agents only (no project trust needed)
+- Feeds into P4-2 (preflight) and P4-3 (worker)
+- Deferred: P4R-PROJ (project background agents, needs disk-trust reader)
 
 - P3e: docs, README, user manual, smoke, PR #38, commit `04695e6`
 - P3f-4: runtime profile override + stdout spill, PR #41, commit `4473431`
