@@ -9,28 +9,30 @@ The canonical `pi-extensions` workplan now lives in episodic memory.
 NOT hardcode an episode ID here — it drifts on every revision. The active head is
 the source of truth; older entries in the chain are `superseded`.
 
-## Active implementation (P7 Prompt-Intent Gate)
+## Active implementation (P4R Background Agents Remediation)
 
-P7 in progress — 2 of 3 slices complete.
+P7 complete. P4R is next.
 
-- Current episode ID: `20260621-142943-p7-1-p7-2-merged-pr-64-67-p7-3-regex-mat-2875`
-- Tags include: `canonical-workplan`, `workplan`, `p7`, `p7-3-next`, `p4r-deferred`
-- Summary: P7-1 + P7-2 merged (PR #64, #67); P7-3 regex matching next
-
-### Completed P7 slices
-- P7-1: Config loader + phrase matcher + gate decision engine (PR #64, 8d06a9c)
-- P7-2: Input hook wiring + confirm flow + disableContextFiles (PR #67, 4d61dcd)
-
-### Next
-- P7-3: Regex matching under timeout + metadata (4 tests planned)
+- Current episode ID: `20260623-022018-p7-complete-p4r-next-background-agents-r-32bf`
+- Tags include: `canonical-workplan`, `workplan`, `p4r-next`, `p7-complete`
+- Summary: P7 complete, P4R next: Background Agents Remediation
 
 ### Completed tracks
 - P6 Intent Routing (7 slices, PRs #50, #58, #59, #60, #61)
-- P8 Responsive Agent UX (PR #65, #66)
+- P7 Prompt-Intent Gate (3 slices, PRs #64, #67, #69, #70)
+- P8 Responsive Agent UX (PRs #65, #66)
 
-## Active design docs (track 2)
+### Next
+- P4R-3 (manifest integrity + keyGenId) — builds first
+- P4R-0 (authority-root binding — os.userInfo().homedir, not $HOME)
+- P4R-1 (reservation + no-kill reaping)
+- P4R-2 (tolerant listing)
+- P4R-5 (MAC key lifecycle)
+- P4R-6 (hygiene + docs correction)
 
-- `agents/docs/P4_REMEDIATION_PLAN.md` — **GO** (cross-model consensus). Gates P4-2/P4-3. Awaiting build (Rule 18 step 4).
+### Active design docs
+
+- `agents/docs/P4_REMEDIATION_PLAN.md` — v3 GO consensus. 6 remediation slices + deferred project-agents slice. All edit `agents/lib/bg-state.ts`.
 - `agents/docs/P4_BACKGROUND_AGENTS_PLAN.md` — parent plan (to be corrected in P4R-6).
 - `agents/docs/P5_PLUGGABLE_TERMINAL_BACKEND.md` — parallel track.
 

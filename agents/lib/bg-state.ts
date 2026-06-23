@@ -7,6 +7,9 @@ export const BG_STATE_VERSION = 1;
 export const DEFAULT_BG_MAX_CONCURRENT_RUNS = 5;
 export const DEFAULT_BG_KEEP_RECENT_RUNS = 20;
 export const BG_SESSION_MAC_BYTES = 32;
+export const BG_REAP_GRACE_MS = 30_000;
+export const BG_MAX_TASK_BYTES = 64_000;
+export const BG_MAX_DURATION_SEC = 86_400;
 
 const RUN_ID_PATTERN = /^[A-Za-z0-9_-]{8,80}$/;
 const SESSION_MAC_FILE = ".session.mac";
@@ -34,6 +37,7 @@ export type BgRunManifest = {
 		homeDir: string;
 	};
 	mac: string;
+	keyGenId: string;
 };
 
 export type BgRunResult = {
@@ -161,6 +165,19 @@ export function verifyBgPayloadMac(payload: unknown, key: Buffer, mac: string): 
 	return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
+export function keyGenIdFromKey(key: Buffer): string {
+	return createHmac("sha256", key).update("keygen").digest("hex").slice(0, 8);
+}
+
+export function signBgManifest(m: Omit<BgRunManifest, "mac">, key: Buffer): string {
+	return signBgPayload(m, key);
+}
+
+export function verifyBgManifest(m: BgRunManifest, key: Buffer): boolean {
+	const copy = { ...m, mac: undefined };
+	return verifyBgPayloadMac(copy, key, m.mac) && m.keyGenId === keyGenIdFromKey(key);
+}
+
 export function generateBgRunId(randomBytes: (size: number) => Buffer = cryptoRandomBytes): string {
 	return `bg-${Date.now().toString(36)}-${randomBytes(8).toString("hex")}`;
 }
@@ -251,6 +268,60 @@ export async function writeBgManifest(paths: BgRunPaths, manifest: BgRunManifest
 	assertSameRun(paths, manifest.runId);
 	await assertWritableReservedRun(paths);
 	await writeJsonAtomic(paths.manifestPath, manifest, 0o600);
+}
+
+const ALLOWED_MANIFEST_KEYS = new Set(["version", "runId", "identity", "task", "options", "mac", "keyGenId"]);
+const ALLOWED_OPTIONS_KEYS = new Set(["cwd", "homeDir", "maxDurationSec"]);
+const IDENTITY_KEYS = new Set(["agentName", "canonicalPath", "expectedHash"]);
+const HEX64_RE = /^[0-9a-f]{64}$/;
+const HEX8_RE = /^[0-9a-f]{8}$/;
+
+export async function readBgManifest(paths: BgRunPaths): Promise<BgRunManifest> {
+	const raw = await readUtf8FileNoSymlink(paths.manifestPath, "manifest");
+	let parsed: Record<string, unknown>;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		throw new Error("manifest is not valid JSON");
+	}
+	if (typeof parsed !== "object" || parsed === null) throw new Error("manifest is not an object");
+
+	for (const key of Object.keys(parsed)) {
+		if (!ALLOWED_MANIFEST_KEYS.has(key)) throw new Error(`unknown manifest key: ${key}`);
+	}
+
+	if (parsed.version !== 1) throw new Error("manifest version must be 1");
+	if (typeof parsed.runId !== "string" || parsed.runId !== paths.runId) throw new Error("manifest runId mismatch");
+
+	const identity = parsed.identity as Record<string, unknown> | undefined;
+	if (typeof identity !== "object" || identity === null) throw new Error("manifest identity must be an object");
+	for (const k of Object.keys(identity)) {
+		if (!IDENTITY_KEYS.has(k)) throw new Error(`unknown manifest identity key: ${k}`);
+	}
+	if (typeof identity.agentName !== "string" || !identity.agentName) throw new Error("manifest identity.agentName must be a non-empty string");
+	if (typeof identity.canonicalPath !== "string" || !identity.canonicalPath) throw new Error("manifest identity.canonicalPath must be a non-empty string");
+	if (typeof identity.expectedHash !== "string" || !/^[0-9a-f]{64}$/.test(identity.expectedHash)) throw new Error("manifest identity.expectedHash must be a 64-char hex string");
+
+	if (typeof parsed.task !== "string") throw new Error("manifest task must be a string");
+	if (Buffer.byteLength(parsed.task, "utf8") > BG_MAX_TASK_BYTES) throw new Error("manifest task exceeds max bytes");
+
+	const options = parsed.options as Record<string, unknown> | undefined;
+	if (typeof options !== "object" || options === null) throw new Error("manifest options must be an object");
+	for (const k of Object.keys(options)) {
+		if (!ALLOWED_OPTIONS_KEYS.has(k)) throw new Error(`unknown manifest options key: ${k}`);
+	}
+	if (typeof options.cwd !== "string") throw new Error("manifest options.cwd must be a string");
+	if (typeof options.homeDir !== "string") throw new Error("manifest options.homeDir must be a string");
+	if (options.maxDurationSec !== undefined && options.maxDurationSec !== null) {
+		if (!Number.isInteger(options.maxDurationSec) || (options.maxDurationSec as number) < 1 || (options.maxDurationSec as number) > BG_MAX_DURATION_SEC) {
+			throw new Error("manifest options.maxDurationSec must be an integer between 1 and BG_MAX_DURATION_SEC");
+		}
+	}
+
+	if (typeof parsed.mac !== "string" || !HEX64_RE.test(parsed.mac)) throw new Error("manifest mac must be a 64-char hex string");
+	if (typeof parsed.keyGenId !== "string" || !HEX8_RE.test(parsed.keyGenId)) throw new Error("manifest keyGenId must be an 8-char hex string");
+
+	return parsed as unknown as BgRunManifest;
 }
 
 export async function writeBgResult(paths: BgRunPaths, result: BgRunResult): Promise<void> {
@@ -533,5 +604,10 @@ function canonicalJson(value: unknown): string {
 			.map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
 			.join(",")}}`;
 	}
-	return JSON.stringify(value);
+	if (typeof value === "number") {
+		if (!Number.isFinite(value)) throw new Error("non-finite number in signed payload");
+		return JSON.stringify(value);
+	}
+	if (typeof value === "string" || typeof value === "boolean" || value === null) return JSON.stringify(value);
+	throw new Error("unsupported type in signed payload: " + typeof value);
 }
