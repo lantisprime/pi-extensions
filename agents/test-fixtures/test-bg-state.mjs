@@ -672,6 +672,31 @@ async function testWritePathStillRefuses() {
   });
 }
 
+// Expired quarantined run: the quarantined branch in countActiveBgRuns is
+// load-bearing. Without it, an expired+quarantined run is not counted active
+// (isReservationExpired returns true → !true = false). With it, quarantined
+// bypasses expiry (active-unless-proven-done).
+async function testQuarantinedExpiredKeptActive() {
+  await withTempHome(async (home, root) => {
+    // Create a symlinked run dir (listBgRuns returns it as quarantined:true)
+    await ensureBgStateDir(home);
+    const outside = path.join(root, "outside-expired-quar");
+    await fs.mkdir(outside);
+    const bgDir = getBgStateDir(home);
+    await fs.symlink(outside, path.join(bgDir, "bg-quar-expired"));
+    // Write an expired reservation in the target dir so readReservation
+    // returns age-expired. Without the quarantined branch, countActiveBgRuns
+    // would exclude it.
+    const expiredResv = JSON.stringify({ pid: 1, startedAtMs: Date.now() - 10_000_000, effectiveTimeoutSec: 1, keyGenId: "00000000" }) + "\n";
+    await fs.writeFile(path.join(outside, ".reserved"), expiredResv, { mode: 0o600 });
+
+    assert.equal(await countActiveBgRuns(home), 1, "quarantined keeps expired run active");
+    // Also asserts retireSessionMacKeyIfFullyIdle retains key (quarantined bypasses
+    // reserve-expiry here; the reserved&&!done check would also catch this entry).
+    assert.equal(await retireSessionMacKeyIfFullyIdle(home), false, "quarantined retains MAC key");
+  });
+}
+
 // ── P4R-5 Group 5: MAC key lifecycle ──
 
 async function testMacKeyRetainedWhileAnyRun() {
@@ -741,6 +766,7 @@ async function main() {
   await test("list quarantines not omits", testListQuarantinesNotOmits);
   await test("quarantined counts active", testQuarantinedCountsActive);
   await test("write path still refuses", testWritePathStillRefuses);
+  await test("quarantined expired kept active", testQuarantinedExpiredKeptActive);
 
   // Group 4: P4R-5 MAC key lifecycle
   await test("MAC key retained while any run", testMacKeyRetainedWhileAnyRun);
