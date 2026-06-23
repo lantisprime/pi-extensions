@@ -46,6 +46,8 @@ type AgentsContext = {
 	// Resolved trust + registry for the run path (project-profile trust check needs these).
 	projectTrusted?: boolean;
 	projectRegistry?: import("./lib/registry.ts").ProjectAgentRegistry;
+	// SEC-5: gate-routed children set this so the child run passes --no-context-files.
+	disableContextFiles?: boolean;
 	ui: {
 		notify(message: string, level?: "info" | "warning" | "error" | string): void;
 		confirm?(title: string, message: string): Promise<boolean> | boolean;
@@ -94,7 +96,7 @@ export default function agentsExtension(pi: ExtensionAPI) {
 	// P7-2: prompt-intent gate — intercept natural-language prompts before model processing.
 	// Gate disables itself for /commands, non-TUI sessions, untrusted projects, and missing config.
 	eventApi.on?.("input", async (event: { text: string }, ctx: AgentsContext) => {
-		const result = await handleGateInput(event.text, ctx);
+		const result = await handleGateInput(event.text, ctx, sessionAgentsCtx);
 		return result;
 	});
 
@@ -231,6 +233,7 @@ export const __gateDispatch = { fn: dispatchChildRun };
 export async function handleGateInput(
 	text: string,
 	ctx: AgentsContext,
+	sessionCtx?: AgentsContext,
 ): Promise<{ action: "continue" | "handled" | "transform"; text?: string }> {
 	// REQ-9: skip non-TUI sessions
 	if (!ctx.hasUI) return { action: "continue" };
@@ -260,6 +263,21 @@ export async function handleGateInput(
 
 		// REQ-SEC-5: gate-routed children must disable context files
 		ctx.disableContextFiles = true;
+
+		// The "input" event hands us a fresh ctx without the session-built profile library, so a
+		// config-named profile (any source — user, project, or built-in) would fail to resolve with
+		// "no profile library is available". Re-attach the session library, and thread the *resolved*
+		// project trust + registry (never hardcoded) so project-source profiles also pass the runtime
+		// trust check. Mirrors the /agents command handler's session-state re-attach.
+		if (!ctx.profileLibrary && sessionCtx?.profileLibrary) {
+			ctx.profileLibrary = sessionCtx.profileLibrary;
+			ctx.profileLibraryWarnings = sessionCtx.profileLibraryWarnings;
+		}
+		if (decision.profile) {
+			const diagnostics = await collectAgentDiagnostics({ cwd: ctx.cwd, homeDir: ctx.agentsHomeDir, projectTrusted });
+			ctx.projectTrusted = diagnostics.projectTrusted;
+			ctx.projectRegistry = diagnostics.projectRegistry;
+		}
 
 		// C3: config-chosen agent = spawned agent — direct dispatch, no re-classification.
 		// Bypasses runIntentCommand's classifier + auto-run rail (SEC-3 satisfied).

@@ -326,6 +326,38 @@ async function testGate_configProfileFlagPrepended() {
 	});
 }
 
+// Regression: the "input" event hands the gate a fresh ctx WITHOUT the session-built profile
+// library, so a config-named profile failed at runtime with
+//   "profile '<name>' requested but no profile library is available"  (reviewer spawn-error).
+// The input hook now re-attaches the session library before dispatch. Generic across profile
+// sources (user/project/built-in) — the library carries all of them; nothing project-specific
+// is hardcoded.
+async function testGate_inputHookReattachesProfileLibrary() {
+	const intents = [{ id: "review", match: { phrases: ["review"] }, workflow: { kind: "review", profile: "code-review" } }];
+	const sessionLib = { profiles: [{ name: "code-review", model: "m" }] };
+	let captured = null;
+	__gateDispatch.fn = async (agent, task, ctx) => { captured = ctx; };
+
+	const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-test-gate-home-"));
+	try {
+		await withGateConfig(intents, async (dir) => {
+			// Fresh input-event ctx (no profileLibrary); session ctx carries the built library.
+			const ctx = makeGateCtx({ cwd: dir, agentsHomeDir: homeDir });
+			const sessionCtx = { profileLibrary: sessionLib, profileLibraryWarnings: [] };
+			await handleGateInput("please review this", ctx, sessionCtx);
+			assert.ok(captured, "dispatch called");
+			assert.equal(captured.profileLibrary, sessionLib, "session profile library re-attached onto the input ctx");
+
+			// Negative control: without a session ctx the library stays absent — the exact bug condition.
+			captured = null;
+			const ctx2 = makeGateCtx({ cwd: dir, agentsHomeDir: homeDir });
+			await handleGateInput("please review this", ctx2);
+			assert.ok(captured, "dispatch called (no sessionCtx)");
+			assert.equal(captured.profileLibrary, undefined, "without sessionCtx the library is absent (repros the spawn-error)");
+		});
+	} finally { await fs.rm(homeDir, { recursive: true, force: true }).catch(() => {}); }
+}
+
 // REQ-5 / REQ-SEC-4: plan-only injects code-owned instruction
 async function testGate_nlPlanOnlyInjectsInstruction() {
 	const intents = [{ id: "plan", match: { phrases: ["create a plan"] }, workflow: { kind: "plan-only" } }];
@@ -520,6 +552,7 @@ async function main() {
 	await testGate_nlRoutingAlwaysConfirms();
 	await testGate_nlRoutingConfirmDeclinedNoRun();
 	await testGate_configProfileFlagPrepended();
+	await testGate_inputHookReattachesProfileLibrary();
 	await testGate_nlPlanOnlyInjectsInstruction();
 	await testGate_planOnlyInstructionIsCodeOwned();
 	await testGate_routedChildDisablesContextFiles();
@@ -531,7 +564,7 @@ async function main() {
 	await testGate_regexWithPhrase();
 	await testGate_regexTimeout();
 
-	console.log("OK: 26/26 tests passed");
+	console.log("OK: 27/27 tests passed");
 }
 
 main().catch((error) => { console.error(error); process.exit(1); });
