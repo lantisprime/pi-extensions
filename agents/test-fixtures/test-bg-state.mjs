@@ -5,6 +5,7 @@ import path from "node:path";
 
 import {
   appendBgEvent,
+  assertManifestIdentityMatchesRuntime,
   cleanupBgStateOnSessionStart,
   countActiveBgRuns,
   createBgRunState,
@@ -19,6 +20,7 @@ import {
   readBgManifest,
   readOrCreateSessionMacKey,
   readSessionMacKey,
+  resolveTrustedHome,
   signBgManifest,
   signBgPayload,
   verifyBgManifest,
@@ -337,6 +339,18 @@ async function testCleanupPrunesCompletedAndRemovesPromptFiles() {
 
 // ── P4R-3 Group 3: manifest integrity + schema + keyGenId ──
 
+function validManifest(home, key) {
+  const m = {
+    version: 1,
+    runId: "bg-valid-run-001",
+    identity: { agentName: "test", canonicalPath: "/tmp/test.md", expectedHash: "00".repeat(32) },
+    task: "test",
+    options: { cwd: "/tmp/work", homeDir: home },
+    keyGenId: keyGenIdFromKey(key),
+  };
+  return { ...m, mac: signBgManifest(m, key) };
+}
+
 async function testCanonicalRejectsNonFinite() {
   await withTempHome(async (home) => {
     const key = await readOrCreateSessionMacKey(home, () => Buffer.alloc(32, 1));
@@ -492,6 +506,45 @@ async function testKeyGenMismatchRejected() {
   });
 }
 
+async function testWorkerRootIgnoresHomeEnv() {
+  const before = resolveTrustedHome();
+  const saved = process.env.HOME;
+  try {
+    process.env.HOME = "/tmp/fake-home-xyz";
+    assert.equal(resolveTrustedHome(), before);          // $HOME poison does not move the root
+    assert.equal(resolveTrustedHome(), os.userInfo().homedir);
+  } finally {
+    if (saved === undefined) delete process.env.HOME; else process.env.HOME = saved;
+  }
+}
+
+async function testStateRootsShareTrustedHome() {
+  await withTempHome(async (home) => {
+    const base = path.join(home, ".pi", "agent");
+    assert.ok(getBgStateDir(home).startsWith(base));
+    assert.ok(getBgSessionMacPath(home).startsWith(base));
+    assert.ok(getBgRunPaths("bg-x0001", home).runDir.startsWith(base));
+  });
+}
+
+async function testManifestHomeDirMismatchRejected() {
+  await withTempHome(async (home) => {
+    const key = await readOrCreateSessionMacKey(home, () => Buffer.alloc(32, 3));
+    const m = validManifest(home, key);
+    assert.throws(() => assertManifestIdentityMatchesRuntime({ ...m, options: { ...m.options, homeDir: "/tmp/fake" } }, { homeDir: home }), /does not match trusted runtime/);
+    assert.doesNotThrow(() => assertManifestIdentityMatchesRuntime(m, { homeDir: home }));
+  });
+}
+
+async function testFakeHomeManifestRejected() {
+  await withTempHome(async (home) => {
+    const realKey = await readOrCreateSessionMacKey(home, () => Buffer.alloc(32, 3));
+    const fakeKey = Buffer.alloc(32, 0xff);                  // a key from an attacker $HOME store
+    const fakeSigned = (() => { const m = validManifest(home, fakeKey); return m; })();
+    assert.equal(verifyBgManifest(fakeSigned, realKey), false); // fake-home manifest fails real-home key
+  });
+}
+
 async function main() {
   console.log("P4-1 bg-state tests");
   await test("state directory and paths", testStateDirectoryAndPaths);
@@ -519,6 +572,10 @@ async function main() {
   await test("read manifest rejects oversized task", testReadManifestTaskTooLarge);
   await test("read manifest rejects bad timeout", testReadManifestBadTimeout);
   await test("keyGenId mismatch rejected", testKeyGenMismatchRejected);
+  await test("trusted home ignores $HOME env", testWorkerRootIgnoresHomeEnv);
+  await test("state roots share trusted home", testStateRootsShareTrustedHome);
+  await test("manifest homeDir mismatch rejected", testManifestHomeDirMismatchRejected);
+  await test("fake-home manifest rejected by real key", testFakeHomeManifestRejected);
   console.log("agents bg-state tests passed");
 }
 
