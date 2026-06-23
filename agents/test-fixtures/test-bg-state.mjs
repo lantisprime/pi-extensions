@@ -20,6 +20,7 @@ import {
   readBgManifest,
   readOrCreateSessionMacKey,
   readSessionMacKey,
+  reapStaleBgRuns,
   resolveTrustedHome,
   signBgManifest,
   signBgPayload,
@@ -545,6 +546,94 @@ async function testFakeHomeManifestRejected() {
   });
 }
 
+// ── P4R-1 Group 1: reservation + no-kill reaping ──
+
+async function writeReservationAge(home, runId, { startedAtMs, effectiveTimeoutSec = 60, ownerHandle } = {}) {
+  const paths = await createBgRunState({ homeDir: home, runId, effectiveTimeoutSec, ownerHandle });
+  const line = JSON.stringify({ pid: 4242, ownerHandle, startedAtMs, effectiveTimeoutSec, keyGenId: "00000000" }) + "\n";
+  await fs.writeFile(paths.reservationPath, line, { mode: 0o600 });
+  return paths;
+}
+
+async function testReservationMetadata() {
+  await withTempHome(async (home) => {
+    const paths = await createBgRunState({ homeDir: home, runId: "bg-resv-001", effectiveTimeoutSec: 99, ownerHandle: "win-7" });
+    const r = JSON.parse((await fs.readFile(paths.reservationPath, "utf8")).trim());
+    assert.equal(r.effectiveTimeoutSec, 99);
+    assert.equal(r.ownerHandle, "win-7");
+    assert.equal(typeof r.startedAtMs, "number");
+    assert.match(r.keyGenId, /^[0-9a-f]{8}$/);
+  });
+}
+
+async function testFutureStartedAtKeptActive() {
+  await withTempHome(async (home) => {
+    await writeReservationAge(home, "bg-resv-002", { startedAtMs: Date.now() + 3_600_000, effectiveTimeoutSec: 1 });
+    assert.equal(await countActiveBgRuns(home), 1);
+  });
+}
+
+async function testBadTimeoutKeptActiveBounded() {
+  await withTempHome(async (home) => {
+    const paths = await createBgRunState({ homeDir: home, runId: "bg-resv-003", effectiveTimeoutSec: 60 });
+    await fs.writeFile(paths.reservationPath, JSON.stringify({ pid: 1, startedAtMs: Date.now() }) + "\n", { mode: 0o600 });
+    assert.equal(await countActiveBgRuns(home), 1);
+  });
+}
+
+async function testParseFailKeptActive() {
+  await withTempHome(async (home) => {
+    const paths = await createBgRunState({ homeDir: home, runId: "bg-resv-008", effectiveTimeoutSec: 60 });
+    await fs.writeFile(paths.reservationPath, "this is not json\n", { mode: 0o600 });
+    assert.equal(await countActiveBgRuns(home), 1);
+    const { reapedRunIds } = await reapStaleBgRuns(home);
+    assert.deepEqual(reapedRunIds, []);
+  });
+}
+
+async function testActiveExcludesStale() {
+  await withTempHome(async (home) => {
+    await writeReservationAge(home, "bg-resv-004", { startedAtMs: Date.now() - 10_000_000, effectiveTimeoutSec: 1 });
+    assert.equal(await countActiveBgRuns(home), 0);
+  });
+}
+
+async function testReapExpiredFreesSlotNoSignal() {
+  await withTempHome(async (home) => {
+    const paths = await writeReservationAge(home, "bg-resv-005", { startedAtMs: Date.now() - 10_000_000, effectiveTimeoutSec: 1 });
+    const { reapedRunIds } = await reapStaleBgRuns(home);
+    assert.deepEqual(reapedRunIds, ["bg-resv-005"]);
+    assert.equal(JSON.parse(await fs.readFile(paths.resultPath, "utf8")).status, "timed-out");
+    assert.equal(await countActiveBgRuns(home), 0);
+  });
+}
+
+async function testReapUsesInjectedIsAlive() {
+  await withTempHome(async (home) => {
+    await writeReservationAge(home, "bg-resv-006", { startedAtMs: Date.now(), effectiveTimeoutSec: 86_400, ownerHandle: "win-9" });
+    const { reapedRunIds } = await reapStaleBgRuns(home, { isAlive: (h) => h !== "win-9" });
+    assert.deepEqual(reapedRunIds, ["bg-resv-006"]);
+    const paths = getBgRunPaths("bg-resv-006", home);
+    assert.equal(JSON.parse(await fs.readFile(paths.resultPath, "utf8")).status, "stopped");
+  });
+}
+
+async function testReaperNeverSignals() {
+  await withTempHome(async (home) => {
+    await writeReservationAge(home, "bg-resv-007", { startedAtMs: Date.now() - 10_000_000, effectiveTimeoutSec: 1 });
+    const realKill = process.kill;
+    let called = false;
+    process.kill = () => { called = true; throw new Error("process.kill must not be called by the reaper"); };
+    try {
+      await reapStaleBgRuns(home);
+      assert.equal(called, false);
+      assert.equal(await countActiveBgRuns(home), 0);
+    } finally {
+      process.kill = realKill;
+    }
+  });
+}
+
 async function main() {
   console.log("P4-1 bg-state tests");
   await test("state directory and paths", testStateDirectoryAndPaths);
@@ -576,6 +665,16 @@ async function main() {
   await test("state roots share trusted home", testStateRootsShareTrustedHome);
   await test("manifest homeDir mismatch rejected", testManifestHomeDirMismatchRejected);
   await test("fake-home manifest rejected by real key", testFakeHomeManifestRejected);
+
+  // Group 1: P4R-1 reservation + no-kill reaping
+  await test("reservation metadata", testReservationMetadata);
+  await test("future startedAtMs kept active", testFutureStartedAtKeptActive);
+  await test("bad timeout kept active bounded", testBadTimeoutKeptActiveBounded);
+  await test("parse failure kept active", testParseFailKeptActive);
+  await test("active excludes stale", testActiveExcludesStale);
+  await test("reap expired frees slot with no signal", testReapExpiredFreesSlotNoSignal);
+  await test("reap uses injected isAlive", testReapUsesInjectedIsAlive);
+  await test("reaper never signals", testReaperNeverSignals);
   console.log("agents bg-state tests passed");
 }
 
