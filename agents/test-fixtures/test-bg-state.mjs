@@ -745,6 +745,7 @@ async function testEventsRetentionPolicy() {
 
 async function testConcurrentCreateNeverOverAdmits() {
   await withTempHome(async (home) => {
+    await ensureBgStateDir(home); // pre-create dir so concurrent burst races the cap, not cold-start EEXIST
     const k = 3;
     const attempts = Array.from({ length: 8 }, (_, i) =>
       createBgRunState({ homeDir: home, runId: `bg-conc-${i}`, maxConcurrentRuns: k, effectiveTimeoutSec: 86_400 })

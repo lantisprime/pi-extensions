@@ -485,7 +485,7 @@ export async function cleanupBgStateOnSessionStart(options: CleanupBgStateOption
 			}
 		}
 		// P4R-6: events.jsonl is retained for kept runs; pruned runs already lose it
-	// with their whole dir. (removeEventFiles option removed — always retain.)
+	// with their whole dir.
 	}
 
 	await retireSessionMacKeyIfFullyIdle(homeDir);

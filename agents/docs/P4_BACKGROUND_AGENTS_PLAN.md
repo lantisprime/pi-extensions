@@ -27,7 +27,7 @@ security invariants must be preserved.
 
 ## Design
 
-### Manifest is identity, not authority
+### Manifest identity — verified, not trusted
 
 > ⚠️ **Corrected by [P4_REMEDIATION_PLAN.md](./P4_REMEDIATION_PLAN.md).** This
 > section is wrong: the manifest below carries `options.cwd`/`homeDir`, and the
