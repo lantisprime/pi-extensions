@@ -64,8 +64,6 @@ export async function preflightBgAgent(
 		homeDir: trustedHome,
 		ownerHandle: options.ownerHandle,
 		effectiveTimeoutSec: options.effectiveTimeoutSec,
-	}).catch((error: unknown) => {
-		throw error;
 	});
 
 	// 3. Build the identity-only manifest. homeDir is identity verified against

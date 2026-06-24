@@ -119,6 +119,26 @@ async function testPreflightRejectsUnregisteredAgent() {
   });
 }
 
+// F1: gate-denial (canRunAgent hash mismatch after file tamper) must
+// write NO manifest and reserve NO slot — the actual security property.
+async function testPreflightGateDenialNoLeak() {
+  await withTempHome(async (home) => {
+    const { record, diag } = await setupRegisteredUserAgent(home, "gate-test");
+    const ctx = makeCtx(home);
+    const { countActiveBgRuns } = await import("../lib/bg-state.ts");
+    // Tamper the spec file so the re-read hash doesn't match the registry.
+    const specPath = path.join(home, ".pi", "agent", "agents", "gate-test.md");
+    await fs.appendFile(specPath, "\n// tampered");
+
+    const result = await preflightBgAgent(record, "task", ctx, diag, { homeDir: home, effectiveTimeoutSec: 60 });
+    assert.equal(result.ok, false, "preflight must deny when spec hash does not match registry");
+    if (result.ok) return;
+    assert.match(result.reason, /not runnable/, "gate-denied reason mentions not runnable");
+    // No slot reserved (createBgRunState never called after gate denial).
+    assert.equal(await countActiveBgRuns(home), 0, "gate denial must not reserve a slot");
+  });
+}
+
 async function testPreflightReservationCounted() {
   await withTempHome(async (home) => {
     const { record, diag } = await setupRegisteredUserAgent(home);
@@ -137,7 +157,8 @@ async function main() {
   console.log("P4-2 bg-preflight tests");
   await test("preflight writes a signed, verifiable manifest", testPreflightWritesSignedManifest);
   await test("manifest homeDir matches trusted root (N1)", testPreflightManifestHomeDirMatchesTrustedRoot);
-  await test("preflight denies unregistered/missing agent", testPreflightRejectsUnregisteredAgent);
+  await test("preflight denies unregistered/missing agent (re-read-failed)", testPreflightRejectsUnregisteredAgent);
+  await test("gate denial writes no manifest and reserves no slot", testPreflightGateDenialNoLeak);
   await test("preflight reservation is counted active", testPreflightReservationCounted);
   console.log("P4-2 bg-preflight tests passed");
 }
