@@ -333,10 +333,10 @@ async function testCleanupPrunesCompletedAndRemovesPromptFiles() {
     const cleanup = await cleanupBgStateOnSessionStart({ homeDir: home, keepRecentRuns: 1 });
     assert.deepEqual(cleanup.prunedRunIds, ["bg-test-0009"]);
     assert.equal(cleanup.removedPromptFiles.length, 1);
-    assert.equal(cleanup.removedEventFiles.length, 1);
+    assert.equal(cleanup.removedEventFiles.length, 0); // P4R-6: events retained for kept runs
     await assert.rejects(() => fs.stat(oldRun.runDir), /ENOENT/);
     await assert.rejects(() => fs.stat(path.join(keptRun.runDir, "prompt.txt")), /ENOENT/);
-    await assert.rejects(() => fs.stat(keptRun.eventsPath), /ENOENT/);
+    assert.ok(await fs.readFile(keptRun.eventsPath, "utf8")); // retained, not wiped
     assert.equal((await listBgRuns(home)).map((run) => run.runId).join(","), "bg-test-0010");
   });
 }
@@ -719,6 +719,41 @@ async function testMacKeyRetiredOnlyWhenFullyIdle() {
   });
 }
 
+// ── P4R-6 Group 6: hygiene ──
+
+async function testOrderingUsesMtimeNotBirthtime() {
+  await withTempHome(async (home) => {
+    const a = await createBgRunState({ homeDir: home, runId: "bg-ord-001", effectiveTimeoutSec: 60 });
+    const b = await createBgRunState({ homeDir: home, runId: "bg-ord-002", effectiveTimeoutSec: 60 });
+    const later = new Date(Date.now() + 60_000);
+    await fs.utimes(a.runDir, later, later);
+    const runs = await listBgRuns(home);
+    assert.equal(runs[0].runId, "bg-ord-001");
+  });
+}
+
+async function testEventsRetentionPolicy() {
+  await withTempHome(async (home) => {
+    const paths = await createBgRunState({ homeDir: home, runId: "bg-evt-001", effectiveTimeoutSec: 60 });
+    await appendBgEvent(paths, { type: "started" });
+    await writeBgResult(paths, { version: 1, runId: paths.runId, status: "completed" });
+    await markBgRunDone(paths);
+    await cleanupBgStateOnSessionStart({ homeDir: home, keepRecentRuns: 20 });
+    assert.ok(await fs.readFile(paths.eventsPath, "utf8"));
+  });
+}
+
+async function testConcurrentCreateNeverOverAdmits() {
+  await withTempHome(async (home) => {
+    const k = 3;
+    const attempts = Array.from({ length: 8 }, (_, i) =>
+      createBgRunState({ homeDir: home, runId: `bg-conc-${i}`, maxConcurrentRuns: k, effectiveTimeoutSec: 86_400 })
+        .then(() => true).catch(() => false));
+    const ok = (await Promise.all(attempts)).filter(Boolean).length;
+    assert.ok(ok <= k, `admitted ${ok} > cap ${k}`);
+  });
+}
+
 async function main() {
   console.log("P4-1 bg-state tests");
   await test("state directory and paths", testStateDirectoryAndPaths);
@@ -771,6 +806,11 @@ async function main() {
   // Group 4: P4R-5 MAC key lifecycle
   await test("MAC key retained while any run", testMacKeyRetainedWhileAnyRun);
   await test("MAC key retired only when fully idle", testMacKeyRetiredOnlyWhenFullyIdle);
+
+  // Group 6: P4R-6 hygiene
+  await test("ordering uses mtime not birthtime", testOrderingUsesMtimeNotBirthtime);
+  await test("events retention policy", testEventsRetentionPolicy);
+  await test("concurrent create never over-admits", testConcurrentCreateNeverOverAdmits);
   console.log("agents bg-state tests passed");
 }
 
