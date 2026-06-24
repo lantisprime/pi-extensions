@@ -217,27 +217,42 @@ function parseLeadingRunFlags(tokens: string[], start: number, _usage: string): 
 /** P6-3a: extract the registered-run tail of runAgentCommand into a reusable function.
  *  Zero behavior change — same parse/re-read/gate/execute sequence.
  *  Called by runAgentCommand (existing) and runIntentCommand (P6-3b). */
-export async function runResolvedTarget(record: RunnableRegisteredRecord, task: string, ctx: AgentsContextLike, diagnostics: AgentDiagnostics, profileOverride?: string, timeoutMs?: number): Promise<void> {
+
+/** P4-2: shared preflight gate — re-read current spec bytes, recompute status, run canRunAgent.
+ *  Used by runResolvedTarget (sync, behavior-preserving) and preflightBgAgent (background).
+ *  Returns the live parsed spec + gate result, or a denial with a user-facing reason. */
+export async function preflightAgentGate(
+	record: RunnableRegisteredRecord,
+	ctx: AgentsContextLike,
+	diagnostics: AgentDiagnostics,
+): Promise<{ ok: true; parsed: Awaited<ReturnType<typeof parseAgentMarkdownFile>>; gate: Awaited<ReturnType<typeof canRunAgent>> } | { ok: false; reason: string; code: string }> {
 	let currentParsed: Awaited<ReturnType<typeof parseAgentMarkdownFile>>;
 	try {
 		currentParsed = await parseAgentMarkdownFile(record.filePath, { source: record.source });
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		ctx.ui.notify(`Agent '${record.name}' is not runnable: failed to re-read current spec bytes: ${message}. Next: /agents inspect ${record.name}`, "warning");
-		return;
+		return { ok: false, code: "re-read-failed", reason: `Agent '${record.name}' is not runnable: failed to re-read current spec bytes: ${message}. Next: /agents inspect ${record.name}` };
 	}
 	if (!currentParsed.spec || currentParsed.status === "invalid" || currentParsed.status === "dangerous" || currentParsed.status === "shadowed") {
-		ctx.ui.notify(`Agent '${record.name}' is not runnable: current spec status=${currentParsed.status}. Next: /agents inspect ${record.name}`, "warning");
-		return;
+		return { ok: false, code: "bad-status", reason: `Agent '${record.name}' is not runnable: current spec status=${currentParsed.status}. Next: /agents inspect ${record.name}` };
 	}
 	const gate = await canRunAgent(
 		{ parsed: currentParsed, canonicalPath: record.canonicalPath },
 		{ projectTrusted: diagnostics.projectTrusted, projectRoot: diagnostics.projectRoot, userRegistry: diagnostics.userRegistry, projectRegistry: diagnostics.projectRegistry, homeDir: ctx.agentsHomeDir },
 	);
 	if (!gate.ok) {
-		ctx.ui.notify(`Agent '${record.name}' is not runnable: ${gate.reason}. Next: ${nextStepForRunBlock(record, gate.code)}`, "warning");
+		return { ok: false, code: gate.code, reason: `Agent '${record.name}' is not runnable: ${gate.reason}. Next: ${nextStepForRunBlock(record, gate.code)}` };
+	}
+	return { ok: true, parsed: currentParsed, gate };
+}
+
+export async function runResolvedTarget(record: RunnableRegisteredRecord, task: string, ctx: AgentsContextLike, diagnostics: AgentDiagnostics, profileOverride?: string, timeoutMs?: number): Promise<void> {
+	const preflight = await preflightAgentGate(record, ctx, diagnostics);
+	if (!preflight.ok) {
+		ctx.ui.notify(preflight.reason, "warning");
 		return;
 	}
+	const currentParsed = preflight.parsed;
 	ctx.ui.notify(`Running registered ${record.source} agent '${currentParsed.spec.name}' with read-only tools.`, "info");
 	await dispatchChildRun(currentParsed.spec, task, ctx, record.source, profileOverride, timeoutMs);
 }
