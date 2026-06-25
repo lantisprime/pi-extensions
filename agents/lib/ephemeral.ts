@@ -4,6 +4,7 @@ import { runChildAgent, formatChildAgentRunResult, formatAgentResultForContext, 
 import { scanTextForAgentRisk, type RiskLevel } from "./security-scan.ts";
 import { resolveExplicitToolContextLoaderPath } from "./run-resolver.ts";
 import { startBackgroundRun, type BgRunUI } from "./bg-run.ts";
+import { prepareAgentTask } from "./context-providers/prepare-task.ts";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 
@@ -125,9 +126,17 @@ export async function runEphemeralCommand(input: string, ctx: EphemeralRunHandle
 				...(explicitToolContextLoaderPath ? { explicitToolContextLoaderPath } : {}),
 				...(onProgress ? { onProgress } : {}),
 			};
-			const result = ctx.agentsChildRunner
-				? await ctx.agentsChildRunner(spec, args.task, childOptions)
-				: await runChildAgent(spec, args.task, childOptions);
+			// P9: ephemeral specs inherit `context:` from their base role (buildEphemeralSpec spreads
+			// the built-in), so a run-temp based on reviewer gets the review bundle. No-op otherwise.
+			const prepared = await prepareAgentTask(spec, args.task, { cwd: ctx.cwd });
+			let result;
+			try {
+				result = ctx.agentsChildRunner
+					? await ctx.agentsChildRunner(spec, prepared.task, childOptions)
+					: await runChildAgent(spec, prepared.task, childOptions);
+			} finally {
+				await prepared.dispose();
+			}
 			// P8-followup: feed the run into pi's conversation — findings on success, framed error
 			// for pi to interpret on failure (best-effort).
 			if (typeof ctx.deliverResult === "function") {

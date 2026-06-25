@@ -313,6 +313,42 @@ Ephemeral prompts do not require eval fixtures. Once saved as a reusable user-le
 - Enforce timeout/output caps and kill runaway children.
 - Keep child stderr diagnostic-only.
 
+## Review Context Assembly (P9)
+
+Agents that declare code-owned `context:` providers (built-ins only — `reviewer`, `planner`) have a
+review-context bundle assembled by the **trusted parent** and handed to the child via a temp file the
+sandboxed child reads with its `read` tool. Design invariants:
+
+- **Git stays in the trusted parent.** Only the parent shells read-only git (argv arrays, never a
+  shell string; refs validated by `SAFE_GIT_REF_RE`, pathspecs always after `--`). Children never get
+  `git`/`bash` — `context:` does not widen child tools.
+- **`context:` is code-owned.** It is accepted only on built-in specs in `specs.ts`, and is **not** in
+  `AGENT_MARKDOWN_ACCEPTED_KEYS`. A user/project Markdown spec therefore cannot compel the trusted
+  parent to shell git or assemble a bundle. (Frontmatter `context:` is a deferred follow-up with its
+  own trust analysis.)
+- **Bundle file lifecycle.** Written 0600 inside a 0700 `mkdtemp` dir and deleted in a `finally` on
+  **every** dispatch path (complete/timeout/spawn-error/kill) — unlike the stdout spill file, the
+  bundle is never kept on failure (it contains repo source/diff).
+- **Soft-fail.** Any git/fs error degrades to a note; assembly never throws out of best-effort dispatch.
+
+### Named accepted residual: untrusted content → parent turn (B2)
+
+The review bundle (diff, file text, commit messages) is attacker-influenceable: any file on the branch
+can contain prompt-injection text. That content reaches the child, and the child's **summary** then
+flows into the main, **unsandboxed** pi turn via `deliverResult → sendUserMessage`. We do not (and
+cannot fully) sanitize natural-language findings, so this is an **accepted residual**, mitigated by:
+
+- The bundle directive and header instruct the child to treat bundle contents as untrusted data, not
+  instructions.
+- Delivered child free-text (summary, error) is wrapped by `frameUntrusted()` in an explicit
+  do-NOT-obey boundary before it enters pi's turn, and a forged boundary marker in the child output is
+  defanged so the child cannot break out of the boundary.
+- Only the child's bounded **summary** is delivered — never the raw diff re-emitted verbatim.
+
+Residual: a determined injection could still influence the parent model's narration. Treat parent
+actions taken in response to delivered findings with the same scrutiny as any model output over
+untrusted input.
+
 ## Prompt Shield and Permission Policy Integration
 
 P3 must scan agent Markdown specs before registration using the repo shared deterministic security scanner. To preserve independent installability, vendor the shared scanner source into the agents extension:

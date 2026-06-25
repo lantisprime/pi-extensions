@@ -8,8 +8,9 @@ import {
 	type AgentDiagnosticRecord,
 	type AgentDiagnostics,
 } from "./diagnostics.ts";
-import { collectChildProcess, formatChildAgentRunResult, formatAgentResultForContext, runBuiltInChildAgent, runChildAgent, type ChildAgentRunner } from "./child-runner.ts";
+import { collectChildProcess, formatChildAgentRunResult, formatAgentResultForContext, runBuiltInChildAgent, runChildAgent, type ChildAgentRunner, type ChildAgentRunResult } from "./child-runner.ts";
 import { getBuiltInAgentSpec, isReservedBuiltInAgentName } from "./specs.ts";
+import { prepareAgentTask } from "./context-providers/prepare-task.ts";
 import type { ModelProfileLibrary } from "./profiles.ts";
 import type { ProjectAgentRegistry } from "./registry.ts";
 import { resolveRunIntent, profileEffect, INTENT_AUTORUN_CONFIDENCE, ROLE_DEFAULT_PROFILE, type IntentCandidate } from "./intent-router.ts";
@@ -107,11 +108,21 @@ async function executeChildRunResult(agent: Parameters<ChildAgentRunner>[0], tas
 			...progressOpt,
 			...timeoutOpt,
 		};
-		const result = ctx.agentsChildRunner
-			? await ctx.agentsChildRunner(agent, task, profileOverride ? { ...childOptions, profileOverride, ...progressOpt, ...timeoutOpt } : { ...childOptions, ...progressOpt, ...timeoutOpt })
-			: typeof agent === "string"
-				? await runBuiltInChildAgent(agent, task, runOptions, profiles, profileOverride)
-				: await runChildAgent(agent, task, runOptions, profiles, profileOverride);
+		// P9: assemble review context (diff/branch/changed files/plan docs) for agents that declare
+		// `context:` and rewrite the task to point the sandboxed child at the bundle file. No-op for
+		// agents without context or when there's nothing to review. dispose() in finally (B3).
+		const prepared = await prepareAgentTask(agent, task, { cwd: ctx.cwd });
+		const childTask = prepared.task;
+		let result: ChildAgentRunResult;
+		try {
+			result = ctx.agentsChildRunner
+				? await ctx.agentsChildRunner(agent, childTask, profileOverride ? { ...childOptions, profileOverride, ...progressOpt, ...timeoutOpt } : { ...childOptions, ...progressOpt, ...timeoutOpt })
+				: typeof agent === "string"
+					? await runBuiltInChildAgent(agent, childTask, runOptions, profiles, profileOverride)
+					: await runChildAgent(agent, childTask, runOptions, profiles, profileOverride);
+		} finally {
+			await prepared.dispose();
+		}
 		// P8-followup: feed the run into pi's conversation (best-effort) — findings on success, or a
 		// framed error for pi to interpret + advise on failure (timeout/spawn/exit).
 		if (typeof ctx.deliverResult === "function") {
