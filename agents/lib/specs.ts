@@ -1,3 +1,5 @@
+import { isProviderId, type ProviderId } from "./context-providers/provider-id.ts";
+
 export const AGENT_SPEC_VERSION = 1;
 
 export const RESERVED_BUILT_IN_AGENT_NAMES = ["scout", "planner", "reviewer"] as const;
@@ -76,6 +78,10 @@ export type AgentSpec = {
 	limits: AgentLimits;
 	observability: AgentObservabilityPolicy;
 	safety: AgentSafetyPolicy;
+	/** P9: code-owned review-context providers the parent assembles before dispatch (built-ins only;
+	 *  NOT accepted from agent-markdown frontmatter in v1 — a project spec must not be able to compel
+	 *  the trusted parent to shell git. See review-context.ts ProviderId. */
+	context?: ProviderId[];
 };
 
 export type AgentValidationIssue = {
@@ -323,8 +329,34 @@ export function validateAgentSpec(spec: unknown, options: SpecValidationOptions 
 	issues.push(...validateLimits(spec.limits).issues);
 	issues.push(...validateObservability(spec.observability).issues);
 	issues.push(...validateSafety(spec.safety).issues);
+	issues.push(...validateContextProviders(spec.context).issues);
 
 	return result(issues);
+}
+
+/** P9: validate the optional code-owned `context:` provider list. Absent is fine (no bundle).
+ *  Present must be an array of known provider ids with no duplicates. */
+export function validateContextProviders(context: unknown, field = "context"): AgentValidationResult {
+	const issues: AgentValidationIssue[] = [];
+	if (context === undefined) return result(issues);
+	if (!Array.isArray(context)) {
+		return result([{ field, code: "context-invalid", message: "context must be an array of provider ids" }]);
+	}
+	const seen = new Set<string>();
+	for (const id of context) {
+		if (!isProviderId(id)) {
+			issues.push({ field, code: "context-unknown", message: `unknown context provider '${String(id)}'` });
+			continue;
+		}
+		if (seen.has(id)) issues.push({ field, code: "context-duplicate", message: `duplicate context provider '${id}'` });
+		seen.add(id);
+	}
+	return result(issues);
+}
+
+/** P9: resolve the providers a spec wants (empty when undeclared). */
+export function resolveSpecContextProviders(spec: AgentSpec): ProviderId[] {
+	return Array.isArray(spec.context) ? spec.context.filter(isProviderId) : [];
 }
 
 export function getBuiltInAgentSpec(name: string): AgentSpec | undefined {
@@ -382,6 +414,7 @@ const BUILT_IN_AGENT_SPECS: Record<BuiltInAgentName, AgentSpec> = deepFreeze({
 Role: Scout. Inspect only what is necessary to answer the delegated task.
 Return sections: Files/paths inspected; Concise findings; Unknowns/follow-up questions.
 Do not produce a long implementation plan.`,
+		context: [], // scout self-explores via read/grep; no pre-assembled bundle
 		inputContract: { ...DEFAULT_INPUT_CONTRACT },
 		outputContract: {
 			requiredSections: ["Files/paths inspected", "Concise findings", "Unknowns/follow-up questions"],
@@ -402,6 +435,7 @@ Do not produce a long implementation plan.`,
 Role: Planner. Turn the delegated task into a staged, reviewable plan.
 Return sections: Proposed files to change; Staged steps; Risks; Validation commands; Out-of-scope items.
 Do not edit files or present execution as already completed.`,
+		context: ["plan-docs", "changed-files"], // orient against existing plans + what's already changed
 		inputContract: { ...DEFAULT_INPUT_CONTRACT },
 		outputContract: {
 			requiredSections: ["Proposed files to change", "Staged steps", "Risks", "Validation commands", "Out-of-scope items"],
@@ -422,6 +456,7 @@ Do not edit files or present execution as already completed.`,
 Role: Reviewer. Critique the delegated plan, diff, or design skeptically and concretely.
 Return sections: Blocking issues; Non-blocking issues; Missing tests/validation; Safety/security concerns; Verdict.
 The Verdict section must contain exactly one of: go, conditional-go, no-go.`,
+		context: ["git-diff", "changed-files", "branch-commits", "plan-docs"], // full review bundle
 		inputContract: { ...DEFAULT_INPUT_CONTRACT },
 		outputContract: {
 			requiredSections: ["Blocking issues", "Non-blocking issues", "Missing tests/validation", "Safety/security concerns", "Verdict"],

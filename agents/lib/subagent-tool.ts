@@ -11,6 +11,7 @@ import { collectAgentDiagnostics, type AgentDiagnostics } from "./diagnostics.ts
 import { formatChildAgentRunResult, runBuiltInChildAgent, runChildAgent, type ChildAgentRunResult, type ChildAgentRunner } from "./child-runner.ts";
 import { parseAgentMarkdownFile } from "./agent-markdown.ts";
 import { resolveExplicitToolContextLoaderPath, resolveRegisteredRunTarget } from "./run-resolver.ts";
+import { prepareAgentTask } from "./context-providers/prepare-task.ts";
 
 // --- Types ---
 
@@ -127,15 +128,19 @@ export async function executeSubagentRun(agent: string, task: string, runCtx: Su
 	// 1. Built-in shortcut (matches /agents run parity — built-ins skip canRunAgent,
 	//    they are trusted extension code, not spec files).
 	if (isReservedBuiltInAgentName(validatedAgent)) {
+		// P9: assemble the built-in's declared review context (reviewer/planner). dispose in finally.
+		const prepared = await prepareAgentTask(validatedAgent, validatedTask, { cwd: runCtx.cwd });
 		try {
 			const result = runCtx.childRunner
-				? await runCtx.childRunner(validatedAgent, validatedTask, childOptions)
-				: await runBuiltInChildAgent(validatedAgent, validatedTask, childOptions);
+				? await runCtx.childRunner(validatedAgent, prepared.task, childOptions)
+				: await runBuiltInChildAgent(validatedAgent, prepared.task, childOptions);
 			const { text, details } = compactResult(result);
 			return { ok: result.status === "completed", text, details, isError: result.status !== "completed" };
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			return denyOutcome(validatedAgent, "spawn-error", `built-in child execution failed: ${message}`);
+		} finally {
+			await prepared.dispose();
 		}
 	}
 
@@ -190,15 +195,20 @@ export async function executeSubagentRun(agent: string, task: string, runCtx: Su
 
 	// 6. Execute child. Task is delivered via stdin/private-temp-file by
 	//    buildChildPiArgs; never as argv tokens.
+	// P9: registered specs don't declare `context:` in v1, so this is a no-op today; wired for the
+	// single-seam invariant (N6) and forward-compat with a future frontmatter `context:` field.
+	const prepared = await prepareAgentTask(currentParsed.spec, validatedTask, { cwd: runCtx.cwd });
 	try {
 		const result = runCtx.childRunner
-			? await runCtx.childRunner(currentParsed.spec, validatedTask, childOptions)
-			: await runChildAgent(currentParsed.spec, validatedTask, childOptions);
+			? await runCtx.childRunner(currentParsed.spec, prepared.task, childOptions)
+			: await runChildAgent(currentParsed.spec, prepared.task, childOptions);
 		const { text, details } = compactResult(result);
 		return { ok: result.status === "completed", text, details, isError: result.status !== "completed" };
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		return denyOutcome(validatedAgent, "spawn-error", `child execution failed: ${message}`);
+	} finally {
+		await prepared.dispose();
 	}
 }
 

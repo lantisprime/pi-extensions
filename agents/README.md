@@ -28,6 +28,25 @@ Reviewer verdicts: `go`, `conditional-go`, `no-go`.
 
 No write, edit, bash, or `run_subagent` tools are allowed by default.
 
+### Review context (auto-assembled)
+
+Because children are sandboxed (`read`/`grep`/`find`/`ls` only — no `git`/`bash`), they can't fetch a
+diff on their own. For agents that declare code-owned `context:` providers, the **trusted parent**
+assembles a bounded review bundle and hands it to the child via a temp file the child reads:
+
+| Agent | `context:` providers |
+|---|---|
+| `reviewer` | `git-diff`, `changed-files`, `branch-commits`, `plan-docs` |
+| `planner` | `plan-docs`, `changed-files` |
+| `scout` | — (self-explores) |
+
+The bundle covers the current branch vs its merge-base with the default branch **plus uncommitted
+changes**, with per-file/total caps and visible truncation markers. It applies on every dispatch path
+(NL gate, `/agents run`, `/agents do`, chain steps, `run-temp`). When there's nothing to review (clean
+tree, or a non-git cwd) the agent simply runs with the raw task. Bundle contents are framed as
+untrusted data; see `SECURITY_MODEL.md` → "Review Context Assembly (P9)". `context:` is built-in-only —
+it is not accepted from agent-markdown frontmatter.
+
 ## Commands
 
 ```
@@ -211,6 +230,7 @@ for s in agents/test-fixtures/run-p3*.sh; do echo "--- $s"; ./$s; done
 ./agents/test-fixtures/run-p3f-1-tests.sh   # Model profiles pure helpers
 ./agents/test-fixtures/run-p3f-2-tests.sh   # Model profiles wiring
 ./agents/test-fixtures/run-p3f-3-tests.sh   # Profile file discovery + hash-registration
+./agents/test-fixtures/run-p9-tests.sh      # Review-context provider layer + B2 framing
 ```
 
 Tests use `npx tsx` and pure `.mjs` files. No live child `pi` processes are
