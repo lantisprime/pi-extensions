@@ -6,6 +6,40 @@ child agents. Read-only by default.
 > **User Manual**: See [../../docs/USER_MANUAL.md](../../docs/USER_MANUAL.md#registered-custom-agents) for scenario guides. No write, edit, bash, or `run_subagent` in
 child tools unless the spec explicitly re-requests them.
 
+## Capabilities at a glance
+
+**Agents.** Three read-only built-ins — `scout` (recon), `planner` (staged plans), `reviewer`
+(adversarial review + `go`/`conditional-go`/`no-go` verdict) — each running a code-owned *method*
+externalized to `lib/prompts/<role>.md`. Plus user/project agents you register from Markdown specs.
+→ [Built-in agents](#built-in-agents), [Agent method prompts](#agent-method-prompts-externalized)
+
+**Invocation.**
+- `/agents run <agent> <task>` — explicit
+- `/agents do <task>` — LLM classifier routes to the best agent (heuristic fallback)
+- **Natural language** — e.g. "review this" auto-routes through the intent gate (with confirm)
+- `/agents chain a,b,c <task>` — up to 3 agents in sequence, summaries hand off
+- `/agents run-temp <role> <task>` — one-shot ephemeral (inherits the role's method)
+- `run_subagent` — LLM-callable tool
+→ [Commands](#commands), [Intent routing](#intent-routing), [Chain mode](#chain-mode), [Ephemeral agents](#ephemeral-agents)
+
+**Context.** `reviewer`/`planner` get an auto-assembled, bounded review bundle (branch-vs-base diff +
+uncommitted, changed files, commits, and the plan docs the diff *references*) via a temp file, read
+under hard root-containment (symlink + hardlink escape refused). `scout` self-explores.
+→ [Review context](#review-context-auto-assembled)
+
+**Results.** Findings are delivered back into your conversation on every dispatch path, framed as
+untrusted data.
+
+**Safety.** Sandboxed children; `canRunAgent` gate before spawn; scan + raw-byte-hash registration
+(+ project trust) for user/project specs; task/method text never in argv; fail-closed on hash mismatch.
+→ [Safety model](#safety-model), `SECURITY_MODEL.md`
+
+**UX.** Non-blocking runs with a live progress widget, configurable timeouts, model/thinking profiles.
+→ [Background runs](#background-runs-and-the-live-indicator), [Profiles](#profiles)
+
+**In progress (not yet user-reachable):** true background agents in a separate terminal window
+(P4 — preflight/worker/terminal-interface landed; `/agents bg …` command wiring is the next slice).
+
 ## Quick smoke
 
 Verify the extension loads without errors:
