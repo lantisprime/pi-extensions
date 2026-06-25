@@ -334,8 +334,11 @@ export function validateAgentSpec(spec: unknown, options: SpecValidationOptions 
 	issues.push(...validateSafety(spec.safety).issues);
 	issues.push(...validateContextProviders(spec.context).issues);
 	if (spec.instructionsFile !== undefined) {
-		if (spec.source !== "built-in") issues.push({ field: "instructionsFile", code: "instructions-not-builtin", message: "instructionsFile is built-in only" });
-		else if (typeof spec.name !== "string" || PROMPT_FILES[spec.name] !== spec.instructionsFile) issues.push({ field: "instructionsFile", code: "instructions-map-mismatch", message: "instructionsFile must equal PROMPT_FILES[name]" });
+		// Allowed for code-owned built-ins and their ephemeral (run-temp) derivations — NEVER from
+		// user/project frontmatter (which agent-markdown already refuses via AGENT_MARKDOWN_ACCEPTED_KEYS).
+		if (spec.source !== "built-in" && spec.source !== "ephemeral") issues.push({ field: "instructionsFile", code: "instructions-not-builtin", message: "instructionsFile is built-in/ephemeral only" });
+		else if (spec.source === "built-in" && (typeof spec.name !== "string" || PROMPT_FILES[spec.name] !== spec.instructionsFile)) issues.push({ field: "instructionsFile", code: "instructions-map-mismatch", message: "built-in instructionsFile must equal PROMPT_FILES[name]" });
+		else if (spec.source === "ephemeral" && !Object.values(PROMPT_FILES).includes(spec.instructionsFile)) issues.push({ field: "instructionsFile", code: "instructions-map-mismatch", message: "ephemeral instructionsFile must be a known method file" });
 	}
 
 	return result(issues);

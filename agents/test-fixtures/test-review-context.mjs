@@ -317,6 +317,27 @@ async function reviewContext_referencedDocSymlinkEscape() {
 	} finally { await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {}); }
 }
 
+// B-1b (code-review regression). HardlinkEscape: an in-repo HARDLINK to an out-of-root file has no
+// symlink to follow and realpaths in-root — must still be refused (nlink !== 1 guard).
+async function reviewContext_referencedDocHardlinkEscape() {
+	const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-b1b-hard-"));
+	const secret = await fs.mkdtemp(path.join(os.tmpdir(), "pi-b1b-secret-"));
+	try {
+		await makeRealRepo(tmpDir);
+		const outside = path.join(secret, "secret.txt");
+		await fs.writeFile(outside, "HARDLINK SECRET\n");
+		try { await fs.link(outside, path.join(tmpDir, "X_PLAN.md")); } // same-fs hardlink into the repo
+		catch { return; } // cross-fs: hardlink impossible, vector N/A on this setup
+		const r = await readContainedReferencedDoc(tmpDir, "X_PLAN.md");
+		assert.equal(r.ok, false, "hardlink to outside file must be refused");
+		assert.equal(r.reason, "multi-link");
+		assert.ok(!("content" in r), "no outside content leaks on refusal");
+	} finally {
+		await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+		await fs.rm(secret, { recursive: true, force: true }).catch(() => {});
+	}
+}
+
 // B-3. ChangedPlanSymlinkEscape: symlink that is a "changed" plan doc is refused.
 async function reviewContext_referencedDocChangedPlanSymlinkEscape() {
 	const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-b3-cpsym-"));
@@ -574,6 +595,7 @@ async function main() {
 	await reviewContext_referencedDocRejectsHomeAndUrl();
 	await reviewContext_referencedDocRejectsExt();
 	await reviewContext_referencedDocSymlinkEscape();
+	await reviewContext_referencedDocHardlinkEscape();
 	await reviewContext_referencedDocChangedPlanSymlinkEscape();
 	await reviewContext_referencedDocFallbackWorkplanSymlinkEscape();
 	await reviewContext_referencedDocOversizeAndBinary();

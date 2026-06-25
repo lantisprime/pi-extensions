@@ -41,11 +41,23 @@ assembles a bounded review bundle and hands it to the child via a temp file the 
 | `scout` | — (self-explores) |
 
 The bundle covers the current branch vs its merge-base with the default branch **plus uncommitted
-changes**, with per-file/total caps and visible truncation markers. It applies on every dispatch path
-(NL gate, `/agents run`, `/agents do`, chain steps, `run-temp`). When there's nothing to review (clean
-tree, or a non-git cwd) the agent simply runs with the raw task. Bundle contents are framed as
-untrusted data; see `SECURITY_MODEL.md` → "Review Context Assembly (P9)". `context:` is built-in-only —
-it is not accepted from agent-markdown frontmatter.
+changes**, with per-file/total caps and visible truncation markers. It also includes work-tree docs the
+diff **references** (e.g. a `See P5_…md` comment) — read through a hard root-containment regime
+(repo-relative, ext-allowlisted, symlink/hardlink-escape refused, TOCTOU-safe handle reads). It applies
+on every dispatch path (NL gate, `/agents run`, `/agents do`, chain steps, `run-temp`); the child runs
+with `cwd` = the work-tree root. When there's nothing to review (clean tree, or a non-git cwd) the agent
+runs with the raw task. Bundle contents are framed as untrusted data; see `SECURITY_MODEL.md` →
+"Review Context Assembly". `context:` is built-in-only — not accepted from agent-markdown frontmatter.
+
+### Agent method prompts (externalized)
+
+Each built-in's review/recon *method* lives in `lib/prompts/<role>.md` (`scout.md`, `planner.md`,
+`reviewer.md`), referenced from the code-owned spec via `instructionsFile` and appended to the child's
+system prompt at run time — so `specs.ts` stays lean and the method reaches every dispatch path
+(including the NL gate and `run-temp`, which inherits its base role's method). `instructionsFile` is
+built-in/ephemeral only (never from frontmatter); a missing built-in method file fails the run visibly.
+The reviewer's lenses live here as the single source — see `reviewer.md` (the `code-review-agent`
+runbook points at it rather than duplicating).
 
 ## Commands
 

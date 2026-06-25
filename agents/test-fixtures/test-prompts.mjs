@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { loadAgentMethod, PROMPT_FILES, MAX_METHOD_BYTES } from "../lib/prompts.ts";
+import { methodFileForSpec } from "../lib/prompts.ts";
 
 // ── A1: prompts_loaderResolvesAndVerifiesParent ───────────────────────────────
 async function test_prompts_loaderResolvesAndVerifiesParent() {
@@ -73,3 +74,13 @@ main().catch((error) => {
 	console.error(error);
 	process.exit(1);
 });
+
+// P10 regression (integration): ephemeral inherits its base role method by FILE (name is "temp").
+{
+  assert.equal(methodFileForSpec({ source: "built-in", name: "reviewer" }), "reviewer.md");
+  assert.equal(methodFileForSpec({ source: "ephemeral", name: "temp", instructionsFile: "scout.md" }), "scout.md");
+  assert.equal(methodFileForSpec({ source: "user", name: "x", instructionsFile: "scout.md" }), "", "frontmatter source never loads a method file");
+  assert.equal(methodFileForSpec({ source: "ephemeral", name: "temp", instructionsFile: "evil.md" }), "", "ephemeral only loads allowlisted files");
+  console.log("methodFileForSpec_ephemeralByFile OK");
+}
+

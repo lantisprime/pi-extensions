@@ -5,7 +5,7 @@ import { StringDecoder } from "node:string_decoder";
 import path from "node:path";
 import os from "node:os";
 import { buildChildPiArgs, getPiInvocation, type ChildPiArgsOptions, type ChildPiInvocation } from "./child-args.ts";
-import { loadAgentMethod } from "./prompts.ts";
+import { loadAgentMethod, methodFileForSpec } from "./prompts.ts";
 import { reduceChildJsonl, type ChildJsonlSummary } from "./jsonl-monitor.ts";
 import { getBuiltInAgentSpec, isReservedBuiltInAgentName, type AgentSpec } from "./specs.ts";
 import { resolveSpecProfile, type ModelProfileLibrary } from "./profiles.ts";
@@ -153,8 +153,9 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 		await fs.chmod(sysDir, 0o700);
 		const systemPromptPath = path.join(sysDir, "system.md");
 		let appendMethod = "";
-		if (spec.instructionsFile) {
-			try { appendMethod = await loadAgentMethod(spec.name); }
+		const methodFile = methodFileForSpec(spec);
+		if (methodFile) {
+			try { appendMethod = await loadAgentMethod(methodFile); }
 			catch (e) { return spawnErrorResult(spec.name, { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin", stdinText: "" } }, e instanceof Error ? e : new Error(String(e))); }
 		}
 		const invocation = buildChildPiArgs(childArgSpec, task, { ...options, systemPromptPath, appendMethod });

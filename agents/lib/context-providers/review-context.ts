@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { defaultGitRunner, isSafeGitRef, type GitRunner } from "./git-runner.ts";
@@ -42,7 +43,7 @@ export async function readContainedReferencedDoc(projectRoot: string, ref: strin
 		// We open with "r" first; if the path is a symlink, open still opens the target on most platforms.
 		// The critical guard is: after open, realpath the /proc/self/fd/<fd> path (or fh path) and check containment.
 		// On macOS we can use fs.open with O_NOFOLLOW via numeric flags.
-		const O_NOFOLLOW = process.platform === "linux" ? 0x20000 : 0x100; // macOS: 0x100
+		const O_NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0; // 0 where unsupported; realpath check is the fallback
 		const O_RDONLY = 0;
 		try {
 			fh = await fs.open(candidate, O_RDONLY | O_NOFOLLOW);
@@ -57,6 +58,10 @@ export async function readContainedReferencedDoc(projectRoot: string, ref: strin
 		const stat = await fh.stat();
 		if (!stat.isFile()) { return { ok: false, reason: "not-file" }; }
 		if (stat.size > CONTAINED_READ_MAX_FILE_BYTES) { return { ok: false, reason: "too-big" }; }
+		// Hardlink guard (review B1): a hardlink inside the repo to an out-of-root file has no symlink
+		// to follow and realpaths in-root, so O_NOFOLLOW/realpath can't catch it. Legit plan docs are
+		// single-linked — refuse any multi-linked file to block hardlink aliasing of outside content.
+		if (stat.nlink !== 1) { return { ok: false, reason: "multi-link" }; }
 
 		// 5. Realpath-containment check on the OPENED path (catches symlinks that slipped through).
 		//    We realpath the candidate (not the handle) — on macOS O_NOFOLLOW already refused symlink opens.
