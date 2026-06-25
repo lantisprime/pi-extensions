@@ -1,12 +1,13 @@
 # P4: Background/Tmux Agent Execution Plan
 
-**Status**: Planning (v3)
-**Date**: 2026-06-18
+**Status**: Planning (v3.1) — re-grounded to shipped P4R API after plan-review CHANGES-REQUESTED (20260624-054530). B1/B2/B3 fixed, B4/B5/B6 addressed.
+**Date**: 2026-06-18 (revised 2026-06-24)
 **Reviews**:
 - Planner `openai-codex/gpt-5.5` (thinking: high) — conditional-go, architecture gaps fixed
 - Adversarial `openrouter/anthropic/claude-opus-4-8` — conditional-go, 5 blockers all resolved
+- Plan-review `glm-5.2` (20260624-054530) — CHANGES-REQUESTED, B1/B2/B3 re-grounded to shipped bg-state.ts API
 **Split**: Tmux backend interface is [P5_PLUGGABLE_TERMINAL_BACKEND.md](./P5_PLUGGABLE_TERMINAL_BACKEND.md)
-**Depends on**: P3 agent scaffold (complete)
+**Depends on**: P3 agent scaffold (complete), P4R remediation (complete)
 
 > ⚠️ **Partially superseded re: authority roots.** A critical review found this
 > plan's "manifest is identity, not authority" claim to be **false** as written —
@@ -48,21 +49,30 @@ sync P3 path. **First cut: user-registered agents only.**
 
 ```json
 // ~/.pi/agent/bg/<runId>/manifest.json (0600, signed with per-session MAC)
+// Schema MUST match shipped BgRunManifest (bg-state.ts) and readBgManifest exact-schema.
+// Built by signBgManifest(Omit<BgRunManifest,"mac">, key) then mac+keyGenId attached.
 {
+  "version": 1,
+  "runId": "bg-<timestamp>-<8hex>",
   "identity": {
     "agentName": "scout",
     "canonicalPath": "/Users/x/.pi/agent/agents/scout.md",
-    "expectedHash": "abc123..."
+    "expectedHash": "<64-char lowercase sha256 hex>"
   },
   "task": "<task text>",
   "options": {
-    "maxDurationSec": 120,
+    "maxDurationSec": 120,   // optional advisory child timeout; <= BG_MAX_DURATION_SEC
     "cwd": "/Users/x/projects/my-app",
-    "homeDir": "/Users/x"
+    "homeDir": "/Users/x"     // identity — verified against resolveTrustedHome(), NOT trusted
   },
-  "mac": "hmac-sha256(...)"
+  "mac": "<64-char hex hmac-sha256 over mac-excluded view>",
+  "keyGenId": "<8-char hex from keyGenIdFromKey(key)>"
 }
 ```
+
+**Manifest construction (P4-2 preflight):** call `signBgManifest(Omit<BgRunManifest,"mac">, key)` (bg-state.ts) to get `mac`, then attach `mac` and `keyGenId = keyGenIdFromKey(key)` (bg-state.ts). Do NOT add option keys beyond `{maxDurationSec?, cwd, homeDir}` — `readBgManifest` rejects unknown keys via `ALLOWED_OPTIONS_KEYS`.
+
+**Field disambiguation (B6):** `options.maxDurationSec` (advisory child-process timeout, optional) is DISTINCT from the reservation's `effectiveTimeoutSec` (slot-accounting, written into `.reserved`). The worker does NOT source one from the other.
 
 Safety: `explicitToolContextLoaderPath`, `disableResourceDiscovery`, and
 `spec.tools` are **never** in the manifest. Worker re-derives all three
@@ -74,13 +84,14 @@ The worker re-runs the full P3 gate **before each individual agent spawn** —
 including each chain step. This closes TOCTOU windows:
 
 1. Worker reads identity from manifest (name, path, expected hash)
-2. Re-reads current file bytes from `canonicalPath`
-3. Computes `rawBytesSha256`
-4. Re-reads registry from disk
-5. Re-reads project trust state from disk
-6. Calls `canRunAgent` with current hash, registry, trust
-7. If denied → no spawn, writes `failed` to result, writes `done` sentinel
-8. If approved → calls `buildChildPiArgs` with live spec, calls `runChildAgent`
+2. `verifyBgManifest(manifest, readSessionMacKey(resolveTrustedHome()))` — rejects on tamper
+3. `assertManifestIdentityMatchesRuntime(manifest, { homeDir: resolveTrustedHome() })` — rejects on homeDir mismatch (N1; `cwd` is advisory, NOT compared — N6)
+4. Re-reads current file bytes from `canonicalPath`
+5. Computes `rawBytesSha256`
+6. Re-reads **user registry** from disk (user-agents-first; project trust is DEFERRED — see B3)
+7. Calls `canRunAgent` with current hash, registry (no project-trust re-read in this cut)
+8. If denied → no spawn, writes `failed` to result, writes `done` sentinel
+9. If approved → calls `buildChildPiArgs` with live spec, calls `runChildAgent`
 
 ### Communication lifecycle — single background agent
 
@@ -96,9 +107,9 @@ Parent Pi session                    Worker (in tmux window)
 3. Write manifest.json:
    {identity, task, options, MAC}
 4. termBackend.launch(manifestPath)
-5. Track runId in bg tracker         ──→ 6. Read manifest, verify MAC
-                                         7. Re-read spec bytes, registry,
-                                            trust state from disk
+5. Track runId in bg tracker         ──→ 6. Read manifest, verify MAC + identity mismatch
+                                         7. Re-read spec bytes, user registry from disk
+                                            (project trust DEFERRED)
                                          8. runChildAgent(scout, task)
                                             ├─ buildChildPiArgs(spec, task)
                                             │  task → private-temp-file
@@ -135,17 +146,17 @@ re-runs the full security gate. Handoff is in-memory within the worker.
 ```
 Worker (single tmux window, single process)
 ───────────────────────────────────────────
-1. Read manifest, verify MAC
-2. Re-read spec, registry, trust from disk
+1. Read manifest, verify MAC + identity mismatch
+2. Re-read spec, user registry from disk (project trust DEFERRED)
 3. runChildAgent(scout, task)
    └─→ result_scout
 4. Extract summaryText from result_scout.summary
    (capped at 24,000 bytes — same as sync chain)
-5. Re-read spec, registry, trust from disk
+5. Re-read spec, user registry from disk
 6. runChildAgent(planner, summaryText)    ← HANDOFF
    └─→ result_planner
 7. Extract summaryText from result_planner.summary
-8. Re-read spec, registry, trust from disk
+8. Re-read spec, user registry from disk
 9. runChildAgent(reviewer, summaryText)   ← HANDOFF
    └─→ result_reviewer
 10. Write result.json (redacted chain result)
@@ -206,7 +217,7 @@ mechanics. Agents never imports tmux directly.
 
 - Max concurrent bg runs: 5. Atomic reservation via `.reserved` file with `flag:"wx"`
 - Old runs pruned: keep last 20. Also deletes orphaned `prompt.txt` and `events.jsonl`
-- `.session.mac` key created at session start, deleted on end
+- `.session.mac` key created at session start; retired at next session-start when fully idle (N5: `retireSessionMacKeyIfFullyIdle`). session_shutdown is reap-only (frees slots, never deletes the key) — avoids orphaning a live worker's key.
 - `prompt.txt` cleaned by `runChildAgent`'s existing `finally` block
 - `events.jsonl` pruned when run directory is deleted
 - Orphan detection: tmux window check for stale runs
@@ -220,7 +231,7 @@ mechanics. Agents never imports tmux directly.
 | Parent session killed | Worker continues; next Pi session reconstructs from disk + tmux |
 | Agent unregistered between preflight and spawn | Worker re-runs `canRunAgent` at spawn → blocked |
 | Hash changed between preflight and spawn | Worker recomputes hash at spawn → mismatch → blocked |
-| Project trust revoked between preflight and spawn | Worker re-reads trust state → blocked |
+| Project trust revoked between preflight and spawn | DEFERRED (project-agent scope, REQ-P*) — not exercised in user-agents-first cut. User registry re-read IS the gate here. |
 | Manifest tampered | MAC validation fails → worker rejects, no spawn |
 | Manifest tries to set `-e` or `disableResourceDiscovery` | Fields not in manifest, worker uses trusted sources only |
 | Result file lost | After timeout, mark as `unknown` |
@@ -237,7 +248,7 @@ mechanics. Agents never imports tmux directly.
 | canRunAgent before spawn | Worker re-runs gate at each spawn from disk |
 | Current spec bytes re-read | Worker reads `canonicalPath`, recomputes hash |
 | Hash mismatch fails closed | Worker compares against registry, blocks on mismatch |
-| Project trust required | Worker re-reads trust state from disk |
+| Project trust required | DEFERRED (project-agent scope). User-agents-first cut gates on user registry + canonical-path hash only. |
 | Task in stdin, not argv | `promptTransport: "private-temp-file"` via `buildChildPiArgs` |
 | `--no-approve` by default | Worker hard-pins `disableResourceDiscovery: true` |
 | Forbidden tools blocked | Worker re-reads spec, `buildChildPiArgs` normalizes tools |
@@ -265,30 +276,33 @@ mechanics. Agents never imports tmux directly.
 ### P4-2: bg-preflight.ts — Shared preflight (~80 lines)
 
 - `preflightBgAgent(target, task, ctx)` → writes identity manifest + returns run ID
-- Calls `canRunAgent`, verifies registered hash, enforces project trust
+- Calls `canRunAgent` (can-run-agent.ts), verifies registered hash, enforces user-registry gate (project trust DEFERRED)
+- Builds manifest via `signBgManifest(Omit<BgRunManifest,"mac">, key)` + attaches `mac` + `keyGenId = keyGenIdFromKey(key)` (bg-state.ts); top-level `version:1`, `runId`, `keyGenId` REQUIRED
+- Options keys limited to `{maxDurationSec?, cwd, homeDir}` (readBgManifest rejects unknown)
 - Writes manifest with identity only (name, path, expected hash), task, options
-- Signs manifest with session MAC
 - Returns run ID for terminal backend launching
-- **Refactors existing preflight in run-resolver.ts** to use shared path
+- **Refactors existing preflight in run-resolver.ts** to use shared path — MUST be behavior-preserving for sync `/agents run` (run-resolver.ts:233 already calls canRunAgent); add sync-path regression assertion
+- Imports: `canRunAgent`→can-run-agent.ts; `signBgManifest`/`keyGenIdFromKey`/`readOrCreateSessionMacKey`/`createBgRunState`/`writeBgManifest`/`getBgRunPaths`→bg-state.ts; `buildChildPiArgs`→child-args.ts
 - **New file + refactor**
 
 ### P4-3: bg-worker.ts — Worker process (~150 lines)
 
 - `runBgWorker(manifestPath)` — entry point for terminal-launched process
-- Verifies MAC on manifest, rejects on tamper
+- `readBgManifest(paths)` → `verifyBgManifest(manifest, readSessionMacKey(resolveTrustedHome()))` — rejects on tamper
+- `assertManifestIdentityMatchesRuntime(manifest, { homeDir: resolveTrustedHome() })` — rejects on homeDir mismatch (N1; cwd NOT compared — N6)
 - Reads identity from manifest (name, path, expected hash)
 - For each agent spawn (including chain steps):
   - Re-reads file bytes from `canonicalPath`, recomputes `rawBytesSha256`
-  - Re-reads registry from disk
-  - Re-reads project trust state from disk
-  - Calls `canRunAgent` with live hash, registry, trust
-  - If denied → writes `failed`, writes `done`, exits
+  - Re-reads **user registry** from disk (project trust DEFERRED — user-agents-first)
+  - Calls `canRunAgent` with live hash, registry (no project-trust re-read in this cut)
+  - If denied → writes `failed` (writeBgResult), writes `done` (markBgRunDone), exits
   - If approved → reads `-e` from env, hard-pins `disableResourceDiscovery: true`
-  - Calls `buildChildPiArgs` with live spec
-  - Calls `runChildAgent` (preserving timeout/output/JSONL/redaction)
+  - Calls `buildChildPiArgs` (child-args.ts) with live spec
+  - Calls `runChildAgent` (child-runner.ts; preserving timeout/output/JSONL/redaction)
 - For chain: extracts `summary.summaryText` (24KB cap), passes as next task
-- Handles SIGTERM → writes `stopped`, writes `done`, exits
-- Writes redacted `result.json` atomically, writes `done` sentinel
+- Handles SIGTERM → writes `stopped`, writes `done`, exits (killing is the backend's job via bg-stop; reaper never signals — N3)
+- Writes redacted `result.json` atomically (writeBgResult), writes `done` sentinel (markBgRunDone)
+- Imports: `readBgManifest`/`verifyBgManifest`/`assertManifestIdentityMatchesRuntime`/`resolveTrustedHome`/`readSessionMacKey`/`writeBgResult`/`markBgRunDone`/`appendBgEvent`/`getBgRunPaths`→bg-state.ts; `canRunAgent`→can-run-agent.ts; `buildChildPiArgs`→child-args.ts; `runChildAgent`→child-runner.ts
 - **New file only**
 
 ### P4-4: agents/lib/bg-terminal.ts — Backend interface (~30 lines)
@@ -315,12 +329,12 @@ mechanics. Agents never imports tmux directly.
 
 - `agents/test-fixtures/test-bg.mjs`
 - Fake `TermBgBackend`, fake worker, temp state dir
-- Tests for: preflight blocks, hash mismatch, project trust, task privacy,
+- Tests for: preflight blocks, hash mismatch, task privacy, manifest tamper, identity mismatch (project trust tests DEFERRED to project-agent scope)
   manifest integrity, per-spawn gate re-run, bg-chain handoff, timeout,
   stop, parent restart, lost result, concurrency limit, runId collision,
   symlink refusal, disk-full handling
 - **Negative tests from adversarial review**: manifest tamper (forbidden tools,
-  disableResourceDiscovery, loader path, MAC re-sign), project trust revoked
+  disableResourceDiscovery, loader path, MAC re-sign), project trust revoked (DEFERRED)
   mid-flight, agent unregistered mid-flight, events.jsonl never surfaced,
   prompt.txt deleted on crash path, worker denied → tmux closes
 
