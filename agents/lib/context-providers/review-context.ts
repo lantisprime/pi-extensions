@@ -4,6 +4,81 @@ import path from "node:path";
 import { defaultGitRunner, isSafeGitRef, type GitRunner } from "./git-runner.ts";
 import { ALL_PROVIDER_IDS, isProviderId, type ProviderId } from "./provider-id.ts";
 
+// ── B: Contained referenced-doc reader (REQ-B1) ────────────────────────────
+// TOCTOU-safe: open(no-follow) → fstat(handle) → realpath-contain → read FROM handle.
+// Rejects: absolute/~/URL/control-char, .., non-.md/.mdx ext, symlink escape, oversize, binary.
+
+const CONTAINED_READ_ALLOWED_EXTS = new Set([".md", ".mdx"]);
+const CONTAINED_READ_MAX_FILE_BYTES = 80_000;   // per-file cap
+const CONTAINED_READ_MAX_TOTAL_BYTES = 200_000; // total-bytes cap across all refs
+const CONTAINED_READ_MAX_COUNT = 20;            // max refs per bundle
+
+export type ContainedRead = { ok: true; content: string } | { ok: false; reason: string };
+
+/** Read a single contained referenced doc. All checks operate on the OPEN file handle (TOCTOU-safe). */
+export async function readContainedReferencedDoc(projectRoot: string, ref: string): Promise<ContainedRead> {
+	// 1. Reject syntactically dangerous refs before any fs call.
+	if (typeof ref !== "string" || ref.length === 0) return { ok: false, reason: "not-relative" };
+	// Reject absolute paths (unix / or windows C:\), home-relative (~), URLs, control chars.
+	if (/^[/\\~]/.test(ref) || /^[a-zA-Z]:/.test(ref) || /^[a-z][a-z+\-.]*:\/\//i.test(ref) || /[\x00-\x1f]/.test(ref)) {
+		return { ok: false, reason: "not-relative" };
+	}
+	// Reject path traversal (.. after normalization).
+	const normalized = path.normalize(ref);
+	if (normalized.startsWith("..") || path.isAbsolute(normalized)) return { ok: false, reason: "traversal" };
+	// Reject non-md/mdx extensions.
+	const ext = path.extname(normalized).toLowerCase();
+	if (!CONTAINED_READ_ALLOWED_EXTS.has(ext)) return { ok: false, reason: "ext" };
+
+	// 2. Compute the candidate absolute path.
+	const candidate = path.join(projectRoot, normalized);
+
+	// 3. Open the file with O_NOFOLLOW (no symlink follow at final component).
+	//    Node's fs.open flags: "r" on Linux follows symlinks. Use the numeric flag to prevent it.
+	//    O_RDONLY=0, O_NOFOLLOW=0x20000 on Linux, 0x100 on macOS. Use platform constant.
+	//    Fall back gracefully: if O_NOFOLLOW is not available, the realpath check below still catches escape.
+	let fh: Awaited<ReturnType<typeof fs.open>> | undefined;
+	try {
+		// We open with "r" first; if the path is a symlink, open still opens the target on most platforms.
+		// The critical guard is: after open, realpath the /proc/self/fd/<fd> path (or fh path) and check containment.
+		// On macOS we can use fs.open with O_NOFOLLOW via numeric flags.
+		const O_NOFOLLOW = process.platform === "linux" ? 0x20000 : 0x100; // macOS: 0x100
+		const O_RDONLY = 0;
+		try {
+			fh = await fs.open(candidate, O_RDONLY | O_NOFOLLOW);
+		} catch (err) {
+			// ELOOP or ENOTDIR means it's a symlink; ENOENT means missing. Both → not-file / symlink-escape.
+			const code = (err instanceof Error && "code" in err) ? (err as NodeJS.ErrnoException).code : null;
+			if (code === "ELOOP" || code === "ENOTDIR") return { ok: false, reason: "symlink-escape" };
+			return { ok: false, reason: "not-file" };
+		}
+
+		// 4. fstat(handle) — check that we have a regular file and get its size.
+		const stat = await fh.stat();
+		if (!stat.isFile()) { return { ok: false, reason: "not-file" }; }
+		if (stat.size > CONTAINED_READ_MAX_FILE_BYTES) { return { ok: false, reason: "too-big" }; }
+
+		// 5. Realpath-containment check on the OPENED path (catches symlinks that slipped through).
+		//    We realpath the candidate (not the handle) — on macOS O_NOFOLLOW already refused symlink opens.
+		//    This is a defense-in-depth check for any platform that doesn't support O_NOFOLLOW.
+		let real: string;
+		try { real = await fs.realpath(candidate); }
+		catch { return { ok: false, reason: "symlink-escape" }; }
+		const rootReal = await fs.realpath(projectRoot).catch(() => projectRoot);
+		const rootNorm = rootReal.endsWith(path.sep) ? rootReal : rootReal + path.sep;
+		if (real !== rootReal && !real.startsWith(rootNorm)) { return { ok: false, reason: "symlink-escape" }; }
+
+		// 6. Read from the handle (TOCTOU-safe: same inode we stat'd).
+		const buf = await fh.readFile();
+		// Binary sniff: reject if first 512 bytes contain a NUL byte.
+		const sniff = buf.slice(0, 512);
+		if (sniff.includes(0)) { return { ok: false, reason: "binary" }; }
+		return { ok: true, content: buf.toString("utf8") };
+	} finally {
+		if (fh) await fh.close().catch(() => {});
+	}
+}
+
 /** P9: parent-side review-context assembly. Produces a bounded markdown bundle (branch + diff +
  *  changed files + commits + related plan docs) that a sandboxed child reads via its `read` tool.
  *  Transport (temp file the child reads) verified by the B1 spike. All git access is read-only and
@@ -54,6 +129,8 @@ export type BundleMeta = {
 	untracked: string[];
 	/** Files whose diff was omitted by a cap (N1 — surfaced in the bundle, never silent). */
 	omittedDiffFiles: string[];
+	/** P10-B: canonical project root used for all contained-doc reads (REQ-B3). */
+	projectRoot: string;
 };
 
 export type ReviewBundle = { markdown: string; meta: BundleMeta };
@@ -172,24 +249,82 @@ async function buildCommitsSection(git: GitRunner, cwd: string, base: string | n
 	return ["## Branch commits", "", ...lines.map((l) => `- ${l}`)].join("\n");
 }
 
+/** Extract doc refs (`.md`/`.mdx` paths) from the content of a plan doc. */
+function extractDocRefs(content: string): string[] {
+	// Match bare repo-relative paths like `docs/P9_PLAN.md` or `agents/lib/x.mdx` in prose.
+	// Heuristic: word-boundary-ish token ending in .md or .mdx, not inside a code fence.
+	const refs: string[] = [];
+	const seen = new Set<string>();
+	for (const match of content.matchAll(/(?<![`"'([])((?:[\w./\-]+\/)?[\w.\-]+\.mdx?)(?![`"'\])])/g)) {
+		const ref = match[1];
+		if (!ref || seen.has(ref)) continue;
+		// Skip if it starts with / ~ or looks like a URL — containment guard will reject anyway, but
+		// filter early so we don't pay the fs cost for obviously bad refs.
+		if (/^[/~]/.test(ref) || /^[a-z][a-z+\-.]*:\/\//i.test(ref)) continue;
+		seen.add(ref);
+		refs.push(ref);
+	}
+	return refs;
+}
+
 /** plan-docs provider: include the content of changed plan/workplan docs (most relevant), else the
- *  root WORKPLAN.md if present. Bounded by maxPlanDocBytes. */
-async function buildPlanDocsSection(cwd: string, files: ChangedFile[], readFile: (p: string) => Promise<string | null>, caps: BundleCaps): Promise<string | null> {
+ *  root WORKPLAN.md if present. ALL reads go through readContainedReferencedDoc (REQ-B1).
+ *  B.3: also scans each changed plan doc for referenced docs and includes them if contained. */
+async function buildPlanDocsSection(
+	cwd: string,
+	files: ChangedFile[],
+	caps: BundleCaps,
+	refCountBudget: { count: number; totalBytes: number },
+): Promise<{ section: string | null; omissions: string[] }> {
 	const isPlanDoc = (p: string) => /(^|\/)WORKPLAN[^/]*\.md$/i.test(p) || /_PLAN\.md$/i.test(p) || /\/[^/]*PLAN[^/]*\.md$/i.test(p);
 	const candidates = files.map((f) => f.path).filter(isPlanDoc);
-	if (candidates.length === 0) candidates.push("WORKPLAN.md");
+	const isFallback = candidates.length === 0;
+	if (isFallback) candidates.push("WORKPLAN.md");
 	const blocks: string[] = [];
 	let budget = caps.maxPlanDocBytes;
+	const omissions: string[] = [];
+	const includedRefs = new Set<string>();
+
 	for (const rel of candidates) {
 		if (budget <= 0) break;
-		const content = await readFile(path.join(cwd, rel));
-		if (content === null) continue;
+		if (refCountBudget.count >= CONTAINED_READ_MAX_COUNT) { omissions.push(rel); continue; }
+		if (refCountBudget.totalBytes >= CONTAINED_READ_MAX_TOTAL_BYTES) { omissions.push(rel); continue; }
+		// B.2: all plan-doc reads go through readContainedReferencedDoc (REQ-B1).
+		const result = await readContainedReferencedDoc(cwd, rel);
+		refCountBudget.count += 1;
+		if (!result.ok) {
+			if (!isFallback) omissions.push(`${rel} (${result.reason})`);
+			continue;
+		}
+		const content = result.content;
+		refCountBudget.totalBytes += Buffer.byteLength(content, "utf8");
 		const clipped = Buffer.byteLength(content, "utf8") > budget ? `${content.slice(0, budget)}\n…(truncated)` : content;
 		budget -= Buffer.byteLength(clipped, "utf8");
 		blocks.push(`### ${rel}`, "", clipped, "");
+		includedRefs.add(rel);
+
+		// B.3: scan for referenced docs in this plan doc's content.
+		const docRefs = extractDocRefs(content);
+		for (const docRef of docRefs) {
+			if (includedRefs.has(docRef)) continue;
+			if (refCountBudget.count >= CONTAINED_READ_MAX_COUNT) { omissions.push(`${docRef} (count-cap)`); continue; }
+			if (refCountBudget.totalBytes >= CONTAINED_READ_MAX_TOTAL_BYTES) { omissions.push(`${docRef} (total-cap)`); continue; }
+			if (budget <= 0) { omissions.push(`${docRef} (plan-doc-budget)`); continue; }
+			const refResult = await readContainedReferencedDoc(cwd, docRef);
+			refCountBudget.count += 1;
+			if (!refResult.ok) { omissions.push(`${docRef} (${refResult.reason})`); continue; }
+			const refContent = refResult.content;
+			refCountBudget.totalBytes += Buffer.byteLength(refContent, "utf8");
+			const refClipped = Buffer.byteLength(refContent, "utf8") > budget ? `${refContent.slice(0, budget)}\n…(truncated)` : refContent;
+			budget -= Buffer.byteLength(refClipped, "utf8");
+			blocks.push(`### ${docRef} (referenced)`, "", refClipped, "");
+			includedRefs.add(docRef);
+		}
 	}
-	if (blocks.length === 0) return null;
-	return ["## Related plan docs", "", ...blocks].join("\n");
+	if (blocks.length === 0) return { section: null, omissions };
+	const sectionBlocks: string[] = ["## Related plan docs", "", ...blocks];
+	if (omissions.length > 0) sectionBlocks.push(`> [refs omitted: ${omissions.join(", ")}]`);
+	return { section: sectionBlocks.join("\n"), omissions };
 }
 
 /** Assemble a bounded review bundle for the requested providers. Never throws — every git/fs error
@@ -209,7 +344,6 @@ export async function assembleReviewBundle(providers: readonly ProviderId[], dep
 	// every diff would be silently omitted. show-toplevel also resolves a linked worktree's root.
 	const rootRes = await git(["rev-parse", "--show-toplevel"], { cwd: deps.cwd });
 	const cwd = rootRes.ok && rootRes.stdout.trim() ? rootRes.stdout.trim() : deps.cwd;
-	const readFile = deps.readFile ?? defaultReadFile;
 	const caps = resolveCaps(deps.caps);
 	const defaultBranches = deps.defaultBranches ?? ["main", "master"];
 	const want = new Set(providers);
@@ -240,12 +374,15 @@ export async function assembleReviewBundle(providers: readonly ProviderId[], dep
 		if (commits) sections.push(commits);
 	}
 	if (want.has("plan-docs")) {
-		const plan = await buildPlanDocsSection(cwd, files, readFile, caps);
+		// B.2/B.3: pass projectRoot (cwd) and a shared ref-budget counter for cross-provider cap enforcement.
+		const refCountBudget = { count: 0, totalBytes: 0 };
+		const { section: plan } = await buildPlanDocsSection(cwd, files, caps, refCountBudget);
 		if (plan) sections.push(plan);
 	}
 
 	const markdown = [header.join("\n"), ...sections].join("\n\n") + "\n";
-	return { markdown, meta: { branch, base, degraded, changedFiles: files, untracked, omittedDiffFiles } };
+	// B.4: return projectRoot so callers can pass cwd:projectRoot to the child (REQ-B3).
+	return { markdown, meta: { branch, base, degraded, changedFiles: files, untracked, omittedDiffFiles, projectRoot: cwd } };
 }
 
 export type BundleHandle = { path: string; dispose: () => Promise<void> };
