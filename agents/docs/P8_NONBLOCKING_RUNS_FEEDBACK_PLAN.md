@@ -382,3 +382,36 @@ Total: 16 tests. (Existing child-runner / chain / subagent suites must also stay
 > **Appendix B (mechanical execution spec)** with verbatim anchors will be finalized **after** plan +
 > adversarial review, since P8-3 is flagged "focused review before build" and the spike (step 3) may
 > adjust the wiring shape. Authoring it now would bake in a wiring that review could change.
+
+---
+
+## P8 follow-up: result → conversation context (all dispatch paths)
+
+Shipped after the progress-widget slices (commit #66). The background widget tells the *user* a run
+finished, but the *model* never saw the findings — so the parent agent couldn't react to a review.
+This follow-up feeds a completed (or failed) child run back into pi's conversation so the model picks
+up from there.
+
+**Mechanism.** `ctx.deliverResult(content)` → `pi.sendUserMessage(content, { deliverAs: "followUp" })`
+(always triggers a turn; queues politely if pi is busy). The payload is built by
+`formatAgentResultForContext` (`child-runner.ts`): NL summary + compact tool list on success, or a
+framed error for the model to interpret on failure. `executeChildRunResult` (`run-resolver.ts`) calls
+it on every settle path, guarded by `typeof ctx.deliverResult === "function"`.
+
+| Req | Requirement | Test | Level | Notes |
+|---|---|---|---|---|
+| REQ-F1 | A completed/failed run is injected into pi's conversation via `deliverResult` on **every** dispatch path that can reach `hasUI` | `test-p8` delivery tests; `testGate_inputHookReattachesDeliverResult` | MUST | The guard is `typeof ctx.deliverResult === "function"`; an unwired ctx drops the result **silently** |
+| REQ-F2 | `deliverResult` is wired for **both** the `/agents` command handler **and** the natural-language `input`-gate path (P7-2) | `testGate_inputHookReattachesDeliverResult` | MUST | Both handlers get a **fresh ctx** without it — same class as the `profileLibrary` re-attach gap |
+| REQ-F3 | Non-UI / tool / chain-step callers are unaffected (no `sendUserMessage`, sync result) | existing `test-subagent-tool`, `test-chain` stay green | MUST | `sendUserMessage` absent off-TUI → `deliverResult` stays undefined → guard no-ops |
+
+**Wiring (single helper, no drift).** `attachDeliverResult(pi, ctx)` in `index.ts` is the one place
+that binds `sendUserMessage`. It is called at `session_start` (onto the session ctx) and in the
+`/agents` command handler. The NL-gate path can't take a fresh per-event ctx straight to dispatch, so
+`handleGateInput` **re-attaches `deliverResult` from `sessionCtx`** right beside its existing
+`profileLibrary` re-attach — keeping the two fresh-ctx gaps fixed by the same pattern.
+
+**Bug fixed here.** The NL-gate path (typing "review this code" rather than `/agents run reviewer …`)
+dispatched with the input-event ctx, which never had `deliverResult`. The reviewer ran, the user saw
+the operator toast, but the findings were **never injected into context** — the model stayed unaware.
+Regression: `testGate_inputHookReattachesDeliverResult` (positive: re-attached from `sessionCtx`;
+negative control: absent without `sessionCtx`, reproducing the silent drop).

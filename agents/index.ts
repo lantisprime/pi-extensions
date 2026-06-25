@@ -61,6 +61,19 @@ type AgentsContext = {
 	deliverResult?: (content: string) => void;
 };
 
+/** P8-followup: wire ctx.deliverResult to pi.sendUserMessage so a completed subagent run is fed
+ *  back into pi's conversation (triggers a turn so pi reacts to the findings). deliverAs:"followUp"
+ *  queues politely if pi is busy. MUST be called on every ctx that can dispatch a run — both the
+ *  /agents command handler AND the natural-language `input`-gate handler hand us a fresh ctx without
+ *  it, and a gate-routed run whose ctx lacks deliverResult drops its result silently (run-resolver
+ *  guards on `typeof ctx.deliverResult === "function"`). */
+function attachDeliverResult(pi: ExtensionAPI, ctx: AgentsContext): void {
+	const sendUserMessage = (pi as ExtensionAPI & { sendUserMessage?: (content: string, options?: { deliverAs?: "steer" | "followUp" }) => void }).sendUserMessage;
+	if (typeof sendUserMessage === "function") {
+		ctx.deliverResult = (content: string) => sendUserMessage(content, { deliverAs: "followUp" });
+	}
+}
+
 export default function agentsExtension(pi: ExtensionAPI) {
 	const eventApi = pi as ExtensionAPI & { on?: (name: string, handler: (event: unknown, ctx: AgentsContext) => Promise<void> | void) => void };
 	let sessionAgentsCtx: AgentsContext | undefined;
@@ -71,6 +84,11 @@ export default function agentsExtension(pi: ExtensionAPI) {
 	});
 	eventApi.on?.("session_start", async (_event, ctx) => {
 		sessionAgentsCtx = ctx;
+		// Wire deliverResult onto the session ctx so BOTH dispatch paths can reach it: the /agents
+		// command handler (via attachDeliverResult on its own ctx) and the NL `input`-gate handler
+		// (which re-attaches it from sessionCtx in handleGateInput). Without this the gate path drops
+		// a completed run's findings silently.
+		attachDeliverResult(pi, ctx);
 		ctx.profileLibrary = profileLibrary; // start with built-ins
 		// Discover user/project profiles and rebuild library
 		try {
@@ -125,11 +143,8 @@ export default function agentsExtension(pi: ExtensionAPI) {
 				ctx.profileLibraryWarnings = sessionAgentsCtx.profileLibraryWarnings;
 			}
 			// P8-followup: deliver a completed subagent's result into pi's conversation (triggers a
-			// turn so pi reacts to the findings). deliverAs:"followUp" queues politely if pi is busy.
-			const sendUserMessage = (pi as ExtensionAPI & { sendUserMessage?: (content: string, options?: { deliverAs?: "steer" | "followUp" }) => void }).sendUserMessage;
-			if (typeof sendUserMessage === "function") {
-				ctx.deliverResult = (content: string) => sendUserMessage(content, { deliverAs: "followUp" });
-			}
+			// turn so pi reacts to the findings). Shared with the NL `input`-gate handler.
+			attachDeliverResult(pi, ctx);
 			const diagnostics = await collectAgentDiagnostics({ cwd: ctx.cwd, homeDir: ctx.agentsHomeDir, projectTrusted: resolveProjectTrusted(ctx) });
 			// Thread the resolved trust + project registry onto ctx so the run path's project-profile
 			// trust check sees them (the per-command ctx only carries isProjectTrusted(), not the
@@ -276,6 +291,12 @@ export async function handleGateInput(
 		if (!ctx.profileLibrary && sessionCtx?.profileLibrary) {
 			ctx.profileLibrary = sessionCtx.profileLibrary;
 			ctx.profileLibraryWarnings = sessionCtx.profileLibraryWarnings;
+		}
+		// Same fresh-ctx gap for result delivery: the input-event ctx has no deliverResult, so a
+		// gate-routed run would finish and its findings would never reach pi's conversation. Re-attach
+		// from the session ctx (wired at session_start) — mirrors the profileLibrary re-attach above.
+		if (!ctx.deliverResult && sessionCtx?.deliverResult) {
+			ctx.deliverResult = sessionCtx.deliverResult;
 		}
 		if (decision.profile) {
 			const diagnostics = await collectAgentDiagnostics({ cwd: ctx.cwd, homeDir: ctx.agentsHomeDir, projectTrusted });
