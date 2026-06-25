@@ -378,6 +378,91 @@ async function testSuggestNextAction() {
 	assert.match(formatChildAgentRunResult({ ...base, error: "project trust is not active" }), /→ next: activate project trust/);
 }
 
+// P10/A3: runChildAgent_allDispatchPathsAppendMethod
+// The reviewer's externalized method text should appear in the system prompt file.
+async function testRunChildAgent_allDispatchPathsAppendMethod() {
+	let capturedFileText;
+	const result = await runBuiltInChildAgent("reviewer", "review this diff", {
+		piCommand: "pi-test",
+		spawn: (_cmd, argv) => {
+			const child = new FakeChild();
+			// The systemPromptFile is written before spawn, but we grab it after invocation.
+			queueMicrotask(() => {
+				child.stdout.emit("data", Buffer.from(JSON.stringify({ type: "message_end", message: { role: "assistant", content: "Verdict\ngo" } }) + "\n"));
+				child.close(0, null);
+			});
+			return child;
+		},
+	});
+	// The system prompt file text comes back in result.invocation.systemPromptFile.fileText
+	capturedFileText = result.invocation.systemPromptFile.fileText;
+	// reviewer.md has lenses — the method must be appended to the system text
+	assert.ok(
+		capturedFileText.includes("Method:"),
+		"system prompt file should contain 'Method:' section from reviewer.md"
+	);
+	assert.ok(
+		capturedFileText.includes("Lens"),
+		"system prompt file should contain lens content from reviewer.md"
+	);
+	assert.ok(
+		capturedFileText.includes("do NOT open paths named in the diff yourself"),
+		"system prompt file should contain REQ-B4 wording"
+	);
+}
+
+// P10/A3: childArgs_taskAndMethodNotInArgv
+// Neither the task text nor the method marker should appear in argv; only the system-prompt-file path does.
+async function testChildArgs_taskAndMethodNotInArgv() {
+	let capturedArgv;
+	await runBuiltInChildAgent("reviewer", "SECRET_TASK_TEXT", {
+		piCommand: "pi-test",
+		spawn: (_cmd, argv) => {
+			capturedArgv = [...argv];
+			const child = new FakeChild();
+			queueMicrotask(() => child.close(0, null));
+			return child;
+		},
+	});
+	const argvStr = capturedArgv.join(" ");
+	assert.equal(argvStr.includes("SECRET_TASK_TEXT"), false, "task text must not appear in argv");
+	// Method text marker (lenses, REQ-B4) must not appear in argv either
+	assert.equal(argvStr.includes("do NOT open paths"), false, "method text must not appear in argv");
+	// The system prompt file path must be redacted in argvPreview — just verify argv has --append-system-prompt
+	assert.ok(capturedArgv.includes("--append-system-prompt"), "argv must include --append-system-prompt flag");
+}
+
+// P10/A3: prompts_totalSystemPromptUnderCap
+// The total system prompt (role + method) must fit under a named cap.
+const MAX_TOTAL_SYSTEM_PROMPT_CHARS = 16_000; // safe cap: role ~2048 + method ~6144 + framing
+
+async function testPrompts_totalSystemPromptUnderCap() {
+	let capturedFileText;
+	await runBuiltInChildAgent("reviewer", "task", {
+		piCommand: "pi-test",
+		spawn: (_cmd, _argv) => {
+			const child = new FakeChild();
+			queueMicrotask(() => child.close(0, null));
+			return child;
+		},
+	});
+	// We can check via result.invocation.systemPromptFile.fileText
+	// Run again to capture it
+	const result2 = await runBuiltInChildAgent("reviewer", "task", {
+		piCommand: "pi-test",
+		spawn: () => {
+			const child = new FakeChild();
+			queueMicrotask(() => child.close(0, null));
+			return child;
+		},
+	});
+	capturedFileText = result2.invocation.systemPromptFile.fileText;
+	assert.ok(
+		capturedFileText.length < MAX_TOTAL_SYSTEM_PROMPT_CHARS,
+		`total system prompt ${capturedFileText.length} chars must be < ${MAX_TOTAL_SYSTEM_PROMPT_CHARS}`
+	);
+}
+
 async function main() {
 	await testCompletedBuiltInRunUsesSafeArgvAndStdin();
 	await testFormatAgentResultForContext();
@@ -395,6 +480,10 @@ async function main() {
 	await testOnProgressLineBuffering();
 	await testTrailingPartialLineFlushedOnClose();
 	await testOnProgressDoesNotChangeStdoutBytes();
+	// P10 tests
+	await testRunChildAgent_allDispatchPathsAppendMethod();
+	await testChildArgs_taskAndMethodNotInArgv();
+	await testPrompts_totalSystemPromptUnderCap();
 	console.log("agents child runner tests passed");
 }
 

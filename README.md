@@ -357,6 +357,8 @@ Defines, registers, vets, and runs constrained child Pi agents.
 Features:
 
 - Three built-in agents: `scout`, `planner`, `reviewer` — all read-only (`read`, `grep`, `find`, `ls`)
+- Auto-assembled **review context**: the trusted parent hands `reviewer`/`planner` a bounded bundle (branch-vs-base diff + uncommitted + changed files + commits + referenced plan docs) via a temp file, under a root-containment regime (symlink/hardlink-escape refused); child runs with `cwd` = work-tree root
+- Externalized **agent method prompts** in `lib/prompts/<role>.md` (`instructionsFile`, built-in-only) appended to the child system prompt — reaches every dispatch path incl. the NL gate
 - Intent-based routing via `/agents do <task>` — LLM classifier picks the right agent, auto-runs high-confidence read-only picks, confirms below threshold. Falls back to deterministic keyword heuristic on classifier failure
 - `run_subagent` LLM-callable tool for single read-only child runs
 - User/project agent registration with Markdown frontmatter specs

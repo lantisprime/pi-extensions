@@ -113,13 +113,17 @@ async function executeChildRunResult(agent: Parameters<ChildAgentRunner>[0], tas
 		// agents without context or when there's nothing to review. dispose() in finally (B3).
 		const prepared = await prepareAgentTask(agent, task, { cwd: ctx.cwd });
 		const childTask = prepared.task;
+		// P10-B: override cwd with the canonical project root (REQ-B3) so the child's read/grep/ls
+		// resolve from the repo root, not the caller's subdir or linked-worktree subpath.
+		const projectRootCwd = prepared.projectRoot ?? childOptions.cwd;
+		const runOptionsWithRoot = { ...runOptions, cwd: projectRootCwd };
 		let result: ChildAgentRunResult;
 		try {
 			result = ctx.agentsChildRunner
-				? await ctx.agentsChildRunner(agent, childTask, profileOverride ? { ...childOptions, profileOverride, ...progressOpt, ...timeoutOpt } : { ...childOptions, ...progressOpt, ...timeoutOpt })
+				? await ctx.agentsChildRunner(agent, childTask, profileOverride ? { ...childOptions, cwd: projectRootCwd, profileOverride, ...progressOpt, ...timeoutOpt } : { ...childOptions, cwd: projectRootCwd, ...progressOpt, ...timeoutOpt })
 				: typeof agent === "string"
-					? await runBuiltInChildAgent(agent, childTask, runOptions, profiles, profileOverride)
-					: await runChildAgent(agent, childTask, runOptions, profiles, profileOverride);
+					? await runBuiltInChildAgent(agent, childTask, runOptionsWithRoot, profiles, profileOverride)
+					: await runChildAgent(agent, childTask, runOptionsWithRoot, profiles, profileOverride);
 		} finally {
 			await prepared.dispose();
 		}

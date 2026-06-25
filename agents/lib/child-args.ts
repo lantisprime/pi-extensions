@@ -8,6 +8,7 @@ export type ChildPiArgsOptions = {
 	explicitToolContextLoaderPath?: string;
 	disableContextFiles?: boolean;
 	disableResourceDiscovery?: boolean;
+	appendMethod?: string;
 };
 
 export type ChildPromptTransport = { kind: "stdin"; stdinText: string };
@@ -25,7 +26,7 @@ const DEFAULT_PI_COMMAND = "pi";
 
 export function buildChildPiArgs(spec: AgentSpec, task: string, options: ChildPiArgsOptions = {}): ChildPiInvocation {
 	validateChildArgInputs(spec, task, options);
-	const systemText = buildChildSystemText(spec);
+	const systemText = buildChildSystemText(spec) + (options.appendMethod ? `\n\nMethod:\n${options.appendMethod}` : "");
 	const command = options.piCommand ?? DEFAULT_PI_COMMAND;
 	const argv = ["--mode", "json", "--no-session"];
 	if (options.disableResourceDiscovery !== false) argv.push("--no-approve", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes");
