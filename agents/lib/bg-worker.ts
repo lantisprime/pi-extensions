@@ -56,11 +56,14 @@ export async function runBgWorker(manifestPath: string, options: BgWorkerOptions
 
 	let status: BgRunStatus = "running";
 	let sigtermReceived = false;
+	let abortController: AbortController | undefined;
 
-	// N3: SIGTERM writes stopped + done; the reaper never signals.
+	// N3: SIGTERM writes stopped + done + aborts running child promptly;
+	// the reaper never signals.
 	const onSigterm = () => {
 		sigtermReceived = true;
 		status = "stopped";
+		abortController?.abort();
 	};
 	process.on("SIGTERM", onSigterm);
 
@@ -96,6 +99,27 @@ export async function runBgWorker(manifestPath: string, options: BgWorkerOptions
 			return;
 		}
 
+		// P4-3-fix: verify live spec identity matches the signed manifest identity.
+		// This closes the TOCTOU window where both the spec file and user registry
+		// could be updated after preflight — the signed manifest for agent A would
+		// otherwise silently run agent B with different bytes.
+		const parsedHash = parsed.rawBytesSha256;
+		const parsedName = parsed.spec?.name;
+		if (!parsedHash || !parsedName) {
+			await failRun(paths, manifest, "re-read spec missing identity fields (rawBytesSha256 or name)", startedAt);
+			return;
+		}
+		if (parsedHash !== manifest.identity.expectedHash) {
+			await failRun(paths, manifest,
+				`spec hash mismatch: manifest expects ${manifest.identity.expectedHash.slice(0, 12)}… but live spec hashes to ${parsedHash.slice(0, 12)}…`, startedAt);
+			return;
+		}
+		if (parsedName !== manifest.identity.agentName) {
+			await failRun(paths, manifest,
+				`agent name mismatch: manifest expects '${manifest.identity.agentName}' but live spec is '${parsedName}'`, startedAt);
+			return;
+		}
+
 		// Re-read user registry from disk (resolveTrustedHome path, never os.homedir()).
 		const userRegistry = await readUserRegistry(trustedHome);
 
@@ -120,7 +144,9 @@ export async function runBgWorker(manifestPath: string, options: BgWorkerOptions
 		// disableResourceDiscovery hard-pinned (NEVER manifest).
 		// maxDurationSec from manifest options (advisory child timeout, distinct from
 		// the reservation effectiveTimeoutSec used for slot-accounting).
-		const spec = parsed.spec!;
+		// P4-3-fix: AbortController wired so SIGTERM kills the child promptly.
+		abortController = new AbortController();
+		const spec = parsed.spec!; // safe: canRunAgent denies with missing-spec before this point
 		const result = await childRunner(spec, manifest.task, {
 			cwd: manifest.options.cwd,
 			explicitToolContextLoaderPath: process.env[TOOL_CONTEXT_LOADER_PATH_ENV],
@@ -129,11 +155,26 @@ export async function runBgWorker(manifestPath: string, options: BgWorkerOptions
 			timeoutMs: manifest.options.maxDurationSec
 				? manifest.options.maxDurationSec * 1000
 				: undefined,
+			signal: abortController.signal,
 		});
 
-		status = sigtermReceived ? "stopped" : mapChildStatus(result.status);
-		await writeBgResult(paths, buildBgResult(paths.runId, status, spec.name, startedAt, result));
-		await appendBgEvent(paths, { event: "worker-finished", runId, status });
+		if (sigtermReceived) {
+			// SIGTERM arrived during/after child run — write stopped, not the child's result.
+			status = "stopped";
+			await writeBgResult(paths, {
+				version: 1,
+				runId: paths.runId,
+				status: "stopped",
+				agentName: spec.name,
+				startedAt,
+				finishedAt: new Date().toISOString(),
+			});
+			await appendBgEvent(paths, { event: "worker-stopped", runId: paths.runId });
+		} else {
+			status = mapChildStatus(result.status);
+			await writeBgResult(paths, buildBgResult(paths.runId, status, spec.name, startedAt, result));
+			await appendBgEvent(paths, { event: "worker-finished", runId, status });
+		}
 	} catch (error) {
 		status = sigtermReceived ? "stopped" : "failed";
 		const msg = error instanceof Error ? error.message : String(error);
@@ -227,4 +268,31 @@ async function writeStopped(
 		finishedAt: new Date().toISOString(),
 	});
 	await appendBgEvent(paths, { event: "worker-stopped", runId: paths.runId });
+}
+
+// ── P4-3: Standalone worker process CLI entrypoint ───────────────────────
+// When executed directly (not imported in tests), reads the manifest path
+// from argv[2] and calls runBgWorker. Exits 0 on clean completion, non-zero
+// on any failure so the terminal backend can detect crashed workers.
+
+async function main(): Promise<void> {
+	const manifestPath = process.argv[2];
+	if (!manifestPath) {
+		console.error("usage: node bg-worker.js <manifestPath>");
+		process.exit(2);
+	}
+	try {
+		await runBgWorker(manifestPath);
+		process.exit(0);
+	} catch (err) {
+		console.error(String(err));
+		process.exit(1);
+	}
+}
+
+// Only run when executed directly — not imported by tests or other modules.
+// Matches the exact script basename, not e.g. test-bg-worker.
+const scriptBasename = path.basename(process.argv[1] ?? "");
+if (scriptBasename === "bg-worker.js" || scriptBasename === "bg-worker.ts" || scriptBasename === "bg-worker.mjs") {
+	main();
 }

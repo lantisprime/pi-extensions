@@ -181,7 +181,7 @@ function fakeCompletedResult(name, task) {
 	});
 }
 
-// 4. Gate denial — tamper spec bytes to break hash match
+// 4. Identity hash mismatch — tamper spec bytes after preflight, worker catches it before gate
 {
 	await withTempHome(async (home) => {
 		const { record, diag } = await setupRegisteredUserAgent(home);
@@ -200,7 +200,7 @@ function fakeCompletedResult(name, task) {
 		const raw = await fs.readFile(paths.resultPath, "utf8");
 		const result = JSON.parse(raw);
 		assert.equal(result.status, "failed");
-		assert.ok(result.error.includes("gate denied"));
+		assert.ok(result.error.includes("spec hash mismatch"));
 
 		assert.equal(runnerCalled, false);
 		assert.ok((await fs.stat(paths.donePath)).isFile());
@@ -289,6 +289,110 @@ function fakeCompletedResult(name, task) {
 		assert.equal(result.status, "completed");
 		assert.ok(result.resultText.length <= 64_000 + 15, "resultText should be capped at ~64KB");
 		assert.ok(result.resultText.includes("[truncated]"));
+	});
+}
+
+// 8. Agent name mismatch — tamper manifest identity.agentName after preflight, worker catches it
+{
+	await withTempHome(async (home) => {
+		const { record, diag } = await setupRegisteredUserAgent(home);
+		const { paths } = await preflightAndRead(home, record, diag, "task");
+
+		// Tamper manifest: change identity.agentName, then re-sign so MAC still passes.
+		const { signBgManifest, keyGenIdFromKey, readSessionMacKey } = await import("../lib/bg-state.ts");
+		const manifest = JSON.parse(await fs.readFile(paths.manifestPath, "utf8"));
+		manifest.identity.agentName = "impostor";
+		const key = await readSessionMacKey(home);
+		const unsigned = { ...manifest, mac: undefined };
+		unsigned.keyGenId = keyGenIdFromKey(key);
+		manifest.keyGenId = unsigned.keyGenId;
+		manifest.mac = signBgManifest(unsigned, key);
+		await fs.writeFile(paths.manifestPath, JSON.stringify(manifest, null, 2));
+
+		let runnerCalled = false;
+		await runBgWorker(paths.manifestPath, {
+			homeDir: home,
+			runner: async () => { runnerCalled = true; return fakeCompletedResult("x", "x"); },
+		});
+
+		const raw = await fs.readFile(paths.resultPath, "utf8");
+		const result = JSON.parse(raw);
+		assert.equal(result.status, "failed");
+		assert.ok(result.error.includes("agent name mismatch"));
+
+		assert.equal(runnerCalled, false);
+		assert.ok((await fs.stat(paths.donePath)).isFile());
+	});
+}
+
+// 9. SIGTERM passes abort signal to child runner
+{
+	await withTempHome(async (home) => {
+		const { record, diag } = await setupRegisteredUserAgent(home);
+		const { paths } = await preflightAndRead(home, record, diag, "task");
+
+		const runnerCalls = [];
+		const fakeRunner = async (spec, task, opts) => {
+			runnerCalls.push({ spec, task, signal: opts?.signal });
+			return fakeCompletedResult(spec.name, task);
+		};
+
+		await runBgWorker(paths.manifestPath, { homeDir: home, runner: fakeRunner });
+
+		assert.equal(runnerCalls.length, 1);
+		// The runner must receive an AbortSignal so SIGTERM can abort the child.
+		assert.ok(runnerCalls[0].signal instanceof AbortSignal, "runner must receive an AbortSignal");
+		assert.equal(runnerCalls[0].signal.aborted, false, "signal should not be aborted on a normal run");
+	});
+}
+
+// 10. SIGTERM writes stopped result when child runner is in flight
+{
+	await withTempHome(async (home) => {
+		const { record, diag } = await setupRegisteredUserAgent(home);
+		const { paths } = await preflightAndRead(home, record, diag, "task");
+
+		// Fake runner that never resolves until the signal fires, simulating a long-running child.
+		let runnerResolve;
+		const fakeRunner = async (spec, task, opts) => {
+			return new Promise((resolve) => {
+				runnerResolve = resolve;
+				// Listen for abort — when SIGTERM is simulated, resolve with a stopped-ish result.
+				opts?.signal?.addEventListener("abort", () => {
+					resolve({
+						agentName: spec.name,
+						status: "failed",
+						exitCode: null,
+						signal: "SIGTERM",
+						pid: 0,
+						durationMs: 50,
+						stdoutBytes: 0,
+						stderrPreview: "",
+						invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin", stdinText: task } },
+						summary: { summaryText: "", toolCalls: [], errors: [], usage: undefined, cost: undefined, stopReason: undefined, model: undefined, provider: undefined, truncation: {} },
+						timedOut: false,
+						outputLimitExceeded: false,
+					});
+				}, { once: true });
+			});
+		};
+
+		// Start the worker; it will block at childRunner.
+		const workerPromise = runBgWorker(paths.manifestPath, { homeDir: home, runner: fakeRunner });
+
+		// Give the worker a tick to enter childRunner.
+		await new Promise((r) => setTimeout(r, 10));
+
+		// Simulate SIGTERM by sending it to the current process.
+		// The onSigterm handler will set flags and abort the controller.
+		process.emit("SIGTERM", "SIGTERM");
+
+		await workerPromise;
+
+		const raw = await fs.readFile(paths.resultPath, "utf8");
+		const result = JSON.parse(raw);
+		assert.equal(result.status, "stopped");
+		assert.ok((await fs.stat(paths.donePath)).isFile());
 	});
 }
 
