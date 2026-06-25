@@ -9,26 +9,30 @@ The canonical `pi-extensions` workplan now lives in episodic memory.
 NOT hardcode an episode ID here — it drifts on every revision. The active head is
 the source of truth; older entries in the chain are `superseded`.
 
-## Active implementation (P4R Background Agents Remediation)
+## Active implementation (P4R + P4-2 + P4-3 complete; P4-4 next)
 
-P7 complete. P4R is next.
+P4R Background Agents Remediation and P4-2/P4-3 (preflight + worker) are merged.
 
-- Current episode ID: `20260623-022018-p7-complete-p4r-next-background-agents-r-32bf`
-- Tags include: `canonical-workplan`, `workplan`, `p4r-next`, `p7-complete`
-- Summary: P7 complete, P4R next: Background Agents Remediation
+- Current episode ID: `20260625-080203-p4r-p4-2-p4-3-merged-background-agent-co-a6a6`
+- Tags include: `canonical-workplan`, `workplan`, `p4r-complete`, `p4-2-complete`, `p4-3-complete`, `p4-4-next`, `p4-5-next`
+- Summary: P4R + P4-2 + P4-3 merged: Background Agent core complete. Next: P4-4 terminal interface + P4-5 command wiring
 
 ### Completed tracks
 - P6 Intent Routing (7 slices, PRs #50, #58, #59, #60, #61)
 - P7 Prompt-Intent Gate (3 slices, PRs #64, #67, #69, #70)
 - P8 Responsive Agent UX (PRs #65, #66)
+- P4R Background Agents Remediation (6 slices, PRs #72, #73, #75, #76, #77, #78)
+- P4-2 Preflight: signed identity manifest (PR #81)
+- P4-3 Worker: background-agent worker process (PR #82)
 
 ### Next
-- P4R-3 (manifest integrity + keyGenId) — builds first
-- P4R-0 (authority-root binding — os.userInfo().homedir, not $HOME)
-- P4R-1 (reservation + no-kill reaping)
-- P4R-2 (tolerant listing)
-- P4R-5 (MAC key lifecycle)
-- P4R-6 (hygiene + docs correction)
+- P4-4 Terminal backend interface (bg-terminal.ts — TermBgBackend interface + registry)
+- P4-5 Command wiring (index.ts — /agents bg, bg-status, bg-stop, bg-result, bg-open)
+- P4-6 Status line (running agent count)
+- P4-7 Integration tests (fake backend, 30 tests)
+
+### Parallel
+- P5 Pluggable Terminal Backend (independent track, separate extension)
 
 ### Active design docs
 
