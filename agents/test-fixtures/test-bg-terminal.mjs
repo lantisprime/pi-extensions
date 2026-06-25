@@ -1,44 +1,56 @@
 import assert from "node:assert/strict";
 
 import {
-	registerBgTerminalBackend,
+	__resetBgTerminalBackend,
 	getBgTerminalBackend,
+	registerBgTerminalBackend,
 } from "../lib/bg-terminal.ts";
 
 // ── Test helpers ──────────────────────────────────────────────────────────
 
 function fakeBackend(name = "fake") {
-	const windows = new Set();
+	const windows = new Map(); // windowId -> { runId, agentName }
 	return {
 		name,
+		async isAvailable() { return true; },
 		async launch(config) {
-			windows.add(config.runId);
-			return { status: "launched", windowId: config.runId };
+			windows.set(config.runId, { runId: config.runId, agentName: config.agentName });
+			return { status: "ok", windowId: config.runId };
 		},
 		async kill(windowId) {
-			if (!windows.has(windowId)) return { status: "failed", error: "not found" };
+			if (!windowId || !windows.has(windowId)) return { status: "failed", error: "not found" };
 			windows.delete(windowId);
-			return { status: "launched", windowId };
+			return { status: "ok", windowId };
 		},
 		async isAlive(windowId) {
+			if (!windowId) return false;
 			return windows.has(windowId);
 		},
 		async list() {
-			return [...windows];
+			return [...windows.entries()].map(function _a(_b) {
+				var key = _b[0], val = _b[1];
+				return { windowId: key, runId: val.runId, agentName: val.agentName };
+			});
 		},
 	};
+}
+
+function reset() {
+	__resetBgTerminalBackend();
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 // 1. getBgTerminalBackend returns null before any registration
 {
+	reset();
 	const backend = getBgTerminalBackend();
 	assert.equal(backend, null, "unregistered backend should be null");
 }
 
 // 2. First registration wins
 {
+	reset();
 	const fb = fakeBackend("first");
 	registerBgTerminalBackend(fb);
 	const got = getBgTerminalBackend();
@@ -46,17 +58,19 @@ function fakeBackend(name = "fake") {
 	assert.equal(got.name, "first");
 }
 
-// 3. Second registration is silently ignored
+// 3. Second registration is ignored with no throw
 {
+	reset();
+	const first = fakeBackend("first");
 	const second = fakeBackend("second");
+	registerBgTerminalBackend(first);
 	registerBgTerminalBackend(second);
 	const got = getBgTerminalBackend();
 	assert.equal(got.name, "first", "second registration should be ignored");
 }
 
-// 4. Fake backend launch returns launched status
+// 4. Launch returns discriminated ok result
 {
-	// No registration needed — test the fake directly
 	const fb = fakeBackend();
 	const result = await fb.launch({
 		agentName: "scout",
@@ -64,87 +78,125 @@ function fakeBackend(name = "fake") {
 		manifestPath: "/tmp/manifest.json",
 		cwd: "/tmp",
 	});
-	assert.equal(result.status, "launched");
+	assert.equal(result.status, "ok");
 	assert.equal(result.windowId, "bg-test-1");
-	assert.equal(result.error, undefined);
 }
 
-// 5. Fake backend isAlive returns true for launched window
+// 5. Failed result has no windowId and has error
 {
 	const fb = fakeBackend();
-	await fb.launch({ agentName: "a", runId: "w1", manifestPath: "/m", cwd: "/c" });
-	assert.equal(await fb.isAlive("w1"), true);
+	const result = await fb.kill("nonexistent");
+	assert.equal(result.status, "failed");
+	assert.equal(result.windowId, undefined);
+	assert.ok(result.error, "failed result must have error");
+}
+
+// 6. isAlive returns true for launched window
+{
+	const fb = fakeBackend();
+	const r = await fb.launch({ agentName: "a", runId: "w1", manifestPath: "/m", cwd: "/c" });
+	assert.equal(await fb.isAlive(r.windowId), true);
 	assert.equal(await fb.isAlive("nonexistent"), false);
 }
 
-// 6. Fake backend kill removes window
+// 7. isAlive returns false for empty windowId (exact-match contract)
+{
+	const fb = fakeBackend();
+	assert.equal(await fb.isAlive(""), false, "empty windowId must return false");
+}
+
+// 8. isAlive returns false for foreign windowId (exact-match contract)
+{
+	const fb = fakeBackend();
+	await fb.launch({ agentName: "a", runId: "exact-match-test", manifestPath: "/m", cwd: "/c" });
+	// "exact" is a prefix of "exact-match-test" — substring match would return true
+	assert.equal(await fb.isAlive("exact"), false, "prefix match must NOT count as alive");
+}
+
+// 9. Kill returns ok on success
 {
 	const fb = fakeBackend();
 	await fb.launch({ agentName: "a", runId: "w2", manifestPath: "/m", cwd: "/c" });
 	assert.equal(await fb.isAlive("w2"), true);
 
 	const killResult = await fb.kill("w2");
-	assert.equal(killResult.status, "launched");
+	assert.equal(killResult.status, "ok");
 
 	assert.equal(await fb.isAlive("w2"), false);
 }
 
-// 7. Fake backend kill of nonexistent window fails
+// 10. Kill of empty windowId fails
 {
 	const fb = fakeBackend();
-	const killResult = await fb.kill("nonexistent");
-	assert.equal(killResult.status, "failed");
-	assert.ok(killResult.error?.includes("not found"));
-}
-
-// 8. Fake backend list returns all windows
-{
-	const fb = fakeBackend();
-	await fb.launch({ agentName: "a", runId: "w-a", manifestPath: "/m", cwd: "/c" });
-	assert.deepEqual(await fb.list(), ["w-a"]);
-
-	await fb.launch({ agentName: "b", runId: "w-b", manifestPath: "/m", cwd: "/c" });
-	const list = await fb.list();
-	assert.deepEqual(list.sort(), ["w-a", "w-b"].sort());
-
-	await fb.kill("w-a");
-	assert.deepEqual(await fb.list(), ["w-b"]);
-}
-
-// 9. TermBgAgentConfig shape is correct
-{
-	const config = {
-		agentName: "researcher",
-		runId: "bg-abc123-def456",
-		manifestPath: "/home/user/.pi/agent/bg/bg-abc123-def456/manifest.json",
-		cwd: "/home/user/projects/my-app",
-	};
-	assert.equal(typeof config.agentName, "string");
-	assert.equal(typeof config.runId, "string");
-	assert.equal(typeof config.manifestPath, "string");
-	assert.equal(typeof config.cwd, "string");
-}
-
-// 10. TermBgResult launched shape
-{
-	const result = { status: "launched", windowId: "win-1" };
-	assert.equal(result.status, "launched");
-	assert.equal(result.windowId, "win-1");
-	assert.equal(result.error, undefined);
-}
-
-// 11. TermBgResult failed shape
-{
-	const result = { status: "failed", error: "tmux not found" };
+	const result = await fb.kill("");
 	assert.equal(result.status, "failed");
-	assert.equal(result.error, "tmux not found");
-	assert.equal(result.windowId, undefined);
+	assert.ok(result.error?.includes("not found"));
 }
 
-// 12. Backend name is exposed
+// 11. Kill of foreign windowId fails
+{
+	const fb = fakeBackend();
+	await fb.launch({ agentName: "a", runId: "unique-id", manifestPath: "/m", cwd: "/c" });
+	const result = await fb.kill("uniqu");
+	assert.equal(result.status, "failed");
+}
+
+// 12. list returns structured entries with windowId, runId, agentName
+{
+	const fb = fakeBackend();
+	await fb.launch({ agentName: "scout", runId: "bg-run-a", manifestPath: "/m", cwd: "/c" });
+	await fb.launch({ agentName: "planner", runId: "bg-run-b", manifestPath: "/m", cwd: "/c" });
+
+	const entries = await fb.list();
+	assert.equal(entries.length, 2);
+
+	// Entries carry windowId (the kill/isAlive handle)
+	const ids = entries.map(function _a(e) { return e.windowId; }).sort();
+	assert.deepEqual(ids, ["bg-run-a", "bg-run-b"]);
+
+	// Entries carry runId for P4-5/P4-6 correlation
+	const runs = entries.map(function _a(e) { return e.runId; }).sort();
+	assert.deepEqual(runs, ["bg-run-a", "bg-run-b"]);
+
+	// Entries carry agentName
+	const names = entries.map(function _a(e) { return e.agentName; }).sort();
+	assert.deepEqual(names, ["planner", "scout"]);
+}
+
+// 13. list returns empty array with zero windows
+{
+	const fb = fakeBackend();
+	const entries = await fb.list();
+	assert.ok(Array.isArray(entries));
+	assert.equal(entries.length, 0);
+}
+
+// 14. isAvailable probe
+{
+	const fb = fakeBackend();
+	assert.equal(await fb.isAvailable(), true);
+}
+
+// 15. Backend name is exposed
 {
 	const fb = fakeBackend("tmux");
 	assert.equal(fb.name, "tmux");
+}
+
+// 16. __resetBgTerminalBackend resets state
+{
+	reset();
+	assert.equal(getBgTerminalBackend(), null);
+
+	registerBgTerminalBackend(fakeBackend("first"));
+	assert.notEqual(getBgTerminalBackend(), null);
+
+	reset();
+	assert.equal(getBgTerminalBackend(), null);
+
+	// After reset, a new registration works
+	registerBgTerminalBackend(fakeBackend("after-reset"));
+	assert.equal(getBgTerminalBackend().name, "after-reset");
 }
 
 console.log("P4-4 bg-terminal tests passed");
