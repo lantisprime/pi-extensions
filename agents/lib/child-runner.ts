@@ -68,6 +68,9 @@ export type RunBuiltInChildAgentOptions = ChildPiArgsOptions & {
 	/** P8-1: called once per complete stdout line (newline-delimited) as the child streams.
 	 *  Display-only progress sink; default undefined = strict no-op (zero behavior change). */
 	onProgress?: (line: string) => void;
+	/** P4-3-fix: external abort signal — when fired, kills the child immediately.
+	 *  Used by bg-worker to stop the child on SIGTERM. */
+	signal?: AbortSignal;
 };
 
 export type RunChildAgentOptions = RunBuiltInChildAgentOptions;
@@ -174,6 +177,7 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 			resolvedThinking,
 			stdoutTmpDir: options.stdoutTmpDir,
 			onProgress: options.onProgress,
+			signal: options.signal,
 		});
 	} finally {
 		if (sysDir) await fs.rm(sysDir, { recursive: true, force: true });
@@ -291,6 +295,8 @@ async function spawnAndCollect(agentName: string, invocation: ChildPiInvocation,
 	stdoutTmpDir?: string;
 	/** P8-1: per-complete-stdout-line progress sink (display-only); default undefined = no-op. */
 	onProgress?: (line: string) => void;
+	/** P4-3-fix: external abort signal — when fired, kills the child immediately. */
+	signal?: AbortSignal;
 }): Promise<ChildAgentRunResult> {
 	// P3f-4: validate limits are finite positive integers (reject NaN/Infinity/non-positive)
 	const validateFinitePositive = (name: string, value: number) => {
@@ -406,6 +412,16 @@ async function spawnAndCollect(agentName: string, invocation: ChildPiInvocation,
 		}, options.forceKillAfterMs);
 	};
 
+	// P4-3-fix: wire external abort signal to child kill (for bg-worker SIGTERM).
+	// Check aborted state BEFORE adding listener to avoid missing a signal that
+	// was already aborted between controller creation and listener registration.
+	const onAbort = () => { killChild(); };
+	if (options.signal?.aborted) {
+		killChild();
+	} else {
+		options.signal?.addEventListener("abort", onAbort, { once: true });
+	}
+
 	child.stdout?.on("data", (chunk) => {
 		const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
 		stdoutBytes += buffer.length;
@@ -433,6 +449,7 @@ async function spawnAndCollect(agentName: string, invocation: ChildPiInvocation,
 			flushProgress();
 			if (timer) clearTimeout(timer);
 			if (forceKillTimer) clearTimeout(forceKillTimer);
+			options.signal?.removeEventListener("abort", onAbort);
 			// P3f-4: end the spill stream and await its finish/close before reading
 			await new Promise<void>((resolveStream) => {
 				if (spillStreamFinal.destroyed) { resolveStream(); return; }

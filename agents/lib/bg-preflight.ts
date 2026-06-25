@@ -59,6 +59,14 @@ export async function preflightBgAgent(
 	if (!preflight.ok) return { ok: false, code: preflight.code, reason: preflight.reason };
 	const liveSpec = preflight.parsed.spec!;
 
+	// Profile support in background agents is deferred (REQ-PROFILE-BG).
+	// Reject at preflight rather than failing silently at spawn when
+	// the worker has no profile library.
+	if (liveSpec.profile) {
+		return { ok: false, code: "bg-profile-unsupported",
+			reason: `background agents do not support profiles yet: '${liveSpec.profile}'. Remove the profile from "${liveSpec.name}" or use synchronous /agents run instead.` };
+	}
+
 	// 2. Allocate a bg run state (reservation written as JSON with keyGenId).
 	const paths = await createBgRunState({
 		homeDir: trustedHome,
