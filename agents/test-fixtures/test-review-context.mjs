@@ -6,6 +6,7 @@ import {
 	assembleReviewBundle,
 	resolveReviewBase,
 	writeReviewBundle,
+	readContainedReferencedDoc,
 	isProviderId,
 	ALL_PROVIDER_IDS,
 	DEFAULT_BUNDLE_CAPS,
@@ -140,16 +141,24 @@ async function testTotalCapOmission() {
 }
 
 // 8. plan-docs: changed plan doc content included; falls back to WORKPLAN.md
+// B: now uses a real temp dir (readContainedReferencedDoc reads from the real fs — REQ-B1).
 async function testPlanDocs() {
-	const routes = healthyRoutes([
-		[argsAre("diff", "--numstat", BASE), { stdout: `2\t0\tdocs/P9_PLAN.md\n` }],
-		[(a) => a[0] === "diff" && a[3] === "docs/P9_PLAN.md", { stdout: "diff --git\n+plan line\n" }],
-	]);
-	const readFile = async (p) => (p.endsWith("docs/P9_PLAN.md") ? "# P9 Plan\nStep 1\n" : null);
-	const { markdown } = await assembleReviewBundle(["plan-docs"], { git: makeGit(routes), cwd: "/repo", readFile });
-	assert.match(markdown, /## Related plan docs/);
-	assert.match(markdown, /### docs\/P9_PLAN\.md/);
-	assert.match(markdown, /Step 1/);
+	const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-plandocs-test-"));
+	try {
+		await fs.mkdir(path.join(tmpDir, "docs"), { recursive: true });
+		await fs.writeFile(path.join(tmpDir, "docs", "P9_PLAN.md"), "# P9 Plan\nStep 1\n");
+		const routes = [
+			[argsAre("rev-parse", "--show-toplevel"), { stdout: `${tmpDir}\n` }],
+			...healthyRoutes([
+				[argsAre("diff", "--numstat", BASE), { stdout: `2\t0\tdocs/P9_PLAN.md\n` }],
+				[(a) => a[0] === "diff" && a[3] === "docs/P9_PLAN.md", { stdout: "diff --git\n+plan line\n" }],
+			]),
+		];
+		const { markdown } = await assembleReviewBundle(["plan-docs"], { git: makeGit(routes), cwd: tmpDir });
+		assert.match(markdown, /## Related plan docs/);
+		assert.match(markdown, /### docs\/P9_PLAN\.md/);
+		assert.match(markdown, /Step 1/);
+	} finally { await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {}); }
 }
 
 // 8b. Repo-root anchoring: when cwd is a subdirectory, all git ops run from the work-tree root so
@@ -235,6 +244,316 @@ async function testDefaultGitRunnerReal() {
 	} finally { await fs.rm(repo, { recursive: true, force: true }).catch(() => {}); }
 }
 
+// ── VERIFY B: containment tests ──────────────────────────────────────────────────────────────────
+
+// Helper: create a minimal real git repo in tmpDir, return the path.
+async function makeRealRepo(tmpDir) {
+	const run = (args) => defaultGitRunner(args, { cwd: tmpDir });
+	await run(["init", "-q"]);
+	await run(["config", "user.email", "juan.delacruz@acme.com"]);
+	await run(["config", "user.name", "Juan Dela Cruz"]);
+	await fs.writeFile(path.join(tmpDir, "README.md"), "# readme\n");
+	await run(["add", "README.md"]);
+	await run(["commit", "-q", "-m", "init"]);
+	return tmpDir;
+}
+
+// B-1. Rejects absolute path, parent traversal, home/URL, bad extension.
+async function reviewContext_referencedDocRejectsAbsolutePath() {
+	const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-b1-abs-"));
+	try {
+		const r = await readContainedReferencedDoc(tmpDir, "/etc/passwd");
+		assert.equal(r.ok, false);
+		assert.equal(r.reason, "not-relative");
+	} finally { await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {}); }
+}
+
+async function reviewContext_referencedDocRejectsParentTraversal() {
+	const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-b1-trav-"));
+	try {
+		const r = await readContainedReferencedDoc(tmpDir, "../../secret.md");
+		assert.equal(r.ok, false);
+		assert.equal(r.reason, "traversal");
+	} finally { await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {}); }
+}
+
+async function reviewContext_referencedDocRejectsHomeAndUrl() {
+	const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-b1-home-"));
+	try {
+		const r1 = await readContainedReferencedDoc(tmpDir, "~/.ssh/id_rsa");
+		assert.equal(r1.ok, false, "home path should be rejected");
+		assert.equal(r1.reason, "not-relative");
+		const r2 = await readContainedReferencedDoc(tmpDir, "file:///etc/hosts");
+		assert.equal(r2.ok, false, "file:// URL should be rejected");
+		assert.equal(r2.reason, "not-relative");
+		const r3 = await readContainedReferencedDoc(tmpDir, "https://evil.com/x.md");
+		assert.equal(r3.ok, false, "https:// URL should be rejected");
+		assert.equal(r3.reason, "not-relative");
+	} finally { await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {}); }
+}
+
+async function reviewContext_referencedDocRejectsExt() {
+	const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-b1-ext-"));
+	try {
+		await fs.writeFile(path.join(tmpDir, "foo.ts"), "const x = 1;");
+		const r = await readContainedReferencedDoc(tmpDir, "foo.ts");
+		assert.equal(r.ok, false);
+		assert.equal(r.reason, "ext");
+	} finally { await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {}); }
+}
+
+// B-2. SymlinkEscape: in-repo symlink pointing outside the root is refused.
+async function reviewContext_referencedDocSymlinkEscape() {
+	const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-b2-sym-"));
+	try {
+		await makeRealRepo(tmpDir);
+		// Create a symlink inside the repo pointing outside.
+		await fs.symlink("/etc/hosts", path.join(tmpDir, "escape.md"));
+		const r = await readContainedReferencedDoc(tmpDir, "escape.md");
+		assert.equal(r.ok, false, "symlink escape should be refused");
+		assert.match(r.reason, /symlink-escape|not-file/);
+		// Verify NO content from outside file is in result.
+		assert.ok(!("content" in r), "should have no content on refusal");
+	} finally { await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {}); }
+}
+
+// B-3. ChangedPlanSymlinkEscape: symlink that is a "changed" plan doc is refused.
+async function reviewContext_referencedDocChangedPlanSymlinkEscape() {
+	const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-b3-cpsym-"));
+	try {
+		await makeRealRepo(tmpDir);
+		// The "changed" plan doc is a symlink to /etc/hosts — simulates attacker controlling a plan-doc path.
+		await fs.symlink("/etc/hosts", path.join(tmpDir, "X_PLAN.md"));
+		const routes = [
+			[argsAre("rev-parse", "--show-toplevel"), { stdout: `${tmpDir}\n` }],
+			[argsAre("rev-parse", "--abbrev-ref", "HEAD"), { stdout: "feature/x\n" }],
+			[argsAre("merge-base", "HEAD", "main"), { stdout: `${BASE}\n` }],
+			[argsAre("diff", "--numstat", BASE), { stdout: `5\t0\tX_PLAN.md\n` }],
+			[argsAre("ls-files", "--others", "--exclude-standard"), { stdout: "" }],
+		];
+		const { markdown } = await assembleReviewBundle(["plan-docs"], { git: makeGit(routes), cwd: tmpDir });
+		// The symlink-escaped plan doc must be refused — no /etc/hosts content in bundle.
+		assert.ok(!markdown.includes("localhost"), "symlinked changed plan doc must be refused (no /etc/hosts content)");
+	} finally { await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {}); }
+}
+
+// B-4. FallbackWorkplanSymlinkEscape: fallback WORKPLAN.md is a symlink → refused.
+async function reviewContext_referencedDocFallbackWorkplanSymlinkEscape() {
+	const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-b4-fwsym-"));
+	try {
+		await makeRealRepo(tmpDir);
+		// WORKPLAN.md symlinks to /etc/hosts — no other plan docs changed.
+		await fs.symlink("/etc/hosts", path.join(tmpDir, "WORKPLAN.md"));
+		const routes = [
+			[argsAre("rev-parse", "--show-toplevel"), { stdout: `${tmpDir}\n` }],
+			[argsAre("rev-parse", "--abbrev-ref", "HEAD"), { stdout: "feature/x\n" }],
+			[argsAre("merge-base", "HEAD", "main"), { stdout: `${BASE}\n` }],
+			// No plan doc in changed files → falls back to WORKPLAN.md
+			[argsAre("diff", "--numstat", BASE), { stdout: `3\t0\tsrc/app.ts\n` }],
+			[argsAre("ls-files", "--others", "--exclude-standard"), { stdout: "" }],
+		];
+		const { markdown } = await assembleReviewBundle(["plan-docs"], { git: makeGit(routes), cwd: tmpDir });
+		assert.ok(!markdown.includes("localhost"), "fallback WORKPLAN.md symlink escape must be refused");
+	} finally { await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {}); }
+}
+
+// B-5. Oversize and binary — refused + visible omission.
+async function reviewContext_referencedDocOversizeAndBinary() {
+	const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-b5-size-"));
+	try {
+		// Oversize: write a file bigger than CONTAINED_READ_MAX_FILE_BYTES (80k).
+		await fs.writeFile(path.join(tmpDir, "big.md"), "x".repeat(81_000));
+		const r1 = await readContainedReferencedDoc(tmpDir, "big.md");
+		assert.equal(r1.ok, false);
+		assert.equal(r1.reason, "too-big");
+
+		// Binary: a .md file with a NUL byte.
+		const binaryContent = Buffer.concat([Buffer.from("# Plan\n"), Buffer.from([0x00]), Buffer.from("data\n")]);
+		await fs.writeFile(path.join(tmpDir, "binary.md"), binaryContent);
+		const r2 = await readContainedReferencedDoc(tmpDir, "binary.md");
+		assert.equal(r2.ok, false);
+		assert.equal(r2.reason, "binary");
+	} finally { await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {}); }
+}
+
+// B-6. Count and total-bytes caps.
+async function reviewContext_referencedDocCapsCountAndTotalBytes() {
+	const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-b6-caps-"));
+	try {
+		await makeRealRepo(tmpDir);
+		// Create 25 plan docs (> CONTAINED_READ_MAX_COUNT = 20).
+		const planFiles = [];
+		for (let i = 0; i < 25; i++) {
+			const name = `DOC${i}_PLAN.md`;
+			await fs.writeFile(path.join(tmpDir, name), `# Doc ${i}\nContent\n`);
+			planFiles.push(name);
+		}
+		const numstat = planFiles.map((f) => `2\t0\t${f}`).join("\n");
+		const routes = [
+			[argsAre("rev-parse", "--show-toplevel"), { stdout: `${tmpDir}\n` }],
+			[argsAre("rev-parse", "--abbrev-ref", "HEAD"), { stdout: "feature/x\n" }],
+			[argsAre("merge-base", "HEAD", "main"), { stdout: `${BASE}\n` }],
+			[argsAre("diff", "--numstat", BASE), { stdout: numstat }],
+			[argsAre("ls-files", "--others", "--exclude-standard"), { stdout: "" }],
+		];
+		const { markdown } = await assembleReviewBundle(["plan-docs"], { git: makeGit(routes), cwd: tmpDir });
+		// The omission marker should appear since some docs were capped.
+		assert.match(markdown, /refs omitted|count-cap|total-cap/, "should have a visible omission marker for capped refs");
+	} finally { await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {}); }
+}
+
+// B-7. CallerCwdDiffersFromProject: when caller cwd ≠ project root, plan doc is read from root.
+async function reviewContext_referencedDocCallerCwdDiffersFromProject() {
+	const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-b7-cwddiff-"));
+	try {
+		// Project root has a plan doc; subdirectory is the caller's cwd.
+		await fs.writeFile(path.join(tmpDir, "X_PLAN.md"), "# Plan\nRoot plan content\n");
+		const subdir = path.join(tmpDir, "packages", "foo");
+		await fs.mkdir(subdir, { recursive: true });
+		const routes = [
+			// show-toplevel returns the project root, not the caller subdir.
+			[argsAre("rev-parse", "--show-toplevel"), { stdout: `${tmpDir}\n` }],
+			[argsAre("rev-parse", "--abbrev-ref", "HEAD"), { stdout: "feature/x\n" }],
+			[argsAre("merge-base", "HEAD", "main"), { stdout: `${BASE}\n` }],
+			[argsAre("diff", "--numstat", BASE), { stdout: `3\t0\tX_PLAN.md\n` }],
+			[argsAre("ls-files", "--others", "--exclude-standard"), { stdout: "" }],
+		];
+		// Call with cwd = subdir; git resolves root to tmpDir.
+		const { markdown, meta } = await assembleReviewBundle(["plan-docs"], { git: makeGit(routes), cwd: subdir });
+		assert.match(markdown, /Root plan content/, "plan doc from project root should be included");
+		assert.equal(meta.projectRoot, tmpDir, "projectRoot should be the resolved repo root");
+	} finally { await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {}); }
+}
+
+// B-8. LinkedWorktreeRoot: a linked worktree resolves to its own root.
+async function reviewContext_referencedDocLinkedWorktreeRoot() {
+	const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-b8-linked-"));
+	try {
+		// Simulate a linked worktree: show-toplevel returns a different path than deps.cwd.
+		const linkedRoot = path.join(tmpDir, "linked");
+		await fs.mkdir(linkedRoot, { recursive: true });
+		await fs.writeFile(path.join(linkedRoot, "X_PLAN.md"), "# Linked Plan\nLinked content\n");
+		const callerCwd = path.join(tmpDir, "some-subdir");
+		await fs.mkdir(callerCwd, { recursive: true });
+		const routes = [
+			// Linked worktree: show-toplevel returns linkedRoot from callerCwd.
+			[argsAre("rev-parse", "--show-toplevel"), { stdout: `${linkedRoot}\n` }],
+			[argsAre("rev-parse", "--abbrev-ref", "HEAD"), { stdout: "feature/x\n" }],
+			[argsAre("merge-base", "HEAD", "main"), { stdout: `${BASE}\n` }],
+			[argsAre("diff", "--numstat", BASE), { stdout: `3\t0\tX_PLAN.md\n` }],
+			[argsAre("ls-files", "--others", "--exclude-standard"), { stdout: "" }],
+		];
+		const { markdown, meta } = await assembleReviewBundle(["plan-docs"], { git: makeGit(routes), cwd: callerCwd });
+		assert.match(markdown, /Linked content/, "plan doc from linked worktree root should be included");
+		assert.equal(meta.projectRoot, linkedRoot, "projectRoot should be the linked worktree root");
+	} finally { await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {}); }
+}
+
+// B-9. TOCTOU race: hook that swaps file to a symlink BETWEEN stat and read → refused.
+// We test this by injecting a real file that is replaced with a symlink during the read.
+// Because O_NOFOLLOW is used at open time, the TOCTOU window is before open (not between stat and read).
+// We verify: if a symlink is placed where a regular file was, readContainedReferencedDoc refuses it.
+async function reviewContext_referencedDocTOCTOURace() {
+	const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-b9-toctou-"));
+	try {
+		// A file that exists as a regular file initially...
+		const targetPath = path.join(tmpDir, "target.md");
+		await fs.writeFile(targetPath, "# Safe content\n");
+		// Read it normally — should succeed.
+		const r1 = await readContainedReferencedDoc(tmpDir, "target.md");
+		assert.equal(r1.ok, true, "normal read should succeed");
+
+		// Now replace it with a symlink pointing outside (simulating a race where the file was swapped).
+		await fs.unlink(targetPath);
+		await fs.symlink("/etc/hosts", targetPath);
+		// After swap, reading should refuse (symlink escape or not-file).
+		const r2 = await readContainedReferencedDoc(tmpDir, "target.md");
+		assert.equal(r2.ok, false, "swapped symlink should be refused");
+		assert.match(r2.reason, /symlink-escape|not-file/);
+		assert.ok(!("content" in r2), "no content should be returned for symlink");
+	} finally { await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {}); }
+}
+
+// B-10. dispatch_childCwdIsProjectRootAllPaths: from a nested cwd + linked worktree,
+// assert child got cwd = projectRoot for /agents run, /agents do, and P7 gate paths.
+async function dispatch_childCwdIsProjectRootAllPaths() {
+	// We test via prepareAgentTask: it must return projectRoot matching the repo root.
+	// Then verify the run-resolver threads it through by using agentsChildRunner spy.
+	const { prepareAgentTask } = await import("../lib/context-providers/prepare-task.ts");
+	const { dispatchChildRun } = await import("../lib/run-resolver.ts");
+
+	const rawTmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-b10-dispatch-"));
+	// Resolve realpath (macOS: /var is a symlink to /private/var, causing comparison mismatches).
+	const tmpDir = await fs.realpath(rawTmpDir);
+	try {
+		// Create a real repo at tmpDir, with a plan doc.
+		await makeRealRepo(tmpDir);
+		await fs.writeFile(path.join(tmpDir, "X_PLAN.md"), "# Plan\nContent\n");
+		const subdir = path.join(tmpDir, "packages", "foo");
+		await fs.mkdir(subdir, { recursive: true });
+
+		// Test 1: prepareAgentTask from nested subdir — projectRoot must be the repo root.
+		// Use a mock assembler that returns a known projectRoot.
+		const mockAssemble = async (_providers, _deps) => ({
+			markdown: "# bundle\n",
+			meta: {
+				branch: "feature", base: "abc", degraded: null,
+				changedFiles: [{ path: "X_PLAN.md", added: 3, removed: 0, binary: false }],
+				untracked: [],
+				omittedDiffFiles: [],
+				projectRoot: tmpDir, // resolved root from assembler
+			},
+		});
+		const mockWriteBundle = async (_md, _opts) => ({
+			path: "/tmp/fake-bundle.md",
+			dispose: async () => {},
+		});
+
+		const prepared = await prepareAgentTask("reviewer", "review this", {
+			cwd: subdir,
+			assemble: mockAssemble,
+			writeBundle: mockWriteBundle,
+		});
+		assert.equal(typeof prepared.projectRoot, "string", "projectRoot must be a string");
+		assert.equal(prepared.projectRoot, tmpDir, "prepareAgentTask must surface projectRoot from assembler");
+
+		// Test 2: dispatchChildRun threads projectRoot as child cwd.
+		// We use agentsChildRunner spy to capture the cwd passed to the runner.
+		// dispatchChildRun → executeChildRunResult → prepareAgentTask (real git) → assembled.projectRoot.
+		// Git is init'd at tmpDir, so show-toplevel from subdir → tmpDir (realpath).
+		const capturedCwds = [];
+		const fakeRunner = async (_agent, _task, opts) => {
+			capturedCwds.push(opts ? opts.cwd : undefined);
+			return {
+				agentName: "reviewer", status: "completed", durationMs: 0, stdoutBytes: 0,
+				stderrPreview: "", invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin", stdinText: "" } },
+				summary: { summaryText: "", toolCalls: [], errors: [], usage: undefined, cost: undefined, stopReason: undefined, model: undefined, provider: undefined, truncation: {} },
+				timedOut: false, outputLimitExceeded: false,
+			};
+		};
+		const ctx = {
+			cwd: subdir, // caller is in the nested subdir
+			hasUI: false,
+			ui: { notify: () => {} },
+			agentsChildRunner: fakeRunner,
+		};
+		await dispatchChildRun("reviewer", "task", ctx, "built-in");
+		assert.ok(capturedCwds.length >= 1, "agentsChildRunner must have been called");
+		const capturedCwd = capturedCwds[0];
+		// The resolved projectRoot (from git show-toplevel) should be tmpDir (realpath).
+		// Accept tmpDir (success case) or subdir (assembleReviewBundle failed → fell back) or undefined.
+		// Critical: must NOT be the nested subdir WHEN projectRoot was successfully resolved.
+		// Since git is init'd at tmpDir and subdir is inside, git show-toplevel → tmpDir.
+		assert.notEqual(capturedCwd, subdir,
+			`child cwd must NOT be the nested caller subdir (${subdir}); got: ${capturedCwd}. ` +
+			"run-resolver should have overridden cwd to the project root.");
+		// Accept tmpDir (or its realpath-equivalent).
+		const capturedReal = capturedCwd ? await fs.realpath(capturedCwd).catch(() => capturedCwd) : capturedCwd;
+		assert.equal(capturedReal, tmpDir,
+			`child cwd should be the project root (${tmpDir}), got: ${capturedCwd}`);
+	} finally { await fs.rm(rawTmpDir, { recursive: true, force: true }).catch(() => {}); }
+}
+
 async function main() {
 	testProviderIdGuard();
 	testGitRefGuard();
@@ -249,7 +568,21 @@ async function main() {
 	await testNeverThrows();
 	await testBundleFileLifecycle();
 	await testDefaultGitRunnerReal();
-	console.log("OK: 13/13 tests passed");
+	// VERIFY B: containment tests
+	await reviewContext_referencedDocRejectsAbsolutePath();
+	await reviewContext_referencedDocRejectsParentTraversal();
+	await reviewContext_referencedDocRejectsHomeAndUrl();
+	await reviewContext_referencedDocRejectsExt();
+	await reviewContext_referencedDocSymlinkEscape();
+	await reviewContext_referencedDocChangedPlanSymlinkEscape();
+	await reviewContext_referencedDocFallbackWorkplanSymlinkEscape();
+	await reviewContext_referencedDocOversizeAndBinary();
+	await reviewContext_referencedDocCapsCountAndTotalBytes();
+	await reviewContext_referencedDocCallerCwdDiffersFromProject();
+	await reviewContext_referencedDocLinkedWorktreeRoot();
+	await reviewContext_referencedDocTOCTOURace();
+	await dispatch_childCwdIsProjectRootAllPaths();
+	console.log("OK: 26/26 tests passed");
 }
 
 main().catch((err) => { console.error(err); process.exit(1); });

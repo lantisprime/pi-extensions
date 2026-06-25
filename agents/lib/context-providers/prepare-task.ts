@@ -17,6 +17,8 @@ export type PreparedTask = {
 	providers: ProviderId[];
 	/** Delete the bundle file+dir. Idempotent, best-effort. Call in a finally on EVERY settle path. */
 	dispose: () => Promise<void>;
+	/** P10-B: canonical project root (REQ-B3) — pass as cwd to the child for context-enabled built-ins. */
+	projectRoot?: string;
 };
 
 const NOOP_DISPOSE = async () => {};
@@ -68,10 +70,11 @@ export async function prepareAgentTask(agent: string | AgentSpec, rawTask: strin
 		// No changes (clean tree, or cwd isn't a git work tree) → nothing worth reviewing. Run the
 		// raw task rather than point the child at an empty bundle. Also keeps non-repo callers a no-op.
 		if (meta.changedFiles.length === 0 && meta.untracked.length === 0) {
-			return { task: rawTask, bundlePath: null, providers, dispose: NOOP_DISPOSE };
+			return { task: rawTask, bundlePath: null, providers, dispose: NOOP_DISPOSE, projectRoot: meta.projectRoot };
 		}
 		const handle = await writeBundle(markdown, { tmpDir: opts.tmpDir });
-		return { task: buildDirective(handle.path, meta, rawTask), bundlePath: handle.path, providers, dispose: handle.dispose };
+		// B.5: surface projectRoot so run-resolver can pass cwd:projectRoot to the child (REQ-B3).
+		return { task: buildDirective(handle.path, meta, rawTask), bundlePath: handle.path, providers, dispose: handle.dispose, projectRoot: meta.projectRoot };
 	} catch {
 		// Assembly/write failure must never block dispatch — run with the raw task (N3).
 		return { task: rawTask, bundlePath: null, providers, dispose: NOOP_DISPOSE };
