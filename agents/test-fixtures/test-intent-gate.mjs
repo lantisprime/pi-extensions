@@ -358,6 +358,36 @@ async function testGate_inputHookReattachesProfileLibrary() {
 	} finally { await fs.rm(homeDir, { recursive: true, force: true }).catch(() => {}); }
 }
 
+// Regression (NL-path result delivery): the "input" event hands the gate a fresh ctx WITHOUT
+// deliverResult, so a gate-routed run completed but its findings were NEVER injected into pi's
+// conversation — the user saw the operator toast but the model never reacted. deliverResult is now
+// wired onto the session ctx at session_start and re-attached from sessionCtx in handleGateInput
+// (mirrors the profileLibrary re-attach). Without it, run-resolver's
+// `typeof ctx.deliverResult === "function"` guard is false and the result is dropped silently.
+async function testGate_inputHookReattachesDeliverResult() {
+	const intents = [{ id: "review", match: { phrases: ["review"] }, workflow: { kind: "review" } }];
+	let captured = null;
+	__gateDispatch.fn = async (agent, task, ctx) => { captured = ctx; };
+
+	await withGateConfig(intents, async (dir) => {
+		// Fresh input-event ctx (no deliverResult); session ctx carries the wired deliver fn.
+		const deliver = () => {};
+		const ctx = makeGateCtx({ cwd: dir });
+		const sessionCtx = { deliverResult: deliver };
+		await handleGateInput("review this code", ctx, sessionCtx);
+		assert.ok(captured, "dispatch called");
+		assert.equal(typeof captured.deliverResult, "function", "deliverResult re-attached onto the input ctx");
+		assert.equal(captured.deliverResult, deliver, "re-attached the session's deliver fn (findings reach pi)");
+
+		// Negative control: no session ctx → no deliverResult → repros the silent-drop bug condition.
+		captured = null;
+		const ctx2 = makeGateCtx({ cwd: dir });
+		await handleGateInput("review this code", ctx2);
+		assert.ok(captured, "dispatch called (no sessionCtx)");
+		assert.equal(captured.deliverResult, undefined, "without sessionCtx deliverResult is absent (the bug)");
+	});
+}
+
 // REQ-5 / REQ-SEC-4: plan-only injects code-owned instruction
 async function testGate_nlPlanOnlyInjectsInstruction() {
 	const intents = [{ id: "plan", match: { phrases: ["create a plan"] }, workflow: { kind: "plan-only" } }];
@@ -553,6 +583,7 @@ async function main() {
 	await testGate_nlRoutingConfirmDeclinedNoRun();
 	await testGate_configProfileFlagPrepended();
 	await testGate_inputHookReattachesProfileLibrary();
+	await testGate_inputHookReattachesDeliverResult();
 	await testGate_nlPlanOnlyInjectsInstruction();
 	await testGate_planOnlyInstructionIsCodeOwned();
 	await testGate_routedChildDisablesContextFiles();
