@@ -1,4 +1,5 @@
 .episodic-memory/
 .pi/
-*.tmp
+*.swp
+.*.swp
 .DS_Store

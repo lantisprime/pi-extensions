@@ -47,12 +47,47 @@ Completed and merged:
 - P8: non-blocking in-process agent runs + live TUI feedback, PR #65, commit `f599fdd`
 - P8 follow-ups: UX/results/error/timeout, PR #66, commit `b481c58`
 
-### P4R Background Agents Remediation (NEXT)
+### P4R Background Agents Remediation (COMPLETE)
+- P4R-3: manifest integrity + schema + keyGenId, PR #72, commit aa2cce7
+- P4R-0: authority-root binding, PR #73, commit 9b2dbc4
+- P4R-1: reservation + no-kill reaping, PR #75, commit ac10d65
+- P4R-2: tolerant + honest listing, PR #76, commit b13b06b
+- P4R-5: MAC key lifecycle, PR #77, commit fd29e9a
+- P4R-6: hygiene + parent-plan correction, PR #78, commit d34cd20
 - Plan: agents/docs/P4_REMEDIATION_PLAN.md — v3 GO consensus
-- 6 remediation slices all editing `agents/lib/bg-state.ts`: P4R-3 -> P4R-0 -> P4R-1 -> P4R-2 -> P4R-5 -> P4R-6
-- First cut: user-registered agents only (no project trust needed)
-- Feeds into P4-2 (preflight) and P4-3 (worker)
-- Deferred: P4R-PROJ (project background agents, needs disk-trust reader)
+- All slices edit agents/lib/bg-state.ts
+
+### P4-2 Preflight (COMPLETE)
+- P4-2: signed identity manifest + shared preflight gate, PR #81, commit 993cacf
+- New file: agents/lib/bg-preflight.ts
+- Tests: test-bg-preflight.mjs (5 tests)
+
+### P4-3 Worker (COMPLETE)
+- P4-3: background-agent worker process, PR #82, commit b29a277
+- New file: agents/lib/bg-worker.ts
+- Tests: test-bg-worker.mjs (10 tests)
+
+### P4-4 Terminal Backend Interface (NEXT)
+- bg-terminal.ts: TermBgBackend interface + register/get backend registry
+- ~30 lines, new file only
+
+### P4-5 Command Wiring
+- index.ts: /agents bg, bg-status, bg-stop, bg-result, bg-open
+- ~80 lines of command additions
+
+### P4-6 Status Line
+- Running agent count via appendEntry, ~30 lines
+
+### P4-7 Integration Tests
+- Fake TermBgBackend, temp state dir, ~30 tests
+
+### P5 Pluggable Terminal Backend (PARALLEL)
+- Independent track, separate extension
+- Plan: agents/docs/P5_PLUGGABLE_TERMINAL_BACKEND.md
+
+### P4R-PROJ Project Background Agents (DEFERRED)
+- Requires disk-backed trust reader
+- Not in current cut
 
 - P3e: docs, README, user manual, smoke, PR #38, commit `04695e6`
 - P3f-4: runtime profile override + stdout spill, PR #41, commit `4473431`
