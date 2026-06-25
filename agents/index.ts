@@ -19,16 +19,19 @@ export { dispatchChildRun, executeChildRun, nextStepForRunBlock, parseDoArgs, pa
 import { buildProjectAgentRecommendation, collectAgentDiagnostics, formatAgentInspect, formatAgentsConfig, formatAgentsDoctor, formatAgentsList, formatAgentsRegistry, formatAgentsVerify } from "./lib/diagnostics.ts";
 import { runEphemeralCommand, saveTempCommand, type EphemeralRunHandlerContext } from "./lib/ephemeral.ts";
 import { registerAgent, registerProjectAgents, unregisterAgent } from "./lib/registration.ts";
-import { runAgentCommand, runIntentCommand, dispatchChildRun } from "./lib/run-resolver.ts";
+import { runAgentCommand, runIntentCommand, dispatchChildRun, resolveRegisteredRunTarget } from "./lib/run-resolver.ts";
+import type { AgentsContextLike } from "./lib/run-resolver.ts";
 import { disposeBackgroundRuns } from "./lib/bg-run.ts";
 import { validateBuiltInAgentSpecs } from "./lib/specs.ts";
 import { registerSubagentTool } from "./lib/subagent-tool.ts";
+import { preflightBgAgent } from "./lib/bg-preflight.ts";
+import { getBgTerminalBackend } from "./lib/bg-terminal.ts";
 import { formatBuiltInProfilesList, toProfileLibrary, buildProfileLibrary, type ModelProfileLibrary, type ProfileLibraryBuildWarning } from "./lib/profiles.ts";
 import { discoverProfiles, rejectDuplicateProfileNames, DEFAULT_PROFILE_DISCOVERY_LIMITS, type ParsedProfile } from "./lib/profile-discovery.ts";
 import { addOrReplaceRegisteredProfile, findMatchingRegisteredProfile, type RegisteredProfile } from "./lib/registry.ts";
 import { runChainCommand } from "./lib/chain-runner.ts";
 import { loadGateConfig, classifyGateIntent, GATE_INSTRUCTIONS } from "./lib/intent-gate.ts";
-import { reapStaleBgRuns, resolveTrustedHome } from "./lib/bg-state.ts";
+import { reapStaleBgRuns, resolveTrustedHome, listBgRuns, getBgRunPaths, readBgResult } from "./lib/bg-state.ts";
 import os from "node:os";
 import path from "node:path";
 
@@ -127,7 +130,7 @@ export default function agentsExtension(pi: ExtensionAPI) {
 	pi.registerCommand("agents", {
 		description: "Show P3 agent diagnostics and run built-in or registered agents",
 		getArgumentCompletions: (prefix: string) => {
-			const options = ["list", "built-ins", "config", "inspect", "registry", "verify", "doctor", "register", "register-project", "unregister", "run", "do", "chain", "run-temp", "save-temp", "profiles"];
+			const options = ["list", "built-ins", "config", "inspect", "registry", "verify", "doctor", "register", "register-project", "unregister", "run", "do", "chain", "run-temp", "save-temp", "profiles", "bg", "bg-status", "bg-stop", "bg-result", "bg-open"];
 			const trimmed = prefix.trim();
 			const filtered = options.filter((option) => option.startsWith(trimmed));
 			return filtered.length > 0 ? filtered.map((value) => ({ value, label: value })) : null;
@@ -238,7 +241,27 @@ export default function agentsExtension(pi: ExtensionAPI) {
 				await saveTempCommand(parsed.rest, ephCtx, { projectTrusted: diagnostics.projectTrusted, userAgentsDir });
 				return;
 			}
-			ctx.ui.notify("Usage: /agents [list|built-ins|config|inspect <name>|registry|verify|doctor|register <path-or-name>|register-project [--all-safe]|unregister <name>|run <agent> <task>|chain <agent>,<agent>[,<agent>] <task>|run-temp <scout|planner|reviewer> <task>|save-temp <name>|profiles].", "warning");
+			if (parsed.action === "bg") {
+				await handleBgCommand(parsed.rest, ctx, diagnostics);
+				return;
+			}
+			if (parsed.action === "bg-status") {
+				await handleBgStatus(ctx, diagnostics);
+				return;
+			}
+			if (parsed.action === "bg-stop") {
+				await handleBgStop(parsed.rest, ctx);
+				return;
+			}
+			if (parsed.action === "bg-result") {
+				await handleBgResult(parsed.rest, ctx);
+				return;
+			}
+			if (parsed.action === "bg-open") {
+				await handleBgOpen(parsed.rest, ctx);
+				return;
+			}
+			ctx.ui.notify("Usage: /agents [list|built-ins|config|inspect <name>|registry|verify|doctor|register <path-or-name>|register-project [--all-safe]|unregister <name>|run <agent> <task>|chain <agent>,<agent>[,<agent>] <task>|run-temp <scout|planner|reviewer> <task>|save-temp <name>|profiles|bg <agent> <task>|bg-status|bg-stop <id>|bg-result <id>|bg-open <id>].", "warning");
 		},
 	});
 }
@@ -461,4 +484,179 @@ async function handleProfileUnregister(target: string, ctx: AgentsContext, diagn
 	const updated = { ...registry, profiles: profiles.filter((p) => p.name !== target), updatedAt: new Date().toISOString() };
 	await writeProjectRegistry(updated, diagnostics.projectRoot, ctx.agentsHomeDir);
 	ctx.ui.notify(`Unregistered profile '${target}'.`, "info");
+}
+
+// ── P4-5: Background agent commands ─────────────────────────────────────
+
+/** /agents bg <agent> <task> — preflight + launch a background agent. */
+async function handleBgCommand(
+	args: string,
+	ctx: AgentsContext,
+	diagnostics: Awaited<ReturnType<typeof collectAgentDiagnostics>>,
+): Promise<void> {
+	const backend = getBgTerminalBackend();
+	if (!backend) {
+		ctx.ui.notify("No terminal backend installed. Load tmux-terminal or equivalent to use background agents.", "warning");
+		return;
+	}
+	if (typeof backend.isAvailable === "function" && !(await backend.isAvailable())) {
+		ctx.ui.notify(`Terminal backend "${backend.name}" is not available.`, "error");
+		return;
+	}
+	// Parse <agent> <task> (everything after the first space-separated token is the task).
+	const spaceIdx = args.indexOf(" ");
+	if (spaceIdx === -1) {
+		ctx.ui.notify("Usage: /agents bg <agent> <task>", "warning");
+		return;
+	}
+	const agentName = args.slice(0, spaceIdx).trim();
+	const task = args.slice(spaceIdx + 1).trim();
+	if (!agentName || !task) {
+		ctx.ui.notify("Usage: /agents bg <agent> <task>", "warning");
+		return;
+	}
+
+	// Resolve the agent target (same gate as /agents run).
+	const resolved = await resolveRegisteredRunTarget(agentName, diagnostics);
+	if (!resolved.ok) {
+		ctx.ui.notify(resolved.message, "warning");
+		return;
+	}
+
+	// Preflight: write signed manifest + reservation.
+	const preflightCtx = { cwd: ctx.cwd, hasUI: ctx.hasUI, agentsHomeDir: ctx.agentsHomeDir } as AgentsContextLike;
+	const result = await preflightBgAgent(resolved.record, task, preflightCtx, diagnostics);
+	if (!result.ok) {
+		ctx.ui.notify(`Preflight failed: ${result.reason}`, "error");
+		return;
+	}
+
+	// Launch via the terminal backend.
+	const launchResult = await backend.launch({
+		agentName: resolved.record.name ?? resolved.record.filePath,
+		runId: result.runId,
+		manifestPath: result.paths.manifestPath,
+		cwd: ctx.cwd ?? process.cwd(),
+	});
+
+	if (launchResult.status === "failed") {
+		ctx.ui.notify(`Launch failed: ${launchResult.error ?? "unknown error"}`, "error");
+		return;
+	}
+
+	ctx.ui.notify(`Background agent ${agentName} running (${result.runId.slice(0, 16)}…) via ${backend.name}.`, "info");
+}
+
+/** /agents bg-status — show running + recent background runs. */
+async function handleBgStatus(ctx: AgentsContext): Promise<void> {
+	const homeDir = resolveTrustedHome();
+	const runs = await listBgRuns(homeDir);
+
+	if (runs.length === 0) {
+		ctx.ui.notify("No background agent runs.", "info");
+		return;
+	}
+
+	const lines: string[] = [];
+	const backend = getBgTerminalBackend();
+	let liveWindowIds: string[] | undefined;
+	if (backend) {
+		try { liveWindowIds = (await backend.list()).map(function _a(e) { return e.windowId; }); } catch { /* best-effort */ }
+	}
+
+	for (const run of runs) {
+		const elapsed = run.createdAtMs ? Math.floor((Date.now() - run.createdAtMs) / 1000) : 0;
+		const alive = liveWindowIds ? liveWindowIds.includes(run.runId) : undefined;
+		const statusTag = alive === false ? "(stale)" : run.status;
+		lines.push(`  ${run.runId.slice(0, 16)}  ${statusTag}  ${formatElapsed(elapsed)}  ${run.done ? "done" : "active"}`);
+	}
+
+	ctx.ui.notify(`Background agent runs (${runs.length}):\n${lines.join("\n")}`, "info");
+}
+
+/** /agents bg-stop <runId> — kill a background agent. */
+async function handleBgStop(runId: string, ctx: AgentsContext): Promise<void> {
+	if (!runId) {
+		ctx.ui.notify("Usage: /agents bg-stop <runId>", "warning");
+		return;
+	}
+
+	const backend = getBgTerminalBackend();
+	if (backend) {
+		const killResult = await backend.kill(runId);
+		if (killResult.status === "failed") {
+			ctx.ui.notify(`Kill via backend failed: ${killResult.error ?? "unknown"} (falling back to reaper)`, "warning");
+		}
+	}
+
+	// Reap via bg-state regardless of backend result.
+	await reapStaleBgRuns(resolveTrustedHome());
+	ctx.ui.notify(`Stop requested for ${runId.slice(0, 16)}….`, "info");
+}
+
+/** /agents bg-result <runId> — show redacted result for a completed run. */
+async function handleBgResult(runId: string, ctx: AgentsContext): Promise<void> {
+	if (!runId) {
+		ctx.ui.notify("Usage: /agents bg-result <runId>", "warning");
+		return;
+	}
+
+	const homeDir = resolveTrustedHome();
+	const paths = getBgRunPaths(runId, homeDir);
+	const result = await readBgResult(paths);
+	if (!result) {
+		ctx.ui.notify(`No result found for run ${runId.slice(0, 16)}…. (Still running or invalid runId?)`, "warning");
+		return;
+	}
+
+	const lines = [`Background agent result (${runId.slice(0, 16)}…):`];
+	lines.push(`  Status: ${result.status}`);
+	lines.push(`  Agent: ${result.agentName ?? "unknown"}`);
+	if (result.startedAt) lines.push(`  Started: ${result.startedAt}`);
+	if (result.finishedAt) lines.push(`  Finished: ${result.finishedAt}`);
+	if (result.error) lines.push(`  Error: ${result.error}`);
+	if (result.resultText) {
+		const preview = result.resultText.length > 2000
+			? result.resultText.slice(0, 2000) + "\n\n… [truncated, use /agents bg-open <id> to see full output]"
+			: result.resultText;
+		lines.push(`  Result:`);
+		lines.push(preview);
+	}
+
+	ctx.ui.notify(lines.join("\n"), "info");
+}
+
+/** /agents bg-open <runId> — switch to the terminal window for a bg run. */
+async function handleBgOpen(runId: string, ctx: AgentsContext): Promise<void> {
+	if (!runId) {
+		ctx.ui.notify("Usage: /agents bg-open <runId>", "warning");
+		return;
+	}
+
+	const backend = getBgTerminalBackend();
+	if (!backend) {
+		ctx.ui.notify("No terminal backend installed. Cannot open window.", "warning");
+		return;
+	}
+
+	const killResult = await backend.kill(""); // not kill — just testing window existence
+	if (killResult.status === "ok") {
+		ctx.ui.notify(`Window for ${runId.slice(0, 16)}… is alive but no focus method available.`, "info");
+		return;
+	}
+
+	// Best-effort: try isAlive to confirm the window exists.
+	const alive = await backend.isAlive(runId);
+	if (!alive) {
+		ctx.ui.notify(`No live terminal window for ${runId.slice(0, 16)}….`, "warning");
+		return;
+	}
+
+	ctx.ui.notify(`Window for ${runId.slice(0, 16)}… is alive.`, "info");
+}
+
+function formatElapsed(seconds: number): string {
+	if (seconds < 60) return `${seconds}s`;
+	if (seconds < 3600) return `${Math.floor(seconds / 60)}m${seconds % 60}s`;
+	return `${Math.floor(seconds / 3600)}h${Math.floor((seconds % 3600) / 60)}m`;
 }
