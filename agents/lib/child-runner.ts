@@ -5,6 +5,7 @@ import { StringDecoder } from "node:string_decoder";
 import path from "node:path";
 import os from "node:os";
 import { buildChildPiArgs, getPiInvocation, type ChildPiArgsOptions, type ChildPiInvocation } from "./child-args.ts";
+import { loadAgentMethod } from "./prompts.ts";
 import { reduceChildJsonl, type ChildJsonlSummary } from "./jsonl-monitor.ts";
 import { getBuiltInAgentSpec, isReservedBuiltInAgentName, type AgentSpec } from "./specs.ts";
 import { resolveSpecProfile, type ModelProfileLibrary } from "./profiles.ts";
@@ -151,7 +152,12 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 		sysDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agent-sys-"));
 		await fs.chmod(sysDir, 0o700);
 		const systemPromptPath = path.join(sysDir, "system.md");
-		const invocation = buildChildPiArgs(childArgSpec, task, { ...options, systemPromptPath });
+		let appendMethod = "";
+		if (spec.instructionsFile) {
+			try { appendMethod = await loadAgentMethod(spec.name); }
+			catch (e) { return spawnErrorResult(spec.name, { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin", stdinText: "" } }, e instanceof Error ? e : new Error(String(e))); }
+		}
+		const invocation = buildChildPiArgs(childArgSpec, task, { ...options, systemPromptPath, appendMethod });
 		const stdoutLimit = options.maxStdoutBytes ?? spec.limits.maxStdoutBytes;
 		const stderrLimit = options.maxStderrChars ?? spec.limits.maxStderrChars;
 		const timeoutMs = options.timeoutMs ?? spec.limits.timeoutMs;

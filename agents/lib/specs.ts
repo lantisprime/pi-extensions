@@ -1,4 +1,5 @@
 import { isProviderId, type ProviderId } from "./context-providers/provider-id.ts";
+import { PROMPT_FILES } from "./prompts.ts";
 
 export const AGENT_SPEC_VERSION = 1;
 
@@ -82,6 +83,8 @@ export type AgentSpec = {
 	 *  NOT accepted from agent-markdown frontmatter in v1 — a project spec must not be able to compel
 	 *  the trusted parent to shell git. See review-context.ts ProviderId. */
 	context?: ProviderId[];
+	/** P10: built-in only; MUST equal PROMPT_FILES[name] key presence. Not from frontmatter. */
+	instructionsFile?: string;
 };
 
 export type AgentValidationIssue = {
@@ -330,6 +333,10 @@ export function validateAgentSpec(spec: unknown, options: SpecValidationOptions 
 	issues.push(...validateObservability(spec.observability).issues);
 	issues.push(...validateSafety(spec.safety).issues);
 	issues.push(...validateContextProviders(spec.context).issues);
+	if (spec.instructionsFile !== undefined) {
+		if (spec.source !== "built-in") issues.push({ field: "instructionsFile", code: "instructions-not-builtin", message: "instructionsFile is built-in only" });
+		else if (typeof spec.name !== "string" || PROMPT_FILES[spec.name] !== spec.instructionsFile) issues.push({ field: "instructionsFile", code: "instructions-map-mismatch", message: "instructionsFile must equal PROMPT_FILES[name]" });
+	}
 
 	return result(issues);
 }
@@ -415,6 +422,7 @@ Role: Scout. Inspect only what is necessary to answer the delegated task.
 Return sections: Files/paths inspected; Concise findings; Unknowns/follow-up questions.
 Do not produce a long implementation plan.`,
 		context: [], // scout self-explores via read/grep; no pre-assembled bundle
+		instructionsFile: "scout.md",
 		inputContract: { ...DEFAULT_INPUT_CONTRACT },
 		outputContract: {
 			requiredSections: ["Files/paths inspected", "Concise findings", "Unknowns/follow-up questions"],
@@ -436,6 +444,7 @@ Role: Planner. Turn the delegated task into a staged, reviewable plan.
 Return sections: Proposed files to change; Staged steps; Risks; Validation commands; Out-of-scope items.
 Do not edit files or present execution as already completed.`,
 		context: ["plan-docs", "changed-files"], // orient against existing plans + what's already changed
+		instructionsFile: "planner.md",
 		inputContract: { ...DEFAULT_INPUT_CONTRACT },
 		outputContract: {
 			requiredSections: ["Proposed files to change", "Staged steps", "Risks", "Validation commands", "Out-of-scope items"],
@@ -457,6 +466,7 @@ Role: Reviewer. Critique the delegated plan, diff, or design skeptically and con
 Return sections: Blocking issues; Non-blocking issues; Missing tests/validation; Safety/security concerns; Verdict.
 The Verdict section must contain exactly one of: go, conditional-go, no-go.`,
 		context: ["git-diff", "changed-files", "branch-commits", "plan-docs"], // full review bundle
+		instructionsFile: "reviewer.md",
 		inputContract: { ...DEFAULT_INPUT_CONTRACT },
 		outputContract: {
 			requiredSections: ["Blocking issues", "Non-blocking issues", "Missing tests/validation", "Safety/security concerns", "Verdict"],
