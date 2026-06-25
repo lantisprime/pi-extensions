@@ -12,6 +12,8 @@ export * from "./lib/jsonl-monitor.ts";
 export * from "./lib/registration.ts";
 export * from "./lib/profiles.ts";
 export * from "./lib/profile-discovery.ts";
+export * from "./lib/context-providers/git-runner.ts";
+export * from "./lib/context-providers/review-context.ts";
 export { dispatchChildRun, executeChildRun, nextStepForRunBlock, parseDoArgs, parseRunArgs, resolveRegisteredRunTarget, runAgentCommand, runIntentCommand, runResolvedTarget, type AgentsContextLike, type RunnableRegisteredRecord } from "./lib/run-resolver.ts";
 
 import { buildProjectAgentRecommendation, collectAgentDiagnostics, formatAgentInspect, formatAgentsConfig, formatAgentsDoctor, formatAgentsList, formatAgentsRegistry, formatAgentsVerify } from "./lib/diagnostics.ts";

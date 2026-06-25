@@ -9,6 +9,7 @@ import {
 import { buildChildRunOptions, nextStepForRunBlock, resolveRegisteredRunTarget } from "./run-resolver.ts";
 import { startBackgroundRun, type BgRunUI } from "./bg-run.ts";
 import { isReservedBuiltInAgentName } from "./specs.ts";
+import { prepareAgentTask } from "./context-providers/prepare-task.ts";
 
 export const MAX_CHAIN_LENGTH = 3;
 export const MAX_ACCUMULATED_HANDOFF_CHARS = 24_000;
@@ -157,19 +158,25 @@ export function runChain(
 				promptTask = `${task}\n\nPrior agent summaries:\n${accumulatedHandoff}`;
 			}
 
+			const childAgent = agent.source === "built-in" ? agent.name : agent.spec;
+			// P9: each step's agent gets its declared review context (no-op for agents without
+			// `context:` or when there's nothing to review). Reviewer steps thus see both the diff
+			// bundle and the prior-step summaries. dispose() in finally (B3).
+			const prepared = await prepareAgentTask(childAgent, promptTask, { cwd: ctx.cwd });
 			let result: ChildAgentRunResult;
 			try {
 				if (ctx.agentsChildRunner) {
-					const childAgent = agent.source === "built-in" ? agent.name : agent.spec;
-					result = await ctx.agentsChildRunner(childAgent, promptTask, stepOptions);
+					result = await ctx.agentsChildRunner(childAgent, prepared.task, stepOptions);
 				} else if (agent.source === "built-in") {
-					result = await runBuiltInChildAgent(agent.name, promptTask, stepOptions, ctx.profileLibrary);
+					result = await runBuiltInChildAgent(agent.name, prepared.task, stepOptions, ctx.profileLibrary);
 				} else {
-					result = await runChildAgent(agent.spec, promptTask, stepOptions, ctx.profileLibrary);
+					result = await runChildAgent(agent.spec, prepared.task, stepOptions, ctx.profileLibrary);
 				}
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				return { ok: false, agentName: agent.name, code: "spawn-error", message: `child execution failed: ${message}` };
+			} finally {
+				await prepared.dispose();
 			}
 
 			const summaryText = result.summary.summaryText || "";

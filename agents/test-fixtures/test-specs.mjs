@@ -19,7 +19,10 @@ import {
 	validateModelAndThinking,
 	validateOutputContract,
 	validateTools,
+	validateContextProviders,
+	resolveSpecContextProviders,
 } from "../lib/specs.ts";
+import { AGENT_MARKDOWN_ACCEPTED_KEYS } from "../lib/agent-markdown.ts";
 
 function codes(result) {
 	return result.issues.map((issue) => issue.code);
@@ -162,7 +165,37 @@ function testBuiltInListFormatting() {
 	assert.match(formatted, /tools=read,grep,find,ls/);
 }
 
+// P9: built-in context: declarations + validation + N4 (frontmatter must NOT accept context)
+function testContextProviderDeclarations() {
+	// Built-in declared sets.
+	assert.deepEqual(resolveSpecContextProviders(getBuiltInAgentSpec("reviewer")), ["git-diff", "changed-files", "branch-commits", "plan-docs"]);
+	assert.deepEqual(resolveSpecContextProviders(getBuiltInAgentSpec("planner")), ["plan-docs", "changed-files"]);
+	assert.deepEqual(resolveSpecContextProviders(getBuiltInAgentSpec("scout")), []);
+
+	// Validation: undefined ok, valid array ok.
+	assert.deepEqual(codes(validateContextProviders(undefined)), []);
+	assert.deepEqual(codes(validateContextProviders(["git-diff", "plan-docs"])), []);
+	// Unknown id rejected.
+	assert.deepEqual(codes(validateContextProviders(["git-diff", "bogus"])), ["context-unknown"]);
+	// Duplicate rejected.
+	assert.deepEqual(codes(validateContextProviders(["git-diff", "git-diff"])), ["context-duplicate"]);
+	// Non-array rejected.
+	assert.deepEqual(codes(validateContextProviders("git-diff")), ["context-invalid"]);
+
+	// Whole-spec validation surfaces a bad context field.
+	const spec = clone(getBuiltInAgentSpec("reviewer"));
+	spec.context = ["nope"];
+	assert.ok(codes(validateAgentSpec(spec)).includes("context-unknown"), "validateAgentSpec catches bad context");
+
+	// N4: agent-markdown frontmatter must NOT accept `context` (no trust-expanding compel-git-from-project).
+	assert.ok(!AGENT_MARKDOWN_ACCEPTED_KEYS.includes("context"), "context is not a frontmatter-accepted key in v1");
+
+	// Built-in specs (with their context fields) still pass full validation.
+	assert.equal(validateBuiltInAgentSpecs().ok, true, "built-in specs valid incl. context");
+}
+
 function main() {
+	testContextProviderDeclarations();
 	testBuiltInSpecsAreValidAndOrdered();
 	testRoleSpecificContracts();
 	testNameValidation();

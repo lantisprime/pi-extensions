@@ -473,7 +473,11 @@ async function testRunTempBackgroundReturnsStashImmediately() {
 		assert.equal(settled, false, "child still running (backgrounded) when command returned");
 		assert.ok(widgets.some((w) => Array.isArray(w.c)), "progress widget rendered while running");
 		release();
-		await new Promise((r) => setImmediate(r)); await new Promise((r) => setImmediate(r));
+		// P9: the backgrounded run now does async context assembly (prepareAgentTask) before the
+		// child runner, so a fixed tick count is too brittle — poll until the widget clears (which
+		// happens in the run's finally, strictly after the child settles).
+		const cleared = () => widgets.length > 0 && widgets[widgets.length - 1].c === undefined;
+		for (let i = 0; i < 200 && !cleared(); i++) await new Promise((r) => setTimeout(r, 5));
 		assert.equal(settled, true, "child settled after release");
 		assert.deepEqual(widgets[widgets.length - 1], { k: WIDGET_KEY, c: undefined }, "widget cleared after settle");
 		__resetBackgroundRuns();
