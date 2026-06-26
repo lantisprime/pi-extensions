@@ -31,6 +31,30 @@ export function assertSafeGitRef(ref: string): string {
 	return ref;
 }
 
+/** P11: operator-aware split of a `--range` value into its two endpoints + operator. PURE — does
+ *  NOT validate ref safety (the caller MUST run isSafeGitRef on each side SEPARATELY; the joined
+ *  string can pass the ref regex while a side smuggles an option, e.g. `a..-O`). `...` is matched
+ *  before `..` (longest-first) so `a...b` is three-dot, never split as `a` + `.b`. An empty right
+ *  side (`a..`) defaults to `HEAD`; an empty left side is rejected (no sane default). */
+export type ParsedRange =
+	| { ok: true; left: string; right: string; op: ".." | "..." }
+	| { ok: false; reason: string };
+
+export function parseRange(spec: string): ParsedRange {
+	if (typeof spec !== "string" || spec.length === 0) return { ok: false, reason: "empty range" };
+	const m = /^(.*?)(\.\.\.|\.\.)(.*)$/.exec(spec);
+	if (!m) return { ok: false, reason: "missing .. or ... operator" };
+	const left = m[1];
+	const op = m[2] === "..." ? "..." : "..";
+	let right = m[3];
+	// A second range operator anywhere in the remainder means >1 operator (`a..b..c`, `a..b...c`).
+	if (/\.\.\.?/.test(right)) return { ok: false, reason: "more than one range operator" };
+	if (left.length === 0 && right.length === 0) return { ok: false, reason: "empty range" };
+	if (left.length === 0) return { ok: false, reason: "empty left side" };
+	if (right.length === 0) right = "HEAD";
+	return { ok: true, left, right, op };
+}
+
 const DEFAULT_MAX_BYTES = 5 * 1024 * 1024; // 5 MB safety cap on a single git invocation's stdout
 
 /** Default runner: spawn git with an argv ARRAY (never a shell string), capture stdout up to a
