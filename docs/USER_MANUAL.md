@@ -481,50 +481,81 @@ can no longer run:
 
 ### Built-in profiles
 
-Three built-in capability-hint profiles ship with the extension:
+Three built-in capability-hint profiles ship with the extension. None pin a `model` — they only set
+`thinking` and serve as the default for a built-in agent role.
 
-| Profile | Purpose | Model hint |
+| Profile | `model` | `thinking` | Default for role |
+|---|---|---|---|
+| `fast-local` | — | — | `scout` |
+| `reasoning-deep` | — | `high` | `planner` |
+| `adversarial-review` | — | `high` | `reviewer` |
+
+### Profile sources & precedence
+
+Profiles are discovered from three sources at session start:
+
+| Source | Location | Availability |
 |---|---|---|
-| `fast-local` | Quick local models for fast iteration | — |
-| `reasoning-deep` | Extended thinking for complex planning | `thinking: true` |
-| `adversarial-review` | Security/adversarial review work | — |
+| built-in | code-owned | always |
+| user | `~/.pi/agent/profiles/*.md` | once registered |
+| project | `<repo>/.pi/profiles/*.md` | **project trust + registration required** |
 
-### List available profiles
+**Precedence is `built-in > user > project`.** If two sources share a **name**, the higher one wins
+and the lower is **shadowed** — `/agents profiles` reports a `profile-name-shadowed` warning.
+
+> ⚠️ **Do not reuse a built-in name** (`fast-local`, `reasoning-deep`, `adversarial-review`) for a
+> custom profile. The built-in always shadows it, so your `model:` never takes effect. For example, a
+> project `adversarial-review.md` pinning `model: openai-codex/gpt-5.5` is shadowed by the built-in
+> `adversarial-review`, and the reviewer keeps running on the host default model. Give custom profiles
+> a unique name (e.g. `codex-review`) and assign them explicitly.
+
+### List available profiles (and see what's shadowed)
 
 ```text
 /agents profiles
+/agents inspect <agent>     # shows the agent's resolved profile + effect
+/agents doctor              # warns when an agent name collides with a built-in profile name
 ```
-
-### Assign a profile to an agent
-
-In the agent's Markdown frontmatter:
-
-```markdown
-profile: reasoning-deep
-```
-
-When both `model` and `profile` are set, the profile takes precedence
-(profile-as-authority resolution).
 
 ### Register a custom profile
 
-Create a profile file, e.g. `profiles/my-profile.md`:
+Create a uniquely-named profile file, e.g. `.pi/profiles/codex-review.md`:
 
 ```markdown
 ---
-name: my-profile
+name: codex-review
 model: openai-codex/gpt-5.5
-thinking: true
-purpose: Deep reasoning for architecture planning
+thinking: high
+purpose: Adversarial review on a different provider
 ---
 ```
 
 ```text
-/agents profiles register profiles/my-profile.md
+/agents profiles register .pi/profiles/codex-review.md
 ```
 
-Registered project profiles require project trust. Hash registration
-prevents unregistered profile changes from taking effect.
+Registered **project** profiles require project trust. Registration stores the file's raw-byte SHA-256;
+any later edit invalidates it (fail-closed) until you re-register. `/agents profiles unregister <name>`
+removes it.
+
+### Assign a profile to an agent
+
+Three ways, in order of how they apply:
+
+1. **On a registered agent spec** — add `profile: codex-review` to the spec's frontmatter. Applies on
+   every run of that agent.
+2. **Per run** — `/agents run <agent> --profile codex-review <task>` (the flag must come immediately
+   after the agent name, before the task text).
+3. **Built-in role defaults** — `scout→fast-local`, `planner→reasoning-deep`, `reviewer→adversarial-review`
+   apply automatically on the `/agents do` and natural-language-gate paths. A bare `/agents run reviewer`
+   does **not** apply the role default — pass `--profile` if you want one.
+
+When a spec sets both `model` and `profile`, the **profile's** model wins (profile-as-authority). A
+profile that sets neither `model` nor `thinking` shows `effect: none (Pi default)` and is skipped.
+
+**To make the reviewer run on a specific model** (e.g. codex for provider diversity): register a
+uniquely-named profile (not `adversarial-review`) and either pass `--profile <name>` on
+`/agents run reviewer`, or set `profile: <name>` on a registered reviewer-style agent spec.
 
 ---
 
