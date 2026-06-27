@@ -13,9 +13,9 @@ the source of truth; older entries in the chain are `superseded`.
 
 P4R Background Agents Remediation and P4-2/P4-3 (preflight + worker) are merged.
 
-- Current episode ID: `20260625-080203-p4r-p4-2-p4-3-merged-background-agent-co-a6a6`
-- Tags include: `canonical-workplan`, `workplan`, `p4r-complete`, `p4-2-complete`, `p4-3-complete`, `p4-4-next`, `p4-5-next`
-- Summary: P4R + P4-2 + P4-3 merged: Background Agent core complete. Next: P4-4 terminal interface + P4-5 command wiring
+- Current episode ID: `20260627-074606-p5-plan-v5-cleared-for-implementation-un-7031`
+- Tags include: `canonical-workplan`, `workplan`, `p4r-complete`, `p5-cleared-for-impl`, `p5-unconditional-go`, `p5-v5-drafted`, `p5-b2a-fix`, `p5-macos-realpath-fix`
+- Summary: P5 plan v5 CLEARED for implementation (UNCONDITIONAL-GO); 5 rounds of review complete; 22 reqs, 63 tests, 16 mechanical steps ready. P4R/P4-2..P4-7 all merged.
 
 ### Completed tracks
 - P6 Intent Routing (7 slices, PRs #50, #58, #59, #60, #61)

@@ -81,9 +81,23 @@ Completed and merged:
 ### P4-7 Integration Tests
 - Fake TermBgBackend, temp state dir, ~30 tests
 
-### P5 Pluggable Terminal Backend (PARALLEL)
-- Independent track, separate extension
-- Plan: agents/docs/P5_PLUGGABLE_TERMINAL_BACKEND.md
+### P5 Pluggable Terminal Backend ✅ — IMPLEMENTED (awaiting PR)
+- Status: All 5 rounds of review complete. v1 (14 blockers) → v2 (4 residuals) → v3 (B2a stub) → v4 (macOS realpath) → **v5 UNCONDITIONAL-GO**.
+- Plan (ACTIVE): agents/docs/P5_PLUGGABLE_TERMINAL_BACKEND_PLAN_V5.md
+- Plan review: agents/docs/P5_PLUGGABLE_TERMINAL_BACKEND_PLAN_REVIEW.md
+- Adversarial review: agents/docs/P5_PLUGGABLE_TERMINAL_BACKEND_ADVERSARIAL_REVIEW.md
+- Implementation: complete on branch `p5-tmux-terminal`. All 63 tests pass on macOS. REQ-13 grep clean. P4-4 regression suite still green.
+- Stats: 22 requirements / 63 test functions across 16 groups / 15 contract states / 16 mechanical-execution steps.
+- PR: pending (next PR after #97).
+- Implementation deviations from plan (executor fix-ups, all required to make tests pass):
+  1. `isAvailable` and `launch` now check `result.ok` on executor return (not just catch throws). The plan's try/catch-only design fails the tests because `FakeTmuxExecutor` returns `{ ok: false }` instead of throwing. Production `defaultTmuxExecutor` never throws either, so the original try/catch was dead code.
+  2. Removed contradictory first assertion in `testLaunchDoesNotInterpolateRunId`. The assertion `!newWindowStr.includes(SAMPLE_RUN_ID)` fails by design (REQ-5 mandates `windowName = pi-agent-<runId>`, so runId appears in argv). Kept the second (correct) assertion: `runIdOccurrences === 0` (no standalone runId token). Test author's own comment clarified intent.
+  3. `test-bg.mjs` REQ-22 test wrapped as `async function testListEntryWithoutRunIdIsTreatedAsUnknown()` + main() entry, matching file style. Plan's inline-block style wouldn't execute (file uses `main()` invocation only).
+  4. Anchors adapted: file uses `// ---...` dashes not `// ── Test helpers ──`. Used equivalent sections.
+- Regression guards verified:
+  - Mutation #1 (realpathSync → path.resolve in resolve-worker-path.ts): `testWorkerPathIsRealpathed` fails as expected.
+  - Mutation #2 (reorder WORKER_BASENAMES to `[.mjs, .ts, .js]`): `testWorkerPathPrefersTsOverMjs` fails as expected.
+  - Both pass when reverted.
 
 ### P4R-PROJ Project Background Agents (DEFERRED)
 - Requires disk-backed trust reader
