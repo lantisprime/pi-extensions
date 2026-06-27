@@ -31,7 +31,7 @@ import { discoverProfiles, rejectDuplicateProfileNames, DEFAULT_PROFILE_DISCOVER
 import { addOrReplaceRegisteredProfile, findMatchingRegisteredProfile, type RegisteredProfile } from "./lib/registry.ts";
 import { runChainCommand } from "./lib/chain-runner.ts";
 import { loadGateConfig, classifyGateIntent, GATE_INSTRUCTIONS } from "./lib/intent-gate.ts";
-import { reapStaleBgRuns, resolveTrustedHome, listBgRuns, getBgRunPaths, readBgResult } from "./lib/bg-state.ts";
+import { reapStaleBgRuns, resolveTrustedHome, listBgRuns, getBgRunPaths, readBgResult, writeBgResult, markBgRunDone } from "./lib/bg-state.ts";
 import os from "node:os";
 import path from "node:path";
 
@@ -546,6 +546,13 @@ async function handleBgCommand(
 	});
 
 	if (launchResult.status === "failed") {
+		// Clean up the reservation + manifest that preflight wrote.
+		// Without this, bg-status shows a phantom "reserved" run until
+		// the stale-reaper times it out.
+		try {
+			await writeBgResult(result.paths, { version: 1, runId: result.runId, status: "failed", error: launchResult.error ?? "unknown launch error" });
+			await markBgRunDone(result.paths);
+		} catch { /* best-effort; the reaper will catch it on next session */ }
 		ctx.ui.notify(`Launch failed: ${launchResult.error ?? "unknown error"}`, "error");
 		return;
 	}
