@@ -17,6 +17,11 @@ import {
 	handleBgStop,
 	handleBgOpen,
 	handleBgResult,
+	updateBgStatusLine,
+	ensureBgStatusPolling,
+	__setBgStatusHomeOverride,
+	__setBgStatusPollingDeps,
+	__resetBgStatusPolling,
 } from "../index.ts";
 
 import {
@@ -323,6 +328,290 @@ async function testBgResultValidButUnknownRunId() {
 	assert.ok(lastMsg.includes("No result found"), "valid-but-unknown runId should show 'No result found'");
 }
 
+// ── P4-6: Status line tests ──────────────────────────────────────────────
+
+/** updateBgStatusLine clears the status when no runs are active. */
+async function testStatusLineClearsWhenIdle() {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "p4-6-idle-"));
+	const home = path.join(root, "home");
+	await fs.mkdir(home, { recursive: true });
+	try {
+		__setBgStatusHomeOverride(home);
+		const statuses = [];
+		const ctx = {
+			ui: {
+				setStatus(key, text) { statuses.push({ key, text }); },
+			},
+		};
+
+		// Empty temp home → count should be 0 → status cleared.
+		await updateBgStatusLine(ctx);
+
+		const last = statuses[statuses.length - 1];
+		assert.ok(last, "setStatus should have been called");
+		assert.equal(last.key, "agents:bg-count");
+		assert.equal(last.text, undefined, "status should be cleared when no agents are running");
+	} finally {
+		__setBgStatusHomeOverride(undefined);
+		await fs.rm(root, { recursive: true, force: true }).catch(() => {});
+	}
+}
+
+/** updateBgStatusLine sets a count when runs are active.  Uses a temp
+ *  home dir to stay isolated from real bg-state on the developer's machine. */
+async function testStatusLineShowsCount() {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "p4-6-count-"));
+	const home = path.join(root, "home");
+	await fs.mkdir(home, { recursive: true });
+	try {
+		__setBgStatusHomeOverride(home);
+
+		// Create one reserved run → count should be 1.
+		const state = await createBgRunState({ homeDir: home, runId: "bg-p46-ct-01" });
+		try {
+			const statuses = [];
+			const ctx = {
+				ui: {
+					setStatus(key, text) { statuses.push({ key, text }); },
+				},
+			};
+
+			await updateBgStatusLine(ctx);
+
+			const last = statuses[statuses.length - 1];
+			assert.ok(last, "setStatus should have been called");
+			assert.equal(last.key, "agents:bg-count");
+			assert.equal(last.text, "1 agent running",
+				`singular: expected '1 agent running', got: '${last.text}'`);
+		} finally {
+			await writeBgResult(state, { version: 1, runId: "bg-p46-ct-01", status: "stopped" });
+			await fs.writeFile(path.join(state.runDir, "done"), "");
+		}
+
+		// Create two reserved runs → count should be 2.
+		const s1 = await createBgRunState({ homeDir: home, runId: "bg-p46-ct-02" });
+		const s2 = await createBgRunState({ homeDir: home, runId: "bg-p46-ct-03" });
+		try {
+			const statuses = [];
+			const ctx = {
+				ui: {
+					setStatus(key, text) { statuses.push({ key, text }); },
+				},
+			};
+
+			await updateBgStatusLine(ctx);
+
+			const last = statuses[statuses.length - 1];
+			assert.equal(last.text, "2 agents running",
+				`plural: expected '2 agents running', got: '${last.text}'`);
+		} finally {
+			for (const s of [s1, s2]) {
+				await writeBgResult(s, { version: 1, runId: s.runDir.split(path.sep).pop() ?? "x", status: "stopped" });
+				await fs.writeFile(path.join(s.runDir, "done"), "");
+			}
+		}
+	} finally {
+		__setBgStatusHomeOverride(undefined);
+		await fs.rm(root, { recursive: true, force: true }).catch(() => {});
+	}
+}
+
+/** updateBgStatusLine silently no-ops when setStatus is unavailable. */
+async function testStatusLineNoOpWithoutSetStatus() {
+	// Should not throw on ctx without setStatus
+	await updateBgStatusLine({ ui: {} });
+}
+
+// ── P4-6: Poll timer tests ───────────────────────────────────────────────
+
+/** Fake timer: captures setInterval/clearInterval so we can assert timer
+ *  lifecycle + manually tick the callback.  Matches the pattern from
+ *  test-bg-run.mjs makeFakeTimer(). */
+function makeFakeTimer() {
+	return {
+		fn: undefined,
+		intervalMs: undefined,
+		cleared: false,
+		hadSet: false,
+		setInterval(fn, ms) { this.fn = fn; this.intervalMs = ms; this.hadSet = true; return { unref() {} }; },
+		clearInterval() { if (this.hadSet) this.cleared = true; this.fn = undefined; },
+		tick() { return this.fn ? this.fn() : Promise.resolve(); },
+	};
+}
+
+/** ensureBgStatusPolling creates a timer with the expected 15s interval. */
+async function testPollingCreatesTimer() {
+	__resetBgStatusPolling();
+	const timer = makeFakeTimer();
+	__setBgStatusPollingDeps({ setInterval: timer.setInterval.bind(timer), clearInterval: timer.clearInterval.bind(timer) });
+	const ctx = { ui: { setStatus() {} } };
+
+	ensureBgStatusPolling(ctx);
+
+	assert.ok(timer.fn, "poll timer should have been created");
+	assert.equal(timer.intervalMs, 15_000, "poll interval should be 15s");
+	assert.equal(timer.cleared, false, "timer should not be cleared on first create");
+
+	__resetBgStatusPolling();
+}
+
+/** ensureBgStatusPolling clears old timer and creates a new one (restart). */
+async function testPollingRestartsExistingTimer() {
+	__resetBgStatusPolling();
+	const timer = makeFakeTimer();
+	__setBgStatusPollingDeps({ setInterval: timer.setInterval.bind(timer), clearInterval: timer.clearInterval.bind(timer) });
+	const ctx = { ui: { setStatus() {} } };
+
+	// First call creates a timer.  setInterval is called once.
+	ensureBgStatusPolling(ctx);
+	assert.ok(timer.fn, "first call should create a timer");
+
+	// Save the old fn so we can assert it was replaced.
+	const firstFn = timer.fn;
+
+	// Second call: should clear old timer (clearInterval called) and
+	// create a new one (setInterval called again with a new fn).
+	ensureBgStatusPolling(ctx);
+	assert.equal(timer.cleared, true, "old timer should have been cleared");
+	assert.notEqual(timer.fn, firstFn, "new timer fn should differ from old");
+
+	__resetBgStatusPolling();
+}
+
+/** Poll tick auto-stops the timer when count drops to 0. */
+async function testPollingAutoStopsAtZero() {
+	__resetBgStatusPolling();
+
+	// Use a temp home with zero runs so countActiveBgRuns returns 0.
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "p4-6-stop-"));
+	const home = path.join(root, "home");
+	await fs.mkdir(home, { recursive: true });
+	try {
+		__setBgStatusHomeOverride(home);
+		const timer = makeFakeTimer();
+		__setBgStatusPollingDeps({ setInterval: timer.setInterval.bind(timer), clearInterval: timer.clearInterval.bind(timer) });
+
+		const statuses = [];
+		const ctx = { ui: { setStatus(key, text) { statuses.push({ key, text }); } } };
+
+		ensureBgStatusPolling(ctx);
+		assert.ok(timer.fn, "timer should be created");
+		assert.equal(timer.cleared, false, "timer should be active before tick");
+
+		// Tick: count is 0 (temp home has no runs), timer should self-stop.
+		await timer.tick();
+
+		assert.equal(timer.cleared, true, "timer should auto-stop when count reaches 0");
+		const last = statuses[statuses.length - 1];
+		assert.ok(last, "setStatus should have been called");
+		assert.equal(last.text, undefined, "status should be cleared when 0 agents running");
+	} finally {
+		__resetBgStatusPolling();
+		await fs.rm(root, { recursive: true, force: true }).catch(() => {});
+	}
+}
+
+/** Poll tick does NOT stop when count > 0. */
+async function testPollingKeepsRunningWhenAgentsActive() {
+	__resetBgStatusPolling();
+
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "p4-6-poll-"));
+	const home = path.join(root, "home");
+	await fs.mkdir(home, { recursive: true });
+	try {
+		const state = await createBgRunState({ homeDir: home, runId: "bg-p46-poll-01" });
+		try {
+			__setBgStatusHomeOverride(home);
+			const timer = makeFakeTimer();
+			__setBgStatusPollingDeps({ setInterval: timer.setInterval.bind(timer), clearInterval: timer.clearInterval.bind(timer) });
+
+			const ctx = { ui: { setStatus() {} } };
+			ensureBgStatusPolling(ctx);
+
+			await timer.tick();
+
+			assert.equal(timer.cleared, false, "timer should keep running when agents are active");
+		} finally {
+			await writeBgResult(state, { version: 1, runId: "bg-p46-poll-01", status: "stopped" });
+			await fs.writeFile(path.join(state.runDir, "done"), "");
+		}
+	} finally {
+		__resetBgStatusPolling();
+		await fs.rm(root, { recursive: true, force: true }).catch(() => {});
+	}
+}
+
+/** Busy guard: overlapping tick skips when previous tick still running. */
+async function testPollingBusyGuardSkipsOverlappingTick() {
+	__resetBgStatusPolling();
+	const timer = makeFakeTimer();
+	__setBgStatusPollingDeps({ setInterval: timer.setInterval.bind(timer), clearInterval: timer.clearInterval.bind(timer) });
+
+	// Use a slow setStatus to keep the first tick busy across the second tick.
+	let resolveSlow;
+	const slowPromise = new Promise((r) => { resolveSlow = r; });
+	let tickCount = 0;
+	const ctx = {
+		ui: {
+			setStatus() {
+				tickCount++;
+				if (tickCount === 1) return slowPromise; // first tick: stalls
+			},
+		},
+	};
+
+	ensureBgStatusPolling(ctx);
+
+	// Fire first tick — enters updateBgStatusLine, hits the slow setStatus.
+	const tick1 = timer.tick();
+	// Fire second tick — busy guard should skip it (returns immediately).
+	const tick2 = timer.tick();
+
+	// Resolve the slow promise so tick1 can complete.
+	resolveSlow();
+	await tick1;
+	await tick2;
+
+	// Only one tick should have reached setStatus — the second was skipped.
+	assert.equal(tickCount, 1, "busy guard should skip second tick while first is still running");
+
+	__resetBgStatusPolling();
+}
+
+/** ensureBgStatusPolling no-ops when setStatus is unavailable. */
+async function testPollingNoOpWithoutSetStatus() {
+	__resetBgStatusPolling();
+	const timer = makeFakeTimer();
+	__setBgStatusPollingDeps({ setInterval: timer.setInterval.bind(timer), clearInterval: timer.clearInterval.bind(timer) });
+
+	ensureBgStatusPolling({ ui: {} });
+	assert.equal(timer.fn, undefined, "should not create timer when setStatus missing");
+
+	ensureBgStatusPolling({});
+	assert.equal(timer.fn, undefined, "should not create timer when ui missing");
+
+	__resetBgStatusPolling();
+}
+
+/** __resetBgStatusPolling cleans all module state so a fresh call works. */
+async function testResetCleansState() {
+	__resetBgStatusPolling();
+	const ctx = { ui: { setStatus() {} } };
+
+	const timer1 = makeFakeTimer();
+	__setBgStatusPollingDeps({ setInterval: timer1.setInterval.bind(timer1), clearInterval: timer1.clearInterval.bind(timer1) });
+	ensureBgStatusPolling(ctx);
+	__resetBgStatusPolling();
+
+	// After reset, another call with new deps should work.
+	const timer2 = makeFakeTimer();
+	__setBgStatusPollingDeps({ setInterval: timer2.setInterval.bind(timer2), clearInterval: timer2.clearInterval.bind(timer2) });
+	ensureBgStatusPolling(ctx);
+	assert.ok(timer2.fn, "fresh call after reset should create a new timer");
+
+	__resetBgStatusPolling();
+}
+
 async function main() {
 	console.log("P4-5 bg-commands tests");
 	await test("readBgResult: no file → undefined", testReadBgResultNoFile);
@@ -338,6 +627,16 @@ async function main() {
 	await test("bg-open: reports no window for unknown runId", testBgOpenNotFound);
 	await test("bg-result: malformed runId → graceful warning", testBgResultMalformedRunId);
 	await test("bg-result: valid unknown runId → 'No result found'", testBgResultValidButUnknownRunId);
+	await test("P4-6: status line clears when idle", testStatusLineClearsWhenIdle);
+	await test("P4-6: status line shows running agent count", testStatusLineShowsCount);
+	await test("P4-6: status line no-ops without setStatus", testStatusLineNoOpWithoutSetStatus);
+	await test("P4-6: polling creates timer", testPollingCreatesTimer);
+	await test("P4-6: polling restarts existing timer", testPollingRestartsExistingTimer);
+	await test("P4-6: polling auto-stops at zero", testPollingAutoStopsAtZero);
+	await test("P4-6: polling keeps running when active", testPollingKeepsRunningWhenAgentsActive);
+	await test("P4-6: polling busy guard skips overlap", testPollingBusyGuardSkipsOverlappingTick);
+	await test("P4-6: polling no-ops without setStatus", testPollingNoOpWithoutSetStatus);
+	await test("P4-6: reset cleans polling state", testResetCleansState);
 	console.log("P4-5 bg-commands tests passed");
 }
 

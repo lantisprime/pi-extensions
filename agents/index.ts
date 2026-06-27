@@ -31,7 +31,7 @@ import { discoverProfiles, rejectDuplicateProfileNames, DEFAULT_PROFILE_DISCOVER
 import { addOrReplaceRegisteredProfile, findMatchingRegisteredProfile, type RegisteredProfile } from "./lib/registry.ts";
 import { runChainCommand } from "./lib/chain-runner.ts";
 import { loadGateConfig, classifyGateIntent, GATE_INSTRUCTIONS } from "./lib/intent-gate.ts";
-import { reapStaleBgRuns, resolveTrustedHome, listBgRuns, getBgRunPaths, readBgResult, writeBgResult, markBgRunDone } from "./lib/bg-state.ts";
+import { reapStaleBgRuns, resolveTrustedHome, listBgRuns, getBgRunPaths, readBgResult, writeBgResult, markBgRunDone, countActiveBgRuns } from "./lib/bg-state.ts";
 import os from "node:os";
 import path from "node:path";
 
@@ -59,6 +59,8 @@ type AgentsContext = {
 		confirm?(title: string, message: string): Promise<boolean> | boolean;
 		// P8: interactive widget surface used for the live background-run indicator.
 		setWidget?(key: string, content: string[] | undefined, options?: { placement?: "aboveEditor" | "belowEditor" }): void;
+		// P4-6: footer status line for persistent background agent count.
+		setStatus?(key: string, text: string | undefined): void;
 	};
 	// P8-followup: inject a completed subagent result into pi's conversation (set in the handler).
 	deliverResult?: (content: string) => void;
@@ -86,6 +88,10 @@ export default function agentsExtension(pi: ExtensionAPI) {
 	// agentsHomeDir is for user-config discovery only, not bg-run state.
 	eventApi.on?.("session_shutdown", async (_event, ctx) => {
 		disposeBackgroundRuns(ctx?.ui ?? { setWidget: () => {} });
+		// Clear status line + stop polling BEFORE async reap so they're always
+		// cleaned up even if reapStaleBgRuns rejects.
+		if (bgStatusPollTimer !== undefined) { clearInterval(bgStatusPollTimer); bgStatusPollTimer = undefined; }
+		if (typeof ctx?.ui?.setStatus === "function") ctx.ui.setStatus(BG_STATUS_KEY, undefined);
 		await reapStaleBgRuns(resolveTrustedHome()); // free slots only — NOT key retirement (N5)
 	});
 	eventApi.on?.("session_start", async (_event, ctx) => {
@@ -95,6 +101,9 @@ export default function agentsExtension(pi: ExtensionAPI) {
 		// (which re-attaches it from sessionCtx in handleGateInput). Without this the gate path drops
 		// a completed run's findings silently.
 		attachDeliverResult(pi, ctx);
+		// P4-6: show current background agent count in the footer on session start.
+		// Only start polling if there are active runs — avoid a throwaway timer on idle sessions.
+		if (await updateBgStatusLine(ctx) > 0) ensureBgStatusPolling(ctx);
 		ctx.profileLibrary = profileLibrary; // start with built-ins
 		// Discover user/project profiles and rebuild library.
 		// os.homedir() is intentional here (NOT resolveTrustedHome()): profile discovery
@@ -493,6 +502,96 @@ async function handleProfileUnregister(target: string, ctx: AgentsContext, diagn
 	ctx.ui.notify(`Unregistered profile '${target}'.`, "info");
 }
 
+// ── P4-6: Background agent status line ─────────────────────────────────
+
+const BG_STATUS_KEY = "agents:bg-count";
+const BG_STATUS_POLL_MS = 15_000; // refresh every 15s while runs are active
+let bgStatusPollTimer: ReturnType<typeof setInterval> | undefined;
+let bgStatusPollBusy = false; // guard against pile-up when countActiveBgRuns is slow
+
+/** Test-only: override the home dir for countActiveBgRuns.  Production
+ *  code never calls this — it's for test isolation so tests don't mutate
+ *  real bg-state on the developer's machine. */
+let __bgStatusHomeOverride: string | undefined;
+export function __setBgStatusHomeOverride(home: string | undefined): void {
+	__bgStatusHomeOverride = home;
+}
+
+/** Test-only: inject setInterval/clearInterval for fake-timer tests. */
+let __bgStatusPollingDeps: {
+	setInterval: typeof setInterval;
+	clearInterval: typeof clearInterval;
+} | undefined;
+export function __setBgStatusPollingDeps(deps: typeof __bgStatusPollingDeps): void {
+	__bgStatusPollingDeps = deps;
+}
+
+/** Update the pi footer status line with the current background agent
+ *  count.  Reads from the bg-state authority root (resolveTrustedHome()),
+ *  same as the write path + all other bg-state operations.  Silently
+ *  no-ops when setStatus is unavailable (non-TUI / pre-P4-6 pi).
+ *  Returns the count, or -1 on error / unavailable.
+ *
+ *  Note: "running" includes reserved, quarantined, and actively-executing
+ *  runs — it matches countActiveBgRuns() semantics (any non-done run that
+ *  isn't past its reservation expiry).  A reserved-but-not-yet-launched
+ *  run shows briefly until the launch succeeds or the launch-failure
+ *  cleanup frees the slot. */
+export async function updateBgStatusLine(ctx: AgentsContext): Promise<number> {
+	if (typeof ctx?.ui?.setStatus !== "function") return -1;
+	try {
+		const count = __bgStatusHomeOverride !== undefined
+			? await countActiveBgRuns(__bgStatusHomeOverride)
+			: await countActiveBgRuns();
+		ctx.ui.setStatus(BG_STATUS_KEY, count > 0 ? `${count} agent${count === 1 ? "" : "s"} running` : undefined);
+		return count;
+	} catch { /* best-effort; don't break the session over a status update */ }
+	return -1;
+}
+
+/** Start periodic polling while there are active background runs so the
+ *  status line stays current even when no /agents command was typed.
+ *  Stops itself when count drops to 0.  Restarts the timer if already
+ *  running (defeats TOCTOU: a launch between count→0 and clearInterval).
+ *  No-ops when setStatus is unavailable (non-TUI / pre-P4-6 pi). */
+export function ensureBgStatusPolling(ctx: AgentsContext): void {
+	if (typeof ctx?.ui?.setStatus !== "function") return;
+	// Restart any existing timer so a launch that raced with a tick that
+	// saw count=0 but hasn't cleared yet doesn't leave us polling-less.
+	const setInt = __bgStatusPollingDeps?.setInterval ?? setInterval;
+	const clearInt = __bgStatusPollingDeps?.clearInterval ?? clearInterval;
+	if (bgStatusPollTimer !== undefined) {
+		clearInt(bgStatusPollTimer);
+		bgStatusPollTimer = undefined;
+	}
+	bgStatusPollTimer = setInt(async () => {
+		if (bgStatusPollBusy) return;
+		bgStatusPollBusy = true;
+		try {
+			// Single countActiveBgRuns call feeds both the status line AND the
+			// stop decision — no TOCTOU gap between the two.
+			const count = await updateBgStatusLine(ctx);
+			if (count === 0 && bgStatusPollTimer !== undefined) {
+				clearInt(bgStatusPollTimer);
+				bgStatusPollTimer = undefined;
+			}
+		} catch { /* swallow — don't crash the poll loop */ }
+		finally { bgStatusPollBusy = false; }
+	}, BG_STATUS_POLL_MS);
+	(bgStatusPollTimer as { unref?: () => void })?.unref?.();
+}
+
+/** Test-only: reset module-level polling state between test cases. */
+export function __resetBgStatusPolling(): void {
+	if (bgStatusPollTimer !== undefined) {
+		clearInterval(bgStatusPollTimer);
+		bgStatusPollTimer = undefined;
+	}
+	bgStatusPollBusy = false;
+	__bgStatusHomeOverride = undefined;
+	__bgStatusPollingDeps = undefined;
+}
+
 // ── P4-5: Background agent commands ─────────────────────────────────────
 //
 // N3 INVARIANT: All bg-state paths (reads and writes) use resolveTrustedHome()
@@ -570,16 +669,23 @@ export async function handleBgCommand(
 			await markBgRunDone(result.paths);
 		} catch { /* best-effort; the reaper will catch it on next session */ }
 		ctx.ui.notify(`Launch failed: ${launchResult.error ?? "unknown error"}`, "error");
+		await updateBgStatusLine(ctx);
 		return;
 	}
 
 	ctx.ui.notify(`Background agent ${agentName} running (${result.runId.slice(0, 16)}…) via ${backend.name}.`, "info");
+	await updateBgStatusLine(ctx);
+	ensureBgStatusPolling(ctx);
 }
 
 /** /agents bg-status — show running + recent background runs. */
 export async function handleBgStatus(ctx: AgentsContext): Promise<void> {
 	const homeDir = resolveTrustedHome();
 	const runs = await listBgRuns(homeDir);
+
+	// P4-6: refresh the status line — a run may have completed since last update.
+	// Re-arm polling if there are still active runs (the poll may have self-stopped at 0).
+	if (await updateBgStatusLine(ctx) > 0) ensureBgStatusPolling(ctx);
 
 	if (runs.length === 0) {
 		ctx.ui.notify("No background agent runs.", "info");
@@ -634,6 +740,8 @@ export async function handleBgStop(args: string, ctx: AgentsContext): Promise<vo
 
 	// Reap via bg-state regardless of backend result.
 	await reapStaleBgRuns(resolveTrustedHome());
+	// Re-arm polling if there are still active runs (e.g. a multi-agent session).
+	if (await updateBgStatusLine(ctx) > 0) ensureBgStatusPolling(ctx);
 	ctx.ui.notify(`Stop requested for ${runId.slice(0, 16)}….`, "info");
 }
 
@@ -657,6 +765,11 @@ export async function handleBgResult(args: string, ctx: AgentsContext): Promise<
 		return;
 	}
 	const result = await readBgResult(paths);
+
+	// P4-6: refresh the status line — the run may have completed since last update.
+	// Re-arm polling if there are still active runs.
+	if (await updateBgStatusLine(ctx) > 0) ensureBgStatusPolling(ctx);
+
 	if (!result) {
 		ctx.ui.notify(`No result found for run ${runId.slice(0, 16)}…. (Still running or invalid runId?)`, "warning");
 		return;
