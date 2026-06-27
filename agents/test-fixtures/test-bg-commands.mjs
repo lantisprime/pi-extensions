@@ -17,6 +17,7 @@ import {
 	handleBgStop,
 	handleBgOpen,
 	handleBgResult,
+	updateBgStatusLine,
 } from "../index.ts";
 
 import {
@@ -323,6 +324,58 @@ async function testBgResultValidButUnknownRunId() {
 	assert.ok(lastMsg.includes("No result found"), "valid-but-unknown runId should show 'No result found'");
 }
 
+// ── P4-6: Status line tests ──────────────────────────────────────────────
+
+/** updateBgStatusLine clears the status when no runs are active. */
+async function testStatusLineClearsWhenIdle() {
+	const statuses = [];
+	const ctx = {
+		ui: {
+			setStatus(key, text) { statuses.push({ key, text }); },
+		},
+	};
+
+	// No active runs — status should be cleared.
+	await updateBgStatusLine(ctx);
+
+	const last = statuses[statuses.length - 1];
+	assert.ok(last, "setStatus should have been called");
+	assert.equal(last.key, "agents:bg-count");
+	assert.equal(last.text, undefined, "status should be cleared when no agents are running");
+}
+
+/** updateBgStatusLine sets a count when runs are active. */
+async function testStatusLineShowsCount() {
+	// Create a run to make countActiveBgRuns > 0
+	const state = await createBgRunState({ homeDir: os.userInfo().homedir, runId: "bg-status-test-p46" });
+	try {
+		const statuses = [];
+		const ctx = {
+			ui: {
+				setStatus(key, text) { statuses.push({ key, text }); },
+			},
+		};
+
+		await updateBgStatusLine(ctx);
+
+		const last = statuses[statuses.length - 1];
+		assert.ok(last, "setStatus should have been called");
+		assert.equal(last.key, "agents:bg-count");
+		assert.ok(typeof last.text === "string" && last.text.includes("running"),
+			`status should show running agents, got: ${last.text}`);
+	} finally {
+		// Clean up: write done marker so the run doesn't count as active
+		await writeBgResult(state, { version: 1, runId: "bg-status-test-p46", status: "stopped" });
+		await fs.writeFile(path.join(state.runDir, "done"), "");
+	}
+}
+
+/** updateBgStatusLine silently no-ops when setStatus is unavailable. */
+async function testStatusLineNoOpWithoutSetStatus() {
+	// Should not throw on ctx without setStatus
+	await updateBgStatusLine({ ui: {} });
+}
+
 async function main() {
 	console.log("P4-5 bg-commands tests");
 	await test("readBgResult: no file → undefined", testReadBgResultNoFile);
@@ -338,6 +391,9 @@ async function main() {
 	await test("bg-open: reports no window for unknown runId", testBgOpenNotFound);
 	await test("bg-result: malformed runId → graceful warning", testBgResultMalformedRunId);
 	await test("bg-result: valid unknown runId → 'No result found'", testBgResultValidButUnknownRunId);
+	await test("P4-6: status line clears when idle", testStatusLineClearsWhenIdle);
+	await test("P4-6: status line shows running agent count", testStatusLineShowsCount);
+	await test("P4-6: status line no-ops without setStatus", testStatusLineNoOpWithoutSetStatus);
 	console.log("P4-5 bg-commands tests passed");
 }
 

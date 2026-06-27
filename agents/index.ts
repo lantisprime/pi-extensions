@@ -31,7 +31,7 @@ import { discoverProfiles, rejectDuplicateProfileNames, DEFAULT_PROFILE_DISCOVER
 import { addOrReplaceRegisteredProfile, findMatchingRegisteredProfile, type RegisteredProfile } from "./lib/registry.ts";
 import { runChainCommand } from "./lib/chain-runner.ts";
 import { loadGateConfig, classifyGateIntent, GATE_INSTRUCTIONS } from "./lib/intent-gate.ts";
-import { reapStaleBgRuns, resolveTrustedHome, listBgRuns, getBgRunPaths, readBgResult, writeBgResult, markBgRunDone } from "./lib/bg-state.ts";
+import { reapStaleBgRuns, resolveTrustedHome, listBgRuns, getBgRunPaths, readBgResult, writeBgResult, markBgRunDone, countActiveBgRuns } from "./lib/bg-state.ts";
 import os from "node:os";
 import path from "node:path";
 
@@ -59,6 +59,8 @@ type AgentsContext = {
 		confirm?(title: string, message: string): Promise<boolean> | boolean;
 		// P8: interactive widget surface used for the live background-run indicator.
 		setWidget?(key: string, content: string[] | undefined, options?: { placement?: "aboveEditor" | "belowEditor" }): void;
+		// P4-6: footer status line for persistent background agent count.
+		setStatus?(key: string, text: string | undefined): void;
 	};
 	// P8-followup: inject a completed subagent result into pi's conversation (set in the handler).
 	deliverResult?: (content: string) => void;
@@ -87,6 +89,8 @@ export default function agentsExtension(pi: ExtensionAPI) {
 	eventApi.on?.("session_shutdown", async (_event, ctx) => {
 		disposeBackgroundRuns(ctx?.ui ?? { setWidget: () => {} });
 		await reapStaleBgRuns(resolveTrustedHome()); // free slots only — NOT key retirement (N5)
+		// Clear the persistent status line.
+		if (typeof ctx?.ui.setStatus === "function") ctx.ui.setStatus(BG_STATUS_KEY, undefined);
 	});
 	eventApi.on?.("session_start", async (_event, ctx) => {
 		sessionAgentsCtx = ctx;
@@ -95,6 +99,8 @@ export default function agentsExtension(pi: ExtensionAPI) {
 		// (which re-attaches it from sessionCtx in handleGateInput). Without this the gate path drops
 		// a completed run's findings silently.
 		attachDeliverResult(pi, ctx);
+		// P4-6: show current background agent count in the footer on session start.
+		await updateBgStatusLine(ctx);
 		ctx.profileLibrary = profileLibrary; // start with built-ins
 		// Discover user/project profiles and rebuild library.
 		// os.homedir() is intentional here (NOT resolveTrustedHome()): profile discovery
@@ -493,6 +499,22 @@ async function handleProfileUnregister(target: string, ctx: AgentsContext, diagn
 	ctx.ui.notify(`Unregistered profile '${target}'.`, "info");
 }
 
+// ── P4-6: Background agent status line ─────────────────────────────────
+
+const BG_STATUS_KEY = "agents:bg-count";
+
+/** Update the pi footer status line with the current background agent
+ *  count.  Reads from the bg-state authority root (resolveTrustedHome()),
+ *  same as the write path + all other bg-state operations.  Silently
+ *  no-ops when setStatus is unavailable (non-TUI / pre-P4-6 pi). */
+export async function updateBgStatusLine(ctx: AgentsContext): Promise<void> {
+	if (typeof ctx.ui.setStatus !== "function") return;
+	try {
+		const count = await countActiveBgRuns();
+		ctx.ui.setStatus(BG_STATUS_KEY, count > 0 ? `${count} agent${count === 1 ? "" : "s"} running` : undefined);
+	} catch { /* best-effort; don't break the session over a status update */ }
+}
+
 // ── P4-5: Background agent commands ─────────────────────────────────────
 //
 // N3 INVARIANT: All bg-state paths (reads and writes) use resolveTrustedHome()
@@ -570,10 +592,12 @@ export async function handleBgCommand(
 			await markBgRunDone(result.paths);
 		} catch { /* best-effort; the reaper will catch it on next session */ }
 		ctx.ui.notify(`Launch failed: ${launchResult.error ?? "unknown error"}`, "error");
+		await updateBgStatusLine(ctx);
 		return;
 	}
 
 	ctx.ui.notify(`Background agent ${agentName} running (${result.runId.slice(0, 16)}…) via ${backend.name}.`, "info");
+	await updateBgStatusLine(ctx);
 }
 
 /** /agents bg-status — show running + recent background runs. */
@@ -634,6 +658,7 @@ export async function handleBgStop(args: string, ctx: AgentsContext): Promise<vo
 
 	// Reap via bg-state regardless of backend result.
 	await reapStaleBgRuns(resolveTrustedHome());
+	await updateBgStatusLine(ctx);
 	ctx.ui.notify(`Stop requested for ${runId.slice(0, 16)}….`, "info");
 }
 
