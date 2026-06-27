@@ -67,28 +67,33 @@ Completed and merged:
 - New file: agents/lib/bg-worker.ts
 - Tests: test-bg-worker.mjs (10 tests)
 
-### P4-4 Terminal Backend Interface (NEXT)
+### P4-4 Terminal Backend Interface (COMPLETE)
 - bg-terminal.ts: TermBgBackend interface + register/get backend registry
-- ~30 lines, new file only
+- PR #88, commit 8e2f596
 
-### P4-5 Command Wiring
+### P4-5 Command Wiring (COMPLETE)
 - index.ts: /agents bg, bg-status, bg-stop, bg-result, bg-open
-- ~80 lines of command additions
+- PR #91
 
-### P4-6 Status Line
-- Running agent count via appendEntry, ~30 lines
+### P4-6 Status Line (COMPLETE)
+- Running agent count via appendEntry
+- PR #96
 
-### P4-7 Integration Tests
+### P4-7 Integration Tests (COMPLETE)
 - Fake TermBgBackend, temp state dir, ~30 tests
+- PR #97, commit bea9eb0
 
-### P5 Pluggable Terminal Backend ✅ — IMPLEMENTED (awaiting PR)
-- Status: All 5 rounds of review complete. v1 (14 blockers) → v2 (4 residuals) → v3 (B2a stub) → v4 (macOS realpath) → **v5 UNCONDITIONAL-GO**.
+### P5 Pluggable Terminal Backend (COMPLETE)
+- tmux-terminal/ extension: reference TermBgBackend implementation
+- 14 new files + 2 anchored edits; 22 requirements / 63 tests
+- PR #98, commit f3b247c
+- Branch: `p5-tmux-terminal` (local + remote, deleted post-merge).
+- Status: All 5 rounds of plan review complete (v1 14 blockers → v5 UNCONDITIONAL-GO); 1 round of code review (APPROVE, 0 blockers).
 - Plan (ACTIVE): agents/docs/P5_PLUGGABLE_TERMINAL_BACKEND_PLAN_V5.md
 - Plan review: agents/docs/P5_PLUGGABLE_TERMINAL_BACKEND_PLAN_REVIEW.md
 - Adversarial review: agents/docs/P5_PLUGGABLE_TERMINAL_BACKEND_ADVERSARIAL_REVIEW.md
-- Implementation: complete on branch `p5-tmux-terminal`. All 63 tests pass on macOS. REQ-13 grep clean. P4-4 regression suite still green.
+- Implementation: 14 new files in `tmux-terminal/` (8 production + 5 test + runner + README) + 2 anchored edits in `agents/`. All 63 tests pass on macOS. REQ-13 grep clean. P4-4 regression suite still green.
 - Stats: 22 requirements / 63 test functions across 16 groups / 15 contract states / 16 mechanical-execution steps.
-- PR: pending (next PR after #97).
 - Implementation deviations from plan (executor fix-ups, all required to make tests pass):
   1. `isAvailable` and `launch` now check `result.ok` on executor return (not just catch throws). The plan's try/catch-only design fails the tests because `FakeTmuxExecutor` returns `{ ok: false }` instead of throwing. Production `defaultTmuxExecutor` never throws either, so the original try/catch was dead code.
   2. Removed contradictory first assertion in `testLaunchDoesNotInterpolateRunId`. The assertion `!newWindowStr.includes(SAMPLE_RUN_ID)` fails by design (REQ-5 mandates `windowName = pi-agent-<runId>`, so runId appears in argv). Kept the second (correct) assertion: `runIdOccurrences === 0` (no standalone runId token). Test author's own comment clarified intent.

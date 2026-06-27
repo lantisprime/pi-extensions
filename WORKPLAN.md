@@ -9,13 +9,13 @@ The canonical `pi-extensions` workplan now lives in episodic memory.
 NOT hardcode an episode ID here — it drifts on every revision. The active head is
 the source of truth; older entries in the chain are `superseded`.
 
-## Active implementation (P4R + P4-2 + P4-3 complete; P4-4 next)
+## Active implementation (P4 + P5 fully shipped)
 
-P4R Background Agents Remediation and P4-2/P4-3 (preflight + worker) are merged.
+P4 Background Agents (P4R + P4-2..P4-7) and P5 Pluggable Terminal Backend are merged.
 
-- Current episode ID: `20260627-074606-p5-plan-v5-cleared-for-implementation-un-7031`
-- Tags include: `canonical-workplan`, `workplan`, `p4r-complete`, `p5-cleared-for-impl`, `p5-unconditional-go`, `p5-v5-drafted`, `p5-b2a-fix`, `p5-macos-realpath-fix`
-- Summary: P5 plan v5 CLEARED for implementation (UNCONDITIONAL-GO); 5 rounds of review complete; 22 reqs, 63 tests, 16 mechanical steps ready. P4R/P4-2..P4-7 all merged.
+- Current episode ID: `20260627-083022-p5-tmux-terminal-merged-pr-98-commit-f3b-3d0f`
+- Tags include: `canonical-workplan`, `workplan`, `p4r-complete`, `p5-cleared-for-impl`, `p5-unconditional-go`, `p5-merged`, `p5-pr-98`
+- Summary: P5 tmux-terminal MERGED into main (PR #98, commit f3b247c); P4+P5 track fully shipped. Future: alternative backends (zellij, wezterm, headless) + P4R-PROJ deferred.
 
 ### Completed tracks
 - P6 Intent Routing (7 slices, PRs #50, #58, #59, #60, #61)
@@ -24,15 +24,19 @@ P4R Background Agents Remediation and P4-2/P4-3 (preflight + worker) are merged.
 - P4R Background Agents Remediation (6 slices, PRs #72, #73, #75, #76, #77, #78)
 - P4-2 Preflight: signed identity manifest (PR #81)
 - P4-3 Worker: background-agent worker process (PR #82)
+- P4-4 Terminal backend interface (bg-terminal.ts, PR #88, commit 8e2f596)
+- P4-5 Command wiring (/agents bg commands, PR #91)
+- P4-6 Status line (PR #96)
+- P4-7 Integration tests (PR #97, commit bea9eb0)
+- P5 Pluggable Terminal Backend (tmux-terminal extension, PR #98, commit f3b247c)
 
 ### Next
-- P4-4 Terminal backend interface (bg-terminal.ts — TermBgBackend interface + registry)
-- P4-5 Command wiring (index.ts — /agents bg, bg-status, bg-stop, bg-result, bg-open)
-- P4-6 Status line (running agent count)
-- P4-7 Integration tests (fake backend, 30 tests)
+(none currently open)
 
-### Parallel
-- P5 Pluggable Terminal Backend (independent track, separate extension)
+### Deferred
+- P4R-PROJ Project Background Agents (requires disk-backed trust reader)
+- Alternative terminal backends: zellij-terminal, wezterm-terminal, headless-backend
+- Multiple-backend selection via --backend flag (deferred until 2+ backends ship)
 
 ### Active design docs
 
