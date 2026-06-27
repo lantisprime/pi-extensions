@@ -104,19 +104,40 @@ export interface TermBgBackend {
 }
 
 // ── Backend registry ──────────────────────────────────────────────────────
+//
+// The registry is stored on the process-global object under a shared Symbol so
+// the singleton survives `bg-terminal.ts` being loaded as MORE THAN ONE module
+// instance. That happens whenever the agents extension and a backend extension
+// (e.g. tmux-terminal) resolve this file to different realpaths — one deployed
+// as a copy and the other as a symlink, installed from separate sources, or
+// pinned to different versions. A plain module-scoped `let` gives each instance
+// its own variable, so a backend registered by one extension is invisible to
+// the other (getBgTerminalBackend() → null → "No terminal backend installed").
+// `Symbol.for` uses the cross-module global symbol registry, so every instance
+// shares one slot, and a backend extension can register without importing this
+// exact module instance. Regression: test-bg-terminal-dual-instance.mjs.
 
-let termBackend: TermBgBackend | null = null;
+const REGISTRY_SLOT = Symbol.for("pi.agents.bgTerminalBackend");
+
+function registrySlot(): { backend: TermBgBackend | null } {
+	const g = globalThis as unknown as Record<symbol, { backend: TermBgBackend | null } | undefined>;
+	return (g[REGISTRY_SLOT] ??= { backend: null });
+}
 
 /** Register a terminal backend. First to register wins; subsequent calls
  *  emit a debug diagnostic so "pi -e a -e b" doesn't silently drop the
- *  second backend. Extensions load in command-line order. */
+ *  second backend. Extensions load in command-line order.
+ *
+ *  Stored in the process-global registry (see above) so registration is
+ *  visible across duplicate module instances of this file. */
 export function registerBgTerminalBackend(backend: TermBgBackend): void {
-	if (!termBackend) {
-		termBackend = backend;
+	const slot = registrySlot();
+	if (!slot.backend) {
+		slot.backend = backend;
 		return;
 	}
 	console.debug(
-		`bg-terminal: ignoring backend "${backend.name}" — "${termBackend.name}" already registered (first registration wins)`,
+		`bg-terminal: ignoring backend "${backend.name}" — "${slot.backend.name}" already registered (first registration wins)`,
 	);
 }
 
@@ -124,11 +145,11 @@ export function registerBgTerminalBackend(backend: TermBgBackend): void {
  *  Callers must handle null gracefully — e.g. "/agents bg: no terminal
  *  backend installed". */
 export function getBgTerminalBackend(): TermBgBackend | null {
-	return termBackend;
+	return registrySlot().backend;
 }
 
 /** TEST-ONLY: reset the registered backend to null. Never call in production
  *  — only for test fixtures that need independent registration state. */
 export function __resetBgTerminalBackend(): void {
-	termBackend = null;
+	registrySlot().backend = null;
 }
