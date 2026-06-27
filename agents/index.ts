@@ -88,10 +88,11 @@ export default function agentsExtension(pi: ExtensionAPI) {
 	// agentsHomeDir is for user-config discovery only, not bg-run state.
 	eventApi.on?.("session_shutdown", async (_event, ctx) => {
 		disposeBackgroundRuns(ctx?.ui ?? { setWidget: () => {} });
-		await reapStaleBgRuns(resolveTrustedHome()); // free slots only — NOT key retirement (N5)
-		// Clear the persistent status line and stop polling.
+		// Clear status line + stop polling BEFORE async reap so they're always
+		// cleaned up even if reapStaleBgRuns rejects.
 		if (bgStatusPollTimer !== undefined) { clearInterval(bgStatusPollTimer); bgStatusPollTimer = undefined; }
 		if (typeof ctx?.ui?.setStatus === "function") ctx.ui.setStatus(BG_STATUS_KEY, undefined);
+		await reapStaleBgRuns(resolveTrustedHome()); // free slots only — NOT key retirement (N5)
 	});
 	eventApi.on?.("session_start", async (_event, ctx) => {
 		sessionAgentsCtx = ctx;
