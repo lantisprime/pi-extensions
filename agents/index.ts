@@ -517,6 +517,15 @@ export function __setBgStatusHomeOverride(home: string | undefined): void {
 	__bgStatusHomeOverride = home;
 }
 
+/** Test-only: inject setInterval/clearInterval for fake-timer tests. */
+let __bgStatusPollingDeps: {
+	setInterval: typeof setInterval;
+	clearInterval: typeof clearInterval;
+} | undefined;
+export function __setBgStatusPollingDeps(deps: typeof __bgStatusPollingDeps): void {
+	__bgStatusPollingDeps = deps;
+}
+
 /** Update the pi footer status line with the current background agent
  *  count.  Reads from the bg-state authority root (resolveTrustedHome()),
  *  same as the write path + all other bg-state operations.  Silently
@@ -549,11 +558,13 @@ export function ensureBgStatusPolling(ctx: AgentsContext): void {
 	if (typeof ctx?.ui?.setStatus !== "function") return;
 	// Restart any existing timer so a launch that raced with a tick that
 	// saw count=0 but hasn't cleared yet doesn't leave us polling-less.
+	const setInt = __bgStatusPollingDeps?.setInterval ?? setInterval;
+	const clearInt = __bgStatusPollingDeps?.clearInterval ?? clearInterval;
 	if (bgStatusPollTimer !== undefined) {
-		clearInterval(bgStatusPollTimer);
+		clearInt(bgStatusPollTimer);
 		bgStatusPollTimer = undefined;
 	}
-	bgStatusPollTimer = setInterval(async () => {
+	bgStatusPollTimer = setInt(async () => {
 		if (bgStatusPollBusy) return;
 		bgStatusPollBusy = true;
 		try {
@@ -561,7 +572,7 @@ export function ensureBgStatusPolling(ctx: AgentsContext): void {
 			// stop decision — no TOCTOU gap between the two.
 			const count = await updateBgStatusLine(ctx);
 			if (count === 0 && bgStatusPollTimer !== undefined) {
-				clearInterval(bgStatusPollTimer);
+				clearInt(bgStatusPollTimer);
 				bgStatusPollTimer = undefined;
 			}
 		} catch { /* swallow — don't crash the poll loop */ }
@@ -578,6 +589,7 @@ export function __resetBgStatusPolling(): void {
 	}
 	bgStatusPollBusy = false;
 	__bgStatusHomeOverride = undefined;
+	__bgStatusPollingDeps = undefined;
 }
 
 // ── P4-5: Background agent commands ─────────────────────────────────────
