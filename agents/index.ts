@@ -495,7 +495,7 @@ function extractRunId(args: string): string {
 }
 
 /** /agents bg <agent> <task> — preflight + launch a background agent. */
-async function handleBgCommand(
+export async function handleBgCommand(
 	args: string,
 	ctx: AgentsContext,
 	diagnostics: Awaited<ReturnType<typeof collectAgentDiagnostics>>,
@@ -509,14 +509,15 @@ async function handleBgCommand(
 		ctx.ui.notify(`Terminal backend "${backend.name}" is not available.`, "error");
 		return;
 	}
-	// Parse <agent> <task> (everything after the first space-separated token is the task).
-	const spaceIdx = args.indexOf(" ");
-	if (spaceIdx === -1) {
+	// Parse <agent> <task> (split on first whitespace; agent name
+	// is the first token, everything after is the task).
+	const tokens = args.split(/\s+/);
+	if (tokens.length < 2) {
 		ctx.ui.notify("Usage: /agents bg <agent> <task>", "warning");
 		return;
 	}
-	const agentName = args.slice(0, spaceIdx).trim();
-	const task = args.slice(spaceIdx + 1).trim();
+	const agentName = tokens[0];
+	const task = tokens.slice(1).join(" ").trim();
 	if (!agentName || !task) {
 		ctx.ui.notify("Usage: /agents bg <agent> <task>", "warning");
 		return;
@@ -547,8 +548,8 @@ async function handleBgCommand(
 
 	if (launchResult.status === "failed") {
 		// Clean up the reservation + manifest that preflight wrote.
-		// Without this, bg-status shows a phantom "reserved" run until
-		// the stale-reaper times it out.
+		// Without this, the slot stays reserved until the stale-reaper
+		// times it out (BG_MAX_DURATION_SEC).
 		try {
 			await writeBgResult(result.paths, { version: 1, runId: result.runId, status: "failed", error: launchResult.error ?? "unknown launch error" });
 			await markBgRunDone(result.paths);
@@ -561,7 +562,7 @@ async function handleBgCommand(
 }
 
 /** /agents bg-status — show running + recent background runs. */
-async function handleBgStatus(ctx: AgentsContext): Promise<void> {
+export async function handleBgStatus(ctx: AgentsContext): Promise<void> {
 	const homeDir = ctx.agentsHomeDir ?? resolveTrustedHome();
 	const runs = await listBgRuns(homeDir);
 
@@ -583,7 +584,9 @@ async function handleBgStatus(ctx: AgentsContext): Promise<void> {
 	for (const run of runs) {
 		const elapsed = run.createdAtMs ? Math.floor((Date.now() - run.createdAtMs) / 1000) : 0;
 		const alive = liveRunIds ? liveRunIds.includes(run.runId) : undefined;
-		const statusTag = alive === false ? "(stale)" : run.status;
+		// Guard: a done/failed/stopped run is naturally absent from the
+		// backend's live window list — don't mislabel it as stale.
+		const statusTag = (alive === false && !run.done) ? "(stale)" : run.status;
 		lines.push(`  ${run.runId.slice(0, 16)}  ${statusTag}  ${formatElapsed(elapsed)}  ${run.done ? "done" : "active"}`);
 	}
 
@@ -591,7 +594,7 @@ async function handleBgStatus(ctx: AgentsContext): Promise<void> {
 }
 
 /** /agents bg-stop <runId> — kill a background agent. */
-async function handleBgStop(args: string, ctx: AgentsContext): Promise<void> {
+export async function handleBgStop(args: string, ctx: AgentsContext): Promise<void> {
 	const runId = extractRunId(args);
 	if (!runId) {
 		ctx.ui.notify("Usage: /agents bg-stop <runId>", "warning");
@@ -600,10 +603,18 @@ async function handleBgStop(args: string, ctx: AgentsContext): Promise<void> {
 
 	const backend = getBgTerminalBackend();
 	if (backend) {
-		const killResult = await backend.kill(runId);
-		if (killResult.status === "failed") {
-			ctx.ui.notify(`Kill via backend failed: ${killResult.error ?? "unknown"} (falling back to reaper)`, "warning");
-		}
+		// Correlate runId → windowId via list() (kill() takes an opaque
+		// windowId, not a runId — the two may differ).
+		try {
+			const windows = await backend.list();
+			const entry = windows.find((e) => e.runId === runId);
+			if (entry) {
+				const killResult = await backend.kill(entry.windowId);
+				if (killResult.status === "failed") {
+					ctx.ui.notify(`Kill via backend failed: ${killResult.error ?? "unknown"} (falling back to reaper)`, "warning");
+				}
+			}
+		} catch { /* best-effort; reaper catches it below */ }
 	}
 
 	// Reap via bg-state regardless of backend result.
@@ -612,15 +623,24 @@ async function handleBgStop(args: string, ctx: AgentsContext): Promise<void> {
 }
 
 /** /agents bg-result <runId> — show result for a completed/failed/stopped run. */
-async function handleBgResult(args: string, ctx: AgentsContext): Promise<void> {
+export async function handleBgResult(args: string, ctx: AgentsContext): Promise<void> {
 	const runId = extractRunId(args);
 	if (!runId) {
 		ctx.ui.notify("Usage: /agents bg-result <runId>", "warning");
 		return;
 	}
 
+	// Validate the runId format before handing it to getBgRunPaths, which
+	// throws on invalid ids.  Catch the throw so we emit a friendly warning
+	// instead of an uncaught exception.
 	const homeDir = ctx.agentsHomeDir ?? resolveTrustedHome();
-	const paths = getBgRunPaths(runId, homeDir);
+	let paths: ReturnType<typeof getBgRunPaths>;
+	try {
+		paths = getBgRunPaths(runId, homeDir);
+	} catch {
+		ctx.ui.notify(`Invalid run ID: ${runId.slice(0, 16)}….`, "warning");
+		return;
+	}
 	const result = await readBgResult(paths);
 	if (!result) {
 		ctx.ui.notify(`No result found for run ${runId.slice(0, 16)}…. (Still running or invalid runId?)`, "warning");
@@ -651,7 +671,7 @@ async function handleBgResult(args: string, ctx: AgentsContext): Promise<void> {
  *  P4-5 current: liveness check only.  Window focus/activation requires a
  *  terminal-backend focus() method which is deferred to a post-P4-7 backend
  *  enhancement (see P5_PLUGGABLE_TERMINAL_BACKEND.md). */
-async function handleBgOpen(args: string, ctx: AgentsContext): Promise<void> {
+export async function handleBgOpen(args: string, ctx: AgentsContext): Promise<void> {
 	const runId = extractRunId(args);
 	if (!runId) {
 		ctx.ui.notify("Usage: /agents bg-open <runId>", "warning");
@@ -664,13 +684,24 @@ async function handleBgOpen(args: string, ctx: AgentsContext): Promise<void> {
 		return;
 	}
 
-	const alive = await backend.isAlive(runId);
-	if (!alive) {
-		ctx.ui.notify(`No live terminal window for ${runId.slice(0, 16)}….`, "warning");
-		return;
+	// Correlate runId → windowId via list() (isAlive() takes an opaque
+	// windowId, not a runId — the two may differ).
+	try {
+		const windows = await backend.list();
+		const entry = windows.find((e) => e.runId === runId);
+		if (!entry) {
+			ctx.ui.notify(`No live terminal window for ${runId.slice(0, 16)}….`, "warning");
+			return;
+		}
+		const alive = await backend.isAlive(entry.windowId);
+		if (!alive) {
+			ctx.ui.notify(`No live terminal window for ${runId.slice(0, 16)}….`, "warning");
+			return;
+		}
+		ctx.ui.notify(`Window for ${runId.slice(0, 16)}… is alive.`, "info");
+	} catch {
+		ctx.ui.notify(`Backend error checking window for ${runId.slice(0, 16)}….`, "warning");
 	}
-
-	ctx.ui.notify(`Window for ${runId.slice(0, 16)}… is alive.`, "info");
 }
 
 function formatElapsed(seconds: number): string {

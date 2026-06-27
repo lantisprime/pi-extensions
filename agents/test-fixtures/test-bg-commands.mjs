@@ -13,6 +13,17 @@ import {
 	writeBgResult,
 } from "../lib/bg-state.ts";
 
+import {
+	handleBgStop,
+	handleBgOpen,
+	handleBgResult,
+} from "../index.ts";
+
+import {
+	__resetBgTerminalBackend,
+	registerBgTerminalBackend,
+} from "../lib/bg-terminal.ts";
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -141,8 +152,176 @@ async function testReadBgResultRoundTrip() {
 }
 
 // ---------------------------------------------------------------------------
-// Run
+// Handler-level tests (bg-stop, bg-open, bg-result)
 // ---------------------------------------------------------------------------
+
+/** Mock backend where windowId differs from runId (prefix "w-").
+ *  Tests that bg-stop/bg-open correlate via list() instead of passing
+ *  runId directly to kill()/isAlive(). */
+function distinctWindowIdBackend() {
+	const windows = new Map(); // windowId -> { runId, agentName }
+	const killed = []; // windowIds passed to kill()
+	const aliveChecked = []; // windowIds passed to isAlive()
+	return {
+		name: "distinct-window-id-backend",
+		async isAvailable() { return true; },
+		async launch(config) {
+			const windowId = "w-" + config.runId; // deliberately different from runId
+			windows.set(windowId, { runId: config.runId, agentName: config.agentName });
+			return { status: "ok", windowId };
+		},
+		async kill(windowId) {
+			killed.push(windowId);
+			if (!windowId || !windows.has(windowId)) return { status: "failed", error: "not found" };
+			windows.delete(windowId);
+			return { status: "ok", windowId };
+		},
+		async isAlive(windowId) {
+			aliveChecked.push(windowId);
+			if (!windowId) return false;
+			return windows.has(windowId);
+		},
+		async list() {
+			return [...windows.entries()].map(([windowId, val]) => ({
+				windowId,
+				runId: val.runId,
+				agentName: val.agentName,
+			}));
+		},
+		// Expose inspector hooks for assertions
+		_killed: killed,
+		_aliveChecked: aliveChecked,
+	};
+}
+
+/** Create a minimal AgentsContext stub for handler tests. */
+function stubCtx(overrides = {}) {
+	const notifications = [];
+	return {
+		ui: {
+			notify(message, level) { notifications.push({ message, level }); },
+		},
+		_notifications: notifications,
+		...overrides,
+	};
+}
+
+/** bg-stop correlates runId → windowId via list() then kills correct windowId. */
+async function testBgStopCorrelatesWindowId() {
+	__resetBgTerminalBackend();
+	const backend = distinctWindowIdBackend();
+	registerBgTerminalBackend(backend);
+
+	// Launch a run so the backend has a window to correlate.
+	await backend.launch({ agentName: "test", runId: "abc123-run", manifestPath: "/m", cwd: "/c" });
+
+	const ctx = stubCtx();
+	await handleBgStop("abc123-run", ctx);
+
+	// The kill should have been called with the windowId "w-abc123-run",
+	// NOT the raw runId "abc123-run".
+	assert.ok(
+		backend._killed.includes("w-abc123-run"),
+		"bg-stop should correlate runId → windowId and kill the correct windowId",
+	);
+	assert.ok(
+		!backend._killed.includes("abc123-run"),
+		"bg-stop must NOT pass raw runId to kill() — windowId != runId by design",
+	);
+
+	__resetBgTerminalBackend();
+}
+
+/** bg-stop handles backend.list() throwing gracefully. */
+async function testBgStopBackendListThrows() {
+	__resetBgTerminalBackend();
+	let killCalled = false;
+	const backend = {
+		name: "throwy-backend",
+		async isAvailable() { return true; },
+		async launch() { return { status: "ok", windowId: "w1" }; },
+		async kill() { killCalled = true; return { status: "ok", windowId: "x" }; },
+		async isAlive() { return true; },
+		async list() { throw new Error("backend unavailable"); },
+	};
+	registerBgTerminalBackend(backend);
+
+	const ctx = stubCtx();
+	// Should not throw — catches list() failure and falls through to reaper.
+	await handleBgStop("abc123", ctx);
+
+	// Since list() threw, kill() should never have been called.
+	assert.equal(killCalled, false, "kill() must not be called when list() throws");
+	// Should still notify "Stop requested" regardless.
+	const lastMsg = ctx._notifications[ctx._notifications.length - 1]?.message ?? "";
+	assert.ok(lastMsg.includes("Stop requested"), "should still report stop even on list failure");
+
+	__resetBgTerminalBackend();
+}
+
+/** bg-open correlates runId → windowId via list() then calls isAlive with correct windowId. */
+async function testBgOpenCorrelatesWindowId() {
+	__resetBgTerminalBackend();
+	const backend = distinctWindowIdBackend();
+	registerBgTerminalBackend(backend);
+
+	// Launch a run.
+	await backend.launch({ agentName: "test", runId: "run-open-1", manifestPath: "/m", cwd: "/c" });
+
+	const ctx = stubCtx();
+	await handleBgOpen("run-open-1", ctx);
+
+	// isAlive should have been called with "w-run-open-1", not "run-open-1".
+	assert.ok(
+		backend._aliveChecked.includes("w-run-open-1"),
+		"bg-open should correlate runId → windowId and check isAlive on correct windowId",
+	);
+	assert.ok(
+		!backend._aliveChecked.includes("run-open-1"),
+		"bg-open must NOT pass raw runId to isAlive() — windowId != runId by design",
+	);
+
+	__resetBgTerminalBackend();
+}
+
+/** bg-open reports "no live terminal window" when list() has no entry for the runId. */
+async function testBgOpenNotFound() {
+	__resetBgTerminalBackend();
+	const backend = distinctWindowIdBackend();
+	registerBgTerminalBackend(backend);
+
+	const ctx = stubCtx();
+	await handleBgOpen("nonexistent-run", ctx);
+
+	const lastMsg = ctx._notifications[ctx._notifications.length - 1]?.message ?? "";
+	assert.ok(lastMsg.includes("No live terminal window"), "should report no live window for unknown runId");
+
+	__resetBgTerminalBackend();
+}
+
+/** bg-result with a malformed runId returns a graceful warning instead of throwing. */
+async function testBgResultMalformedRunId() {
+	const ctx = stubCtx();
+
+	// "abc" fails /^[A-Za-z0-9_-]{8,80}$/ — getBgRunPaths would throw.
+	// The handler must catch and emit a friendly warning.
+	await handleBgResult("abc", ctx);
+
+	const lastMsg = ctx._notifications[ctx._notifications.length - 1]?.message ?? "";
+	assert.ok(lastMsg.includes("Invalid run ID"), "malformed runId should emit 'Invalid run ID' warning");
+	assert.ok(!lastMsg.includes("No result found"), "malformed runId must NOT reach the 'No result found' path — would mean throw escaped");
+}
+
+/** bg-result with a valid but unknown runId shows the "no result" message. */
+async function testBgResultValidButUnknownRunId() {
+	const ctx = stubCtx();
+
+	// Valid format, but no run directory exists.
+	await handleBgResult("a-valid-run-id-x", ctx);
+
+	const lastMsg = ctx._notifications[ctx._notifications.length - 1]?.message ?? "";
+	assert.ok(lastMsg.includes("No result found"), "valid-but-unknown runId should show 'No result found'");
+}
 
 async function main() {
 	console.log("P4-5 bg-commands tests");
@@ -153,6 +332,12 @@ async function main() {
 	await test("readBgResult: full result parsed", testReadBgResultFull);
 	await test("readBgResult: multi-line text round-trip", testReadBgResultMultiLineText);
 	await test("readBgResult: status sequence round-trip", testReadBgResultRoundTrip);
+	await test("bg-stop: correlates runId → windowId via list()", testBgStopCorrelatesWindowId);
+	await test("bg-stop: survives backend.list() throwing", testBgStopBackendListThrows);
+	await test("bg-open: correlates runId → windowId via list()", testBgOpenCorrelatesWindowId);
+	await test("bg-open: reports no window for unknown runId", testBgOpenNotFound);
+	await test("bg-result: malformed runId → graceful warning", testBgResultMalformedRunId);
+	await test("bg-result: valid unknown runId → 'No result found'", testBgResultValidButUnknownRunId);
 	console.log("P4-5 bg-commands tests passed");
 }
 
