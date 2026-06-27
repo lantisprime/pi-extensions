@@ -83,7 +83,7 @@ export default function agentsExtension(pi: ExtensionAPI) {
 	// P8-4: clear any live background-run spinner timer + widget when the session shuts down.
 	eventApi.on?.("session_shutdown", async (_event, ctx) => {
 		disposeBackgroundRuns(ctx?.ui ?? { setWidget: () => {} });
-		await reapStaleBgRuns(resolveTrustedHome()); // free slots only — NOT key retirement (N5)
+		await reapStaleBgRuns(ctx?.agentsHomeDir ?? resolveTrustedHome()); // free slots only — NOT key retirement (N5)
 	});
 	eventApi.on?.("session_start", async (_event, ctx) => {
 		sessionAgentsCtx = ctx;
@@ -562,7 +562,7 @@ async function handleBgCommand(
 
 /** /agents bg-status — show running + recent background runs. */
 async function handleBgStatus(ctx: AgentsContext): Promise<void> {
-	const homeDir = resolveTrustedHome();
+	const homeDir = ctx.agentsHomeDir ?? resolveTrustedHome();
 	const runs = await listBgRuns(homeDir);
 
 	if (runs.length === 0) {
@@ -607,7 +607,7 @@ async function handleBgStop(args: string, ctx: AgentsContext): Promise<void> {
 	}
 
 	// Reap via bg-state regardless of backend result.
-	await reapStaleBgRuns(resolveTrustedHome());
+	await reapStaleBgRuns(ctx.agentsHomeDir ?? resolveTrustedHome());
 	ctx.ui.notify(`Stop requested for ${runId.slice(0, 16)}….`, "info");
 }
 
@@ -619,7 +619,7 @@ async function handleBgResult(args: string, ctx: AgentsContext): Promise<void> {
 		return;
 	}
 
-	const homeDir = resolveTrustedHome();
+	const homeDir = ctx.agentsHomeDir ?? resolveTrustedHome();
 	const paths = getBgRunPaths(runId, homeDir);
 	const result = await readBgResult(paths);
 	if (!result) {
