@@ -91,7 +91,7 @@ export default function agentsExtension(pi: ExtensionAPI) {
 		await reapStaleBgRuns(resolveTrustedHome()); // free slots only — NOT key retirement (N5)
 		// Clear the persistent status line and stop polling.
 		if (bgStatusPollTimer !== undefined) { clearInterval(bgStatusPollTimer); bgStatusPollTimer = undefined; }
-		if (typeof ctx?.ui.setStatus === "function") ctx.ui.setStatus(BG_STATUS_KEY, undefined);
+		if (typeof ctx?.ui?.setStatus === "function") ctx.ui.setStatus(BG_STATUS_KEY, undefined);
 	});
 	eventApi.on?.("session_start", async (_event, ctx) => {
 		sessionAgentsCtx = ctx;
@@ -524,8 +524,10 @@ export async function updateBgStatusLine(ctx: AgentsContext, homeDir?: string): 
 
 /** Start periodic polling while there are active background runs so the
  *  status line stays current even when no /agents command was typed.
- *  Stops itself when count drops to 0.  Restart-safe (idempotent). */
+ *  Stops itself when count drops to 0.  Restart-safe (idempotent).
+ *  No-ops when setStatus is unavailable (non-TUI / pre-P4-6 pi). */
 function ensureBgStatusPolling(ctx: AgentsContext): void {
+	if (typeof ctx?.ui?.setStatus !== "function") return;
 	if (bgStatusPollTimer !== undefined) return;
 	bgStatusPollTimer = setInterval(async () => {
 		try {
