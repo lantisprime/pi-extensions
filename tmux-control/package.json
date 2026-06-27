@@ -1,0 +1,19 @@
+{
+  "name": "tmux-control",
+  "version": "0.1.0",
+  "description": "Send and capture commands to tmux windows from inside pi. Complements /agents bg.",
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "test": "bash test-fixtures/run-control-tests.sh"
+  },
+  "keywords": ["pi", "extension", "tmux", "agents"],
+  "license": "MIT",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
