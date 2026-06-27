@@ -22,16 +22,40 @@ let injectedResolver: (() => string | null) | null = null;
 
 export function resolveWorkerPath(searchDir?: string): string | null {
 	if (searchDir === undefined && injectedResolver) return injectedResolver();
-	const baseDir = searchDir ?? path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-	try {
-		for (const basename of WORKER_BASENAMES) {
-			const candidate = path.join(baseDir, basename);
-			if (fs.existsSync(candidate)) return fs.realpathSync(candidate);
+	if (searchDir !== undefined) {
+		try {
+			for (const basename of WORKER_BASENAMES) {
+				const candidate = path.join(searchDir, basename);
+				if (fs.existsSync(candidate)) return fs.realpathSync(candidate);
+			}
+			return null;
+		} catch {
+			return null;
 		}
-		return null;
-	} catch {
-		return null;
 	}
+	// Production mode (D7): walk up from this module's directory looking for
+	// an `agents/lib/` sibling containing bg-worker.{ts,mjs,js}. This is robust
+	// to:
+	//   - symlinked extensions (e.g. ~/.pi/agent/extensions/tmux-terminal)
+	//   - arbitrary repo depth (the agents/ dir may be N levels above)
+	//   - ts vs mjs vs js worker variants
+	let dir = path.dirname(fileURLToPath(import.meta.url));
+	const root = path.parse(dir).root;
+	while (dir !== root) {
+		const agentsLibDir = path.join(dir, "agents", "lib");
+		try {
+			for (const basename of WORKER_BASENAMES) {
+				const candidate = path.join(agentsLibDir, basename);
+				if (fs.existsSync(candidate)) return fs.realpathSync(candidate);
+			}
+		} catch {
+			// ignore read errors and keep walking up
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+	return null;
 }
 
 /**

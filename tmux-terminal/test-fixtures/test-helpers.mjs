@@ -124,4 +124,57 @@ import { defaultTmuxExecutor } from "../lib/exec.ts";
 	assert.ok(typeof result.exitCode === "number", "exitCode MUST be a number even on ENOENT");
 }
 
+// D7: production-mode resolveWorkerPath walk-up behavior.
+// Without args, resolveWorkerPath must walk UP from its own module location to find
+// agents/lib/bg-worker.{ts,mjs,js}. The previous implementation looked only in
+// `tmux-terminal/` (its own directory) and returned null when the worker actually
+// lives in a sibling agents/lib/ dir. This regression test catches that bug.
+//
+// Implementation note: Node ESM resolves symlinks for import.meta.url (uses REAL
+// path), so symlinking the real file isn't enough. We use a child process that
+// imports via a COPY in a fake repo layout, which gives import.meta.url a different
+// path that matches the production scenario (extension loaded from a non-repo path).
+{
+	const { execFile } = await import("node:child_process");
+	const { promisify } = await import("node:util");
+	const execFileP = promisify(execFile);
+	const fs = await import("node:fs");
+	const os = await import("node:os");
+	const path = await import("node:path");
+
+	const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "p5-d7-"));
+	const agentsLib = path.join(repoRoot, "agents", "lib");
+	fs.mkdirSync(agentsLib, { recursive: true });
+	fs.writeFileSync(path.join(agentsLib, "bg-worker.ts"), "// stub worker for D7");
+
+	const fakeExtLib = path.join(repoRoot, "fake-extension", "lib");
+	fs.mkdirSync(fakeExtLib, { recursive: true });
+	// Copy resolve-worker-path.ts + constants.ts into the fake layout so
+	// import.meta.url points to a non-repo path (mimics the pi-extension case).
+	// Use import.meta.url to get a cwd-independent absolute path to the real lib/ dir.
+	const url = await import("node:url");
+	const testDir = path.dirname(url.fileURLToPath(import.meta.url));
+	const realLibDir = path.resolve(testDir, "../lib");
+	fs.copyFileSync(path.join(realLibDir, "resolve-worker-path.ts"), path.join(fakeExtLib, "resolve-worker-path.ts"));
+	fs.copyFileSync(path.join(realLibDir, "constants.ts"), path.join(fakeExtLib, "constants.ts"));
+
+	const driverPath = path.join(repoRoot, "driver.mjs");
+	fs.writeFileSync(driverPath, [
+		'import { resolveWorkerPath } from "./fake-extension/lib/resolve-worker-path.ts";',
+		'console.log(JSON.stringify(resolveWorkerPath()));',
+	].join("\n"));
+
+	try {
+		const { stdout } = await execFileP("node", [
+			"--experimental-strip-types",
+			driverPath,
+		], { timeout: 10000 });
+		const result = JSON.parse(stdout.trim());
+		assert.ok(result !== null, `production-mode resolveWorkerPath MUST walk up to find agents/lib/bg-worker.* (D7); got null`);
+		assert.ok(result.endsWith("bg-worker.ts"), `found: ${result}`);
+	} finally {
+		fs.rmSync(repoRoot, { recursive: true, force: true });
+	}
+}
+
 console.log("P5 helper tests passed");
