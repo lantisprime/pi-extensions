@@ -13,6 +13,7 @@ import {
 	SPINNER_FRAMES,
 	BG_RUN_CAP_MESSAGE,
 	BG_RUN_MAX_CONCURRENT,
+	TAIL_SLOTS,
 } from "../lib/bg-run.ts";
 
 const flush = () => new Promise((r) => setImmediate(r));
@@ -66,8 +67,8 @@ async function testSpinnerFrameAdvances() {
 	__resetBackgroundRuns();
 }
 
-// REQ-4: widget shows the last <=2 activity lines.
-async function testTailKeepsLastTwoLines() {
+// REQ-4: widget shows the last <=TAIL_SLOTS activity lines, dropping the oldest as new ones arrive.
+async function testTailKeepsLastNLines() {
 	__resetBackgroundRuns();
 	const ui = makeUI();
 	const timer = makeFakeTimer();
@@ -77,14 +78,15 @@ async function testTailKeepsLastTwoLines() {
 	await flush(); // let run() execute so `handle` is set
 	const widgetsBefore = ui.widgets.length;
 	const tool = (name) => JSON.stringify({ toolName: name }); // real progress lines are JSONL
-	handle.onProgress(tool("a"));
-	handle.onProgress(tool("b"));
-	handle.onProgress(tool("c"));
+	// Push one more than the slot count so the oldest must scroll off.
+	const labels = Array.from({ length: TAIL_SLOTS + 1 }, (_, i) => `t${i}`);
+	for (const name of labels) handle.onProgress(tool(name));
 	handle.onProgress('{"type":"message_update","assistantMessageEvent":{"type":"thinking_start"}}'); // noise → skipped
 	// Throttle: onProgress updates the tail buffer but must NOT render (no setWidget flood).
 	assert.equal(ui.widgets.length, widgetsBefore, "onProgress does not render per line (redraws are throttled to the interval)");
 	timer.tick(); // the spinner interval renders the latest tail
-	assert.deepEqual(tailLines(ui.lastWidget()), ["   → b", "   → c"], "keeps last two MEANINGFUL lines; noise (thinking) is skipped");
+	const expected = labels.slice(-TAIL_SLOTS).map((name) => `   → ${name}`); // newest TAIL_SLOTS, oldest dropped
+	assert.deepEqual(tailLines(ui.lastWidget()), expected, "keeps last TAIL_SLOTS MEANINGFUL lines; oldest scrolls off; noise (thinking) is skipped");
 	d.resolve({ message: "ok", level: "info" });
 	await flush();
 	__resetBackgroundRuns();
@@ -224,7 +226,7 @@ async function testPhaseSpinnerAnimatesThenClears() {
 async function main() {
 	await testPhaseSpinnerAnimatesThenClears();
 	await testSpinnerFrameAdvances();
-	await testTailKeepsLastTwoLines();
+	await testTailKeepsLastNLines();
 	await testProgressLineSanitized();
 	await testWidgetClearedAndNotifyOnSettle();
 	await testWidgetClearedOnRejectPath();

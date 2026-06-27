@@ -11,7 +11,7 @@ export const MAX_TAIL_LINE_CHARS = 200;
 /** Fixed number of activity (tail) lines rendered per run. The slots are ALWAYS present (padded
  *  with blanks), so the widget height is constant and the editor + status bar never shift as
  *  output streams — the latest lines just scroll through the reserved slots. */
-export const TAIL_SLOTS = 2;
+export const TAIL_SLOTS = 8;
 export const SPINNER_FRAMES = ["◐", "◓", "◑", "◒"] as const; // user's "rotating circle"
 export const SPINNER_INTERVAL_MS = 120;
 export const WIDGET_KEY = "agents:bg-runs";
@@ -29,7 +29,7 @@ export type BgRunHandle = { onProgress(line: string): void };
 export type BgRunSettle = { message: string; level: "info" | "warning" | "error" };
 
 type Timer = ReturnType<typeof setInterval>;
-type RunEntry = { id: number; label: string; startedAt: number; tail: string[] };
+type RunEntry = { id: number; label: string; startedAt: number; tail: string[]; phase?: boolean };
 type Deps = { now: () => number; setIntervalFn: typeof setInterval; clearIntervalFn: typeof clearInterval };
 
 const DEFAULT_DEPS: Deps = { now: Date.now, setIntervalFn: setInterval, clearIntervalFn: clearInterval };
@@ -104,6 +104,9 @@ function render(): void {
 	for (const entry of registry.values()) {
 		const elapsed = Math.max(0, Math.floor((deps.now() - entry.startedAt) / 1000));
 		lines.push(`${frame} ${entry.label} · ${elapsed}s`);
+		// Phase spinners (no activity tail) render just the label row — skip the slot block so a
+		// single-line phase doesn't reserve TAIL_SLOTS blank rows.
+		if (entry.phase) continue;
 		// Always emit TAIL_SLOTS lines (newest at the bottom, blank-padded at the top) so the
 		// widget height is fixed — the tail scrolls in place instead of growing the widget.
 		const slots = entry.tail.slice(-TAIL_SLOTS);
@@ -203,7 +206,7 @@ export function startBackgroundPhase(ui: BgRunUI, label: string, opts?: { now?: 
 		};
 	}
 	activeUI = ui;
-	const entry: RunEntry = { id: ++idCounter, label, startedAt: deps.now(), tail: [] };
+	const entry: RunEntry = { id: ++idCounter, label, startedAt: deps.now(), tail: [], phase: true };
 	registry.set(entry.id, entry);
 	ensureTimer();
 	render();
