@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 # tmux-control test runner. Runs unit tests + real-tmux smoke + REQ-13 guard.
+#
+# typebox dependency model:
+#   - At RUNTIME (loaded by pi): pi's extension loader (jiti + virtualModules)
+#     resolves typebox from pi's own node_modules. End users do not need to
+#     install typebox.
+#   - For TESTS (run via `node --experimental-strip-types`): Node's bare ESM
+#     resolution does NOT find typebox from this directory. The runner below
+#     installs typebox into ./node_modules on first run if missing.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# typebox is a peer dep of @earendil-works/pi-coding-agent (not bundled with
-# extensions). Make it findable by pointing NODE_PATH at pi's node_modules.
-PI_NM="$(node -e "console.log(require.resolve('@earendil-works/pi-coding-agent/package.json').replace('/package.json',''))" 2>/dev/null || true)"
-if [ -n "$PI_NM" ] && [ -d "$PI_NM/node_modules/typebox" ]; then
-	export NODE_PATH="$PI_NM/node_modules${NODE_PATH:+:$NODE_PATH}"
+if [ ! -d "node_modules/typebox" ]; then
+	echo "Installing test dep typebox (one-time)..."
+	npm install --no-save --no-audit --no-fund --silent typebox@^1.1.0
 fi
 
 echo "Running tmux-control safety tests..."

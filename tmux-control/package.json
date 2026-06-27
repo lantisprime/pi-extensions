@@ -10,8 +10,11 @@
   "keywords": ["pi", "extension", "tmux", "agents"],
   "license": "MIT",
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "typebox": "*"
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "//peer": "typebox is provided by pi's extension loader (jiti virtualModules) at runtime. It is bundled inside @earendil-works/pi-coding-agent/node_modules, so end users do NOT need to install it. We declare it as a devDependency for the test runner, which runs via `node --experimental-strip-types` and does not have access to pi's loader context.",
+  "devDependencies": {
+    "typebox": "^1.1.0"
   },
   "engines": {
     "node": ">=22.0.0"

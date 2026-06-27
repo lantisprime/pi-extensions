@@ -33,6 +33,18 @@ Requires `tmux` on `$PATH` and a running tmux server. If you don't have one:
 tmux new-session -d -s main
 ```
 
+## Dependencies
+
+tmux-control has **no runtime dependencies that you need to install yourself**. Pi's extension loader (`jiti` with `virtualModules`) resolves `typebox` from pi's own bundled copy at runtime, so end users do not need to `npm install` anything.
+
+For **running the test suite**, typebox needs to be resolvable from this directory. The test runner (`test-fixtures/run-control-tests.sh`) installs typebox automatically on first run via `npm install --no-save typebox`. You only need network access on the first invocation.
+
+If you'd rather pre-install manually:
+
+```sh
+npm install --no-save typebox
+```
+
 ## User manual
 
 ### Slash commands
@@ -118,8 +130,11 @@ This means tmux-control works **standalone** (without the agents extension) but 
 bash tmux-control/test-fixtures/run-control-tests.sh
 ```
 
+First run installs `typebox` automatically (`npm install --no-save typebox`); subsequent runs use the cached `node_modules/typebox`. Everything is gitignored, so the install is local-only.
+
 Includes:
 - Unit tests for `safety`, `nlp`, `exec` (using fake executor)
+- Headless extension-integration test (mocks pi's `ExtensionAPI`, verifies 6 commands + 4 tools register)
 - Real-tmux smoke test against an isolated `tmux -L pi-ctrl-smoke-<pid>` socket (does NOT touch the user's default server)
 
 ## Security notes
