@@ -86,8 +86,9 @@ Completed and merged:
 ### P5 Pluggable Terminal Backend (COMPLETE)
 - tmux-terminal/ extension: reference TermBgBackend implementation
 - 14 new files + 2 anchored edits; 22 requirements / 63 tests
-- PR #98, commit f3b247c
-- Branch: `p5-tmux-terminal` (local + remote, deleted post-merge).
+- Initial merge: PR #98, commit f3b247c
+- Post-merge fixes (D5 + D6): PR #100, commit 4f4339b
+- Branches: `p5-tmux-terminal` and `fix/p5-d5-d6-real-tmux` (both local + remote, deleted post-merge).
 - Post-merge fixes (D5 + D6): real-tmux smoke test surfaced two bugs invisible to FakeTmuxExecutor unit tests:
   - **D5**: `isAvailable` probe changed from `has-session -t __pi_probe__` to `list-sessions`. Original probe returned exit 1 for nonexistent session; `defaultTmuxExecutor` catches → `{ok: false}`; my D1 `result.ok === true` check made `isAvailable` always return `false` even when server reachable. `list-sessions` correctly distinguishes server-reachable from server-unreachable.
   - **D6**: launch argv now prepends `"node"` before workerPath (`[..., "--", "node", workerPath, manifestPath]`). `bg-worker.ts` is mode 644 with no shebang; tmux cannot exec it directly. Without the prefix, the window is created then immediately destroyed; user-options never set; `isAlive` returns false.
