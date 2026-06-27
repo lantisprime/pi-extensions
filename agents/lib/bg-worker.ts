@@ -21,12 +21,13 @@ import {
 	writeBgResult,
 	type BgRunManifest,
 	type BgRunPaths,
+	type BgRunResult,
 	type BgRunStatus,
 } from "./bg-state.ts";
 import { canRunAgent } from "./can-run-agent.ts";
 import { parseAgentMarkdownFile } from "./agent-markdown.ts";
 import { readUserRegistry } from "./registry.ts";
-import { runChildAgent, type ChildAgentRunResult, type RunChildAgentOptions } from "./child-runner.ts";
+import { describeChildFailure, runChildAgent, STDERR_DIAGNOSTIC_CAP, type ChildAgentRunResult, type RunChildAgentOptions } from "./child-runner.ts";
 import type { AgentSpec } from "./specs.ts";
 
 const TOOL_CONTEXT_LOADER_PATH_ENV = "PI_AGENTS_TOOL_CONTEXT_LOADER_PATH";
@@ -211,27 +212,65 @@ function mapChildStatus(status: ChildAgentRunResult["status"]): BgRunStatus {
 	}
 }
 
-/** Build a BgRunResult from the child runner's result, capping result text at 64 KB. */
+const RESULT_TEXT_CAP = 64_000;
+
+/** Build a BgRunResult from the child runner's result, capping result text at 64 KB.
+ *  P5-diag: a completed run keeps prior behavior. A run that did NOT complete records
+ *  WHY — without this the worker wrote `status: failed` with an empty resultText and no
+ *  error, discarding the child's exit code / signal / stderr (the most common case: a
+ *  fast-failing child emits no JSONL so summaryText is empty AND the runner sets no
+ *  `error` on a plain non-zero exit).
+ *
+ *  SECURITY (F4): child stderr/summary are UNTRUSTED. This result.json is display-only
+ *  today — handleBgResult renders it via ctx.ui.notify, which never reaches pi's turn.
+ *  Any FUTURE path that delivers a BgRunResult into the model context
+ *  (deliverResult/sendUserMessage) MUST route error/resultText/stderrPreview through
+ *  frameUntrusted, mirroring the foreground formatAgentResultForContext sibling. */
 function buildBgResult(
 	runId: string,
 	status: BgRunStatus,
 	agentName: string,
 	startedAt: string,
 	result: ChildAgentRunResult,
-) {
-	const resultText = result.summary.summaryText.length > 64_000
-		? result.summary.summaryText.slice(0, 64_000) + "\n\n[truncated]"
-		: result.summary.summaryText;
-	return {
+): BgRunResult {
+	const summaryText = result.summary.summaryText;
+	const cappedSummary = summaryText.length > RESULT_TEXT_CAP
+		? summaryText.slice(0, RESULT_TEXT_CAP) + "\n\n[truncated]"
+		: summaryText;
+
+	const out: BgRunResult = {
 		version: 1,
 		runId,
 		status,
 		agentName,
 		startedAt,
 		finishedAt: new Date().toISOString(),
-		resultText,
-		error: result.error,
 	};
+
+	if (status === "completed") {
+		out.resultText = cappedSummary;
+		if (result.error) out.error = result.error;
+		return out;
+	}
+
+	// Non-completed: synthesize the diagnostic the worker used to throw away.
+	// F1: omit resultText when the summary is empty so the diagnostic isn't rendered
+	// twice (Error: <X> followed by Result: <X>); it lives in `error` instead.
+	if (summaryText.length > 0) out.resultText = cappedSummary;
+	out.error = result.error ?? describeChildFailure(result) ?? `run did not complete (status: ${status})`;
+	// Structured fields for programmatic consumers (exitCode is a number only when the
+	// child exited normally; a signal-killed child has exitCode null + signal set).
+	if (typeof result.exitCode === "number") out.exitCode = result.exitCode;
+	if (result.signal != null) out.signal = result.signal;
+	const stderr = result.stderrPreview?.trim();
+	if (stderr) {
+		out.stderrPreview = stderr.length > STDERR_DIAGNOSTIC_CAP
+			? stderr.slice(0, STDERR_DIAGNOSTIC_CAP) + "… [truncated]"
+			: stderr;
+	}
+	// F2: the kept raw spill (stdout.jsonl under a 0700 dir) is the best "why" artifact.
+	if (result.stdoutTmpPath) out.stdoutTmpPath = result.stdoutTmpPath;
+	return out;
 }
 
 /** Write a failed result + event, then return so the caller exits without spawning. */

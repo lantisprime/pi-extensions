@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { Buffer } from "node:buffer";
-import { formatChildAgentRunResult, formatAgentResultForContext, suggestNextAction, runBuiltInChildAgent, runChildAgent } from "../lib/child-runner.ts";
+import { formatChildAgentRunResult, formatAgentResultForContext, suggestNextAction, describeChildFailure, runBuiltInChildAgent, runChildAgent } from "../lib/child-runner.ts";
 
 function jsonLine(value) {
 	return `${JSON.stringify(value)}\n`;
@@ -376,6 +376,48 @@ async function testSuggestNextAction() {
 	assert.equal(suggestNextAction({ ...base, status: "completed" }), undefined, "no suggestion on a clean run");
 	// the formatted result includes the → next line on failure
 	assert.match(formatChildAgentRunResult({ ...base, error: "project trust is not active" }), /→ next: activate project trust/);
+	// P5-diag: spill-error gets a tailored hint, not the generic doctor line (F3).
+	assert.match(suggestNextAction({ ...base, status: "spill-error" }), /spill write failed|capture child output/i);
+}
+
+// P5-diag: describeChildFailure composes a self-contained WHY for a non-completed run.
+// Regression: the bg worker used to write `status: failed` with no reason because the
+// child runner sets no `error` on a plain non-zero exit and a fast-failing child emits
+// an empty summary. This helper is the single source of that diagnostic.
+function testDescribeChildFailure() {
+	const base = { agentName: "x", durationMs: 5, stdoutBytes: 0, invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin", stdinText: "" } }, summary: { summaryText: "", toolCalls: [], errors: [], truncation: {} }, timedOut: false, outputLimitExceeded: false };
+
+	// Completed → no diagnostic.
+	assert.equal(describeChildFailure({ ...base, status: "completed", exitCode: 0, signal: null, stderrPreview: "" }), undefined);
+
+	// Plain non-zero exit, no captured error, empty summary (the canonical bug).
+	const failed = describeChildFailure({ ...base, status: "failed", exitCode: 1, signal: null, stderrPreview: "boom: cannot find module" });
+	assert.match(failed, /status: failed/);
+	assert.match(failed, /Exit code: 1\./);
+	assert.match(failed, /stderr: boom: cannot find module/);
+	assert.match(failed, /→ next:/);
+	// Field order is fixed: status → exit → stderr → next.
+	assert.ok(failed.indexOf("Exit code") < failed.indexOf("stderr") && failed.indexOf("stderr") < failed.indexOf("→ next"), "stable field order");
+
+	// Signal-kill (no timeout): exitCode null → no "Exit code" line, but Signal is shown (F5).
+	const killed = describeChildFailure({ ...base, status: "failed", exitCode: null, signal: "SIGKILL", stderrPreview: "" });
+	assert.equal(/Exit code/.test(killed), false, "no Exit code line when exitCode is null");
+	assert.match(killed, /Signal: SIGKILL\./);
+
+	// spawn-error carries the explicit error (F3/F7).
+	assert.match(describeChildFailure({ ...base, status: "spawn-error", exitCode: null, signal: null, stderrPreview: "", error: "ENOENT pi" }), /Error: ENOENT pi/);
+
+	// spill-error gets its tailored next-step (F3).
+	assert.match(describeChildFailure({ ...base, status: "spill-error", exitCode: 0, signal: null, stderrPreview: "" }), /spill write failed|capture child output/i);
+
+	// timed-out and output-limit produce non-empty diagnostics with their hints.
+	assert.match(describeChildFailure({ ...base, status: "timed-out", timedOut: true, exitCode: null, signal: "SIGTERM", stderrPreview: "", durationMs: 9000 }), /timed out after 9000ms/);
+	assert.match(describeChildFailure({ ...base, status: "output-limit-exceeded", outputLimitExceeded: true, exitCode: null, signal: "SIGTERM", stderrPreview: "" }), /output exceeded limits/);
+
+	// stderr is bounded so one failure can't dominate the diagnostic (F7).
+	const huge = describeChildFailure({ ...base, status: "failed", exitCode: 1, signal: null, stderrPreview: "E".repeat(20_000) });
+	assert.ok(huge.length < 9_000, "stderr capped inside the diagnostic");
+	assert.match(huge, /stderr truncated/);
 }
 
 // P10/A3: runChildAgent_allDispatchPathsAppendMethod
@@ -468,6 +510,7 @@ async function main() {
 	await testFormatAgentResultForContext();
 	await testUntrustedFramingB2();
 	await testSuggestNextAction();
+	testDescribeChildFailure();
 	await testRejectsNonBuiltInAgentsBeforeSpawn();
 	await testGenericRegisteredRunUsesSpecPromptAndLimits();
 	await testRegisteredRunRejectsOversizedTaskBeforeSpawn();

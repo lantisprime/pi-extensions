@@ -204,8 +204,40 @@ export function suggestNextAction(result: ChildAgentRunResult): string | undefin
 	if (result.timedOut) return `timed out after ${result.durationMs}ms — narrow the task or raise the agent's timeoutMs.`;
 	if (result.outputLimitExceeded) return "output exceeded limits — narrow the task or raise maxStdoutBytes.";
 	if (result.status === "spawn-error") return "could not spawn the child — ensure the 'pi' CLI is on PATH and the spec/profile is valid; /agents doctor.";
+	if (result.status === "spill-error") return "could not capture child output (spill write failed) — check free space and permissions in the temp dir (TMPDIR); any partial output is at the kept spill path.";
 	if (result.status === "failed") return `child exited non-zero${result.exitCode !== undefined ? ` (exit ${result.exitCode})` : ""} — check the stderr/tool output above and rerun with a narrower task.`;
 	return "run /agents inspect <name> and /agents doctor to diagnose.";
+}
+
+/** Cap for stderr echoed into a composed diagnostic string (distinct from the
+ *  per-run stderrPreview limit; bounds one failure line so it can't dominate a
+ *  persisted result.json or an operator toast). */
+export const STDERR_DIAGNOSTIC_CAP = 8_000;
+
+/** Compose a single self-contained, human-readable explanation of WHY a child
+ *  run did not complete: status, exit code / signal, a capped stderr preview, any
+ *  explicitly-captured error, and the heuristic next step. Returns undefined for a
+ *  completed run. Pure (no clock/IO) so it stays deterministically testable, and
+ *  the field order is fixed (status → exit/signal → stderr → error → next) so
+ *  tests can assert stable output. Used by the bg worker to populate a result that
+ *  would otherwise record `status: failed` with no reason (see bg-worker). */
+export function describeChildFailure(result: ChildAgentRunResult): string | undefined {
+	if (result.status === "completed") return undefined;
+	const parts: string[] = [`Background agent did not complete (status: ${result.status}).`];
+	// Exit code only when numeric — a signal-killed child has exitCode null.
+	if (typeof result.exitCode === "number") parts.push(`Exit code: ${result.exitCode}.`);
+	if (result.signal) parts.push(`Signal: ${result.signal}.`);
+	const stderr = result.stderrPreview?.trim();
+	if (stderr) {
+		const capped = stderr.length > STDERR_DIAGNOSTIC_CAP
+			? stderr.slice(0, STDERR_DIAGNOSTIC_CAP) + "… [stderr truncated]"
+			: stderr;
+		parts.push(`stderr: ${capped}`);
+	}
+	if (result.error) parts.push(`Error: ${result.error}`);
+	const next = suggestNextAction(result);
+	if (next) parts.push(`→ next: ${next}`);
+	return parts.join("\n");
 }
 
 export function formatChildAgentRunResult(result: ChildAgentRunResult): string {

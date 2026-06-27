@@ -59,6 +59,16 @@ export type BgRunResult = {
 	finishedAt?: string;
 	resultText?: string;
 	error?: string;
+	// P5-diag: structured failure diagnostics, populated by the worker only when a
+	// run does not complete. All optional → backward-compatible (readBgResult does a
+	// plain JSON.parse with no key allow-list, so old result.json files still parse
+	// and older readers ignore unknown keys). exitCode is null for a signal-killed
+	// child; stderrPreview is capped at write time; stdoutTmpPath points at the kept
+	// raw spill (under a 0700 mkdtemp dir) — the highest-value "why did it fail" artifact.
+	exitCode?: number | null;
+	signal?: string | null;
+	stderrPreview?: string;
+	stdoutTmpPath?: string;
 };
 
 export type BgRunPaths = {
