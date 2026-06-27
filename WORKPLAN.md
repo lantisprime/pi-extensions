@@ -9,13 +9,13 @@ The canonical `pi-extensions` workplan now lives in episodic memory.
 NOT hardcode an episode ID here — it drifts on every revision. The active head is
 the source of truth; older entries in the chain are `superseded`.
 
-## Active implementation (P4 + P5 fully shipped with real-tmux fixes)
+## Active implementation (P4 + P5 fully shipped + all post-merge fixes)
 
-P4 Background Agents (P4R + P4-2..P4-7) and P5 Pluggable Terminal Backend are merged.
+P4 Background Agents (P4R + P4-2..P4-7) and P5 Pluggable Terminal Backend are merged and feature is live.
 
-- Current episode ID: `20260627-085754-p5-fully-shipped-post-merge-fixes-d5-d6--2ee6`
-- Tags include: `canonical-workplan`, `workplan`, `p4r-complete`, `p5-merged`, `p5-pr-98`, `p5-pr-100`, `p5-d5-d6-fix`
-- Summary: P5 fully shipped with post-merge fixes (D5 isAvailable probe + D6 node prefix) via PR #100 commit 4f4339b. Real-tmux smoke test now in CI. Next natural: P5b (zellij/wezterm/headless) or P4R-PROJ deferred.
+- Current episode ID: `20260627-092842-p5-fully-shipped-d5-d6-d7-fixes-merged-p-7d1e`
+- Tags include: `canonical-workplan`, `workplan`, `p4r-complete`, `p5-merged`, `p5-pr-98`, `p5-pr-100`, `p5-pr-102`, `p5-d5-d6-fix`, `p5-d7-fix`
+- Summary: P5 fully shipped with all 3 post-merge fixes (D5 probe + D6 node prefix + D7 symlink-loading) via PRs #100 + #102. Feature live for users via `~/.pi/agent/extensions/tmux-terminal` symlink. Next natural: P5b (zellij/wezterm/headless) or P4R-PROJ deferred.
 
 ### Completed tracks
 - P6 Intent Routing (7 slices, PRs #50, #58, #59, #60, #61)
