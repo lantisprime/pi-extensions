@@ -89,7 +89,8 @@ export default function agentsExtension(pi: ExtensionAPI) {
 	eventApi.on?.("session_shutdown", async (_event, ctx) => {
 		disposeBackgroundRuns(ctx?.ui ?? { setWidget: () => {} });
 		await reapStaleBgRuns(resolveTrustedHome()); // free slots only — NOT key retirement (N5)
-		// Clear the persistent status line.
+		// Clear the persistent status line and stop polling.
+		if (bgStatusPollTimer !== undefined) { clearInterval(bgStatusPollTimer); bgStatusPollTimer = undefined; }
 		if (typeof ctx?.ui.setStatus === "function") ctx.ui.setStatus(BG_STATUS_KEY, undefined);
 	});
 	eventApi.on?.("session_start", async (_event, ctx) => {
@@ -101,6 +102,7 @@ export default function agentsExtension(pi: ExtensionAPI) {
 		attachDeliverResult(pi, ctx);
 		// P4-6: show current background agent count in the footer on session start.
 		await updateBgStatusLine(ctx);
+		ensureBgStatusPolling(ctx);
 		ctx.profileLibrary = profileLibrary; // start with built-ins
 		// Discover user/project profiles and rebuild library.
 		// os.homedir() is intentional here (NOT resolveTrustedHome()): profile discovery
@@ -502,17 +504,40 @@ async function handleProfileUnregister(target: string, ctx: AgentsContext, diagn
 // ── P4-6: Background agent status line ─────────────────────────────────
 
 const BG_STATUS_KEY = "agents:bg-count";
+const BG_STATUS_POLL_MS = 15_000; // refresh every 15s while runs are active
+let bgStatusPollTimer: ReturnType<typeof setInterval> | undefined;
 
 /** Update the pi footer status line with the current background agent
  *  count.  Reads from the bg-state authority root (resolveTrustedHome()),
  *  same as the write path + all other bg-state operations.  Silently
- *  no-ops when setStatus is unavailable (non-TUI / pre-P4-6 pi). */
-export async function updateBgStatusLine(ctx: AgentsContext): Promise<void> {
+ *  no-ops when setStatus is unavailable (non-TUI / pre-P4-6 pi).
+ *  homeDir is a test seam; production callers omit it. */
+export async function updateBgStatusLine(ctx: AgentsContext, homeDir?: string): Promise<void> {
 	if (typeof ctx.ui.setStatus !== "function") return;
 	try {
-		const count = await countActiveBgRuns();
+		const count = homeDir !== undefined
+			? await countActiveBgRuns(homeDir)
+			: await countActiveBgRuns();
 		ctx.ui.setStatus(BG_STATUS_KEY, count > 0 ? `${count} agent${count === 1 ? "" : "s"} running` : undefined);
 	} catch { /* best-effort; don't break the session over a status update */ }
+}
+
+/** Start periodic polling while there are active background runs so the
+ *  status line stays current even when no /agents command was typed.
+ *  Stops itself when count drops to 0.  Restart-safe (idempotent). */
+function ensureBgStatusPolling(ctx: AgentsContext): void {
+	if (bgStatusPollTimer !== undefined) return;
+	bgStatusPollTimer = setInterval(async () => {
+		try {
+			const count = await countActiveBgRuns();
+			await updateBgStatusLine(ctx);
+			if (count === 0 && bgStatusPollTimer !== undefined) {
+				clearInterval(bgStatusPollTimer);
+				bgStatusPollTimer = undefined;
+			}
+		} catch { /* swallow — don't crash the poll loop */ }
+	}, BG_STATUS_POLL_MS);
+	(bgStatusPollTimer as { unref?: () => void })?.unref?.();
 }
 
 // ── P4-5: Background agent commands ─────────────────────────────────────
@@ -598,6 +623,7 @@ export async function handleBgCommand(
 
 	ctx.ui.notify(`Background agent ${agentName} running (${result.runId.slice(0, 16)}…) via ${backend.name}.`, "info");
 	await updateBgStatusLine(ctx);
+	ensureBgStatusPolling(ctx);
 }
 
 /** /agents bg-status — show running + recent background runs. */

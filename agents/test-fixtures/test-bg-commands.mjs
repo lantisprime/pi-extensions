@@ -328,55 +328,9 @@ async function testBgResultValidButUnknownRunId() {
 
 /** updateBgStatusLine clears the status when no runs are active. */
 async function testStatusLineClearsWhenIdle() {
-	const statuses = [];
-	const ctx = {
-		ui: {
-			setStatus(key, text) { statuses.push({ key, text }); },
-		},
-	};
-
-	// No active runs — status should be cleared.
-	await updateBgStatusLine(ctx);
-
-	const last = statuses[statuses.length - 1];
-	assert.ok(last, "setStatus should have been called");
-	assert.equal(last.key, "agents:bg-count");
-	assert.equal(last.text, undefined, "status should be cleared when no agents are running");
-}
-
-/** updateBgStatusLine sets a count when runs are active. */
-async function testStatusLineShowsCount() {
-	// Create a run in a temp home to keep tests isolated from real bg-state.
-	const root = await fs.mkdtemp(path.join(os.tmpdir(), "p4-6-status-"));
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "p4-6-idle-"));
 	const home = path.join(root, "home");
 	await fs.mkdir(home, { recursive: true });
-	try {
-		const state = await createBgRunState({ homeDir: home, runId: "bg-p46-test-01" });
-		try {
-			const statuses = [];
-			const ctx = {
-				agentsHomeDir: undefined,
-				ui: {
-					setStatus(key, text) { statuses.push({ key, text }); },
-				},
-			};
-
-			await updateBgStatusLine(ctx);
-
-			// countActiveBgRuns defaults to resolveTrustedHome() (os.userInfo().homedir).
-			// When we write to a temp home, the real trusted home has no runs → count = 0.
-			// This test validates the idle → clear path as well as the shape of the output.
-		} finally {
-			await writeBgResult(state, { version: 1, runId: "bg-p46-test-01", status: "stopped" });
-			await fs.writeFile(path.join(state.runDir, "done"), "");
-		}
-	} finally {
-		await fs.rm(root, { recursive: true, force: true }).catch(() => {});
-	}
-
-	// Test the message format directly (non-home-dependent).
-	// Create a run in the REAL home to assert exact singular/plural output.
-	const realState = await createBgRunState({ homeDir: os.userInfo().homedir, runId: "bg-p46-format-01" });
 	try {
 		const statuses = [];
 		const ctx = {
@@ -385,17 +339,71 @@ async function testStatusLineShowsCount() {
 			},
 		};
 
-		await updateBgStatusLine(ctx);
+		// Empty temp home → count should be 0 → status cleared.
+		await updateBgStatusLine(ctx, home);
 
 		const last = statuses[statuses.length - 1];
 		assert.ok(last, "setStatus should have been called");
 		assert.equal(last.key, "agents:bg-count");
-		// Singular for 1 agent (plus any pre-existing runs from prior tests)
-		assert.ok(typeof last.text === "string" && /\d+ agent(s?) running/.test(last.text),
-			`status should match 'N agent(s) running', got: '${last.text}'`);
+		assert.equal(last.text, undefined, "status should be cleared when no agents are running");
 	} finally {
-		await writeBgResult(realState, { version: 1, runId: "bg-p46-format-01", status: "stopped" });
-		await fs.writeFile(path.join(realState.runDir, "done"), "");
+		await fs.rm(root, { recursive: true, force: true }).catch(() => {});
+	}
+}
+
+/** updateBgStatusLine sets a count when runs are active.  Uses a temp
+ *  home dir to stay isolated from real bg-state on the developer's machine. */
+async function testStatusLineShowsCount() {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "p4-6-count-"));
+	const home = path.join(root, "home");
+	await fs.mkdir(home, { recursive: true });
+	try {
+		// Create one reserved run → count should be 1.
+		const state = await createBgRunState({ homeDir: home, runId: "bg-p46-ct-01" });
+		try {
+			const statuses = [];
+			const ctx = {
+				ui: {
+					setStatus(key, text) { statuses.push({ key, text }); },
+				},
+			};
+
+			await updateBgStatusLine(ctx, home);
+
+			const last = statuses[statuses.length - 1];
+			assert.ok(last, "setStatus should have been called");
+			assert.equal(last.key, "agents:bg-count");
+			assert.equal(last.text, "1 agent running",
+				`singular: expected '1 agent running', got: '${last.text}'`);
+		} finally {
+			await writeBgResult(state, { version: 1, runId: "bg-p46-ct-01", status: "stopped" });
+			await fs.writeFile(path.join(state.runDir, "done"), "");
+		}
+
+		// Create two reserved runs → count should be 2.
+		const s1 = await createBgRunState({ homeDir: home, runId: "bg-p46-ct-02" });
+		const s2 = await createBgRunState({ homeDir: home, runId: "bg-p46-ct-03" });
+		try {
+			const statuses = [];
+			const ctx = {
+				ui: {
+					setStatus(key, text) { statuses.push({ key, text }); },
+				},
+			};
+
+			await updateBgStatusLine(ctx, home);
+
+			const last = statuses[statuses.length - 1];
+			assert.equal(last.text, "2 agents running",
+				`plural: expected '2 agents running', got: '${last.text}'`);
+		} finally {
+			for (const s of [s1, s2]) {
+				await writeBgResult(s, { version: 1, runId: s.runDir.split(path.sep).pop() ?? "x", status: "stopped" });
+				await fs.writeFile(path.join(s.runDir, "done"), "");
+			}
+		}
+	} finally {
+		await fs.rm(root, { recursive: true, force: true }).catch(() => {});
 	}
 }
 
