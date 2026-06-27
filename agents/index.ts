@@ -520,32 +520,40 @@ export function __setBgStatusHomeOverride(home: string | undefined): void {
 /** Update the pi footer status line with the current background agent
  *  count.  Reads from the bg-state authority root (resolveTrustedHome()),
  *  same as the write path + all other bg-state operations.  Silently
- *  no-ops when setStatus is unavailable (non-TUI / pre-P4-6 pi). */
-export async function updateBgStatusLine(ctx: AgentsContext): Promise<void> {
-	if (typeof ctx?.ui?.setStatus !== "function") return;
+ *  no-ops when setStatus is unavailable (non-TUI / pre-P4-6 pi).
+ *  Returns the count, or -1 on error / unavailable. */
+export async function updateBgStatusLine(ctx: AgentsContext): Promise<number> {
+	if (typeof ctx?.ui?.setStatus !== "function") return -1;
 	try {
 		const count = __bgStatusHomeOverride !== undefined
 			? await countActiveBgRuns(__bgStatusHomeOverride)
 			: await countActiveBgRuns();
 		ctx.ui.setStatus(BG_STATUS_KEY, count > 0 ? `${count} agent${count === 1 ? "" : "s"} running` : undefined);
+		return count;
 	} catch { /* best-effort; don't break the session over a status update */ }
+	return -1;
 }
 
 /** Start periodic polling while there are active background runs so the
  *  status line stays current even when no /agents command was typed.
- *  Stops itself when count drops to 0.  Restart-safe (idempotent).
+ *  Stops itself when count drops to 0.  Restarts the timer if already
+ *  running (defeats TOCTOU: a launch between count→0 and clearInterval).
  *  No-ops when setStatus is unavailable (non-TUI / pre-P4-6 pi). */
 function ensureBgStatusPolling(ctx: AgentsContext): void {
 	if (typeof ctx?.ui?.setStatus !== "function") return;
-	if (bgStatusPollTimer !== undefined) return;
+	// Restart any existing timer so a launch that raced with a tick that
+	// saw count=0 but hasn't cleared yet doesn't leave us polling-less.
+	if (bgStatusPollTimer !== undefined) {
+		clearInterval(bgStatusPollTimer);
+		bgStatusPollTimer = undefined;
+	}
 	bgStatusPollTimer = setInterval(async () => {
-		// Guard against pile-up: if countActiveBgRuns takes longer than
-		// BG_STATUS_POLL_MS (e.g. slow disk), skip this tick.
 		if (bgStatusPollBusy) return;
 		bgStatusPollBusy = true;
 		try {
-			const count = await countActiveBgRuns();
-			await updateBgStatusLine(ctx);
+			// Single countActiveBgRuns call feeds both the status line AND the
+			// stop decision — no TOCTOU gap between the two.
+			const count = await updateBgStatusLine(ctx);
 			if (count === 0 && bgStatusPollTimer !== undefined) {
 				clearInterval(bgStatusPollTimer);
 				bgStatusPollTimer = undefined;
