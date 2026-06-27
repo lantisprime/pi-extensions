@@ -162,6 +162,18 @@ function resetAll() {
 	__setBgStatusHomeOverride(undefined);
 }
 
+/** Clean up a run dir created under resolveTrustedHome() during tests.
+ *  Best-effort: marks the run done (if paths is provided), then deletes
+ *  the run dir.  Used by try/finally so throws don't leak real-home state. */
+async function cleanupRealHomeRun(runId) {
+	if (!runId) return;
+	try {
+		const realPaths = getBgRunPaths(runId);
+		await markBgRunDone(realPaths).catch(() => {});
+		await fs.rm(realPaths.runDir, { recursive: true, force: true }).catch(() => {});
+	} catch { /* swallow — cleanup is best-effort */ }
+}
+
 // ---------------------------------------------------------------------------
 // 1. End-to-end preflight + launch
 // ---------------------------------------------------------------------------
@@ -179,27 +191,27 @@ async function testPreflightToLaunchContract() {
 
 		const ctx = makeCtx(home);
 		const SECRET = "secret task content here";
-		await handleBgCommand(`${record.name} ${SECRET}`, ctx, diag);
+		let runId;
+		try {
+			await handleBgCommand(`${record.name} ${SECRET}`, ctx, diag);
 
-		// Backend must have received the launch config with NO task text.
-		const logged = backend._getConfigLog();
-		assert.equal(logged.length, 1, "backend.launch should be called exactly once");
-		const cfg = logged[0];
-		assert.ok(cfg.manifestPath, "backend should receive manifestPath");
-		assert.ok(!cfg.manifestPath.includes(SECRET), "manifest path must NOT embed task text");
-		assert.equal(cfg.agentName, record.name, "backend should receive correct agentName");
-		assert.ok(cfg.runId, "backend should receive runId");
-		assert.equal(cfg.cwd, home, "backend should receive correct cwd");
+			// Backend must have received the launch config with NO task text.
+			const logged = backend._getConfigLog();
+			assert.equal(logged.length, 1, "backend.launch should be called exactly once");
+			const cfg = logged[0];
+			runId = cfg.runId;
+			assert.ok(cfg.manifestPath, "backend should receive manifestPath");
+			assert.ok(!cfg.manifestPath.includes(SECRET), "manifest path must NOT embed task text");
+			assert.equal(cfg.agentName, record.name, "backend should receive correct agentName");
+			assert.ok(cfg.runId, "backend should receive runId");
+			assert.equal(cfg.cwd, home, "backend should receive correct cwd");
 
-		// Manifest file (on disk) IS allowed to contain task — worker reads it.
-		const manifestRaw = await fs.readFile(cfg.manifestPath, "utf8");
-		assert.ok(manifestRaw.includes(SECRET), "manifest file SHOULD contain task for worker to read");
-
-		// Cleanup: write result + delete the real-home runDir.
-		const realPaths = getBgRunPaths(cfg.runId);
-		await writeBgResult(realPaths, { version: 1, runId: cfg.runId, status: "completed", agentName: record.name });
-		await markBgRunDone(realPaths);
-		await fs.rm(realPaths.runDir, { recursive: true, force: true }).catch(() => {});
+			// Manifest file (on disk) IS allowed to contain task — worker reads it.
+			const manifestRaw = await fs.readFile(cfg.manifestPath, "utf8");
+			assert.ok(manifestRaw.includes(SECRET), "manifest file SHOULD contain task for worker to read");
+		} finally {
+			await cleanupRealHomeRun(runId);
+		}
 	});
 }
 
@@ -276,28 +288,28 @@ async function testHandleBgStopKillsWindowViaList() {
 		registerBgTerminalBackend(backend);
 
 		const ctx = makeCtx(home);
-		await handleBgCommand(`${record.name} task`, ctx, diag);
+		let runId;
+		try {
+			await handleBgCommand(`${record.name} task`, ctx, diag);
 
-		// Get the runId from backend's logged config.
-		const logged = backend._getConfigLog();
-		const cfg = logged[0];
-		const runId = cfg.runId;
+			// Get the runId from backend's logged config.
+			const logged = backend._getConfigLog();
+			const cfg = logged[0];
+			runId = cfg.runId;
 
-		// Clear the log so we can see what kill receives.
-		const killLog = backend._getKilled();
-		killLog.length = 0;
+			// Clear the log so we can see what kill receives.
+			const killLog = backend._getKilled();
+			killLog.length = 0;
 
-		// Drive the REAL handleBgStop.
-		await handleBgStop(runId, ctx);
+			// Drive the REAL handleBgStop.
+			await handleBgStop(runId, ctx);
 
-		// handleBgStop should call kill with the correlated windowId, not the runId.
-		assert.ok(killLog.includes(`tmux-${runId}`), "handleBgStop should call backend.kill with windowId correlated via list()");
-		assert.ok(!killLog.includes(runId), "handleBgStop must NOT pass raw runId to kill()");
-
-		// Cleanup the real-home run dir.
-		const realPaths = getBgRunPaths(runId);
-		await markBgRunDone(realPaths);
-		await fs.rm(realPaths.runDir, { recursive: true, force: true }).catch(() => {});
+			// handleBgStop should call kill with the correlated windowId, not the runId.
+			assert.ok(killLog.includes(`tmux-${runId}`), "handleBgStop should call backend.kill with windowId correlated via list()");
+			assert.ok(!killLog.includes(runId), "handleBgStop must NOT pass raw runId to kill()");
+		} finally {
+			await cleanupRealHomeRun(runId);
+		}
 	});
 }
 
@@ -412,39 +424,40 @@ async function testEventsJsonlNeverSurfaced() {
 	await withTempHome(async (home) => {
 		const { record, diag } = await setupRegisteredUserAgent(home);
 		const ctx = makeCtx(home);
+		let runId;
+		try {
+			// Preflight uses REAL home (N3: no homeDir test seam).  The state dir
+			// is at resolveTrustedHome()/.pi/agent/bg/<runId>/.
+			const result = await preflightBgAgent(record, "task", ctx, diag);
+			assert.equal(result.ok, true);
+			runId = result.runId;
 
-		// Preflight uses REAL home (N3: no homeDir test seam).  The state dir
-		// is at resolveTrustedHome()/.pi/agent/bg/<runId>/.
-		const result = await preflightBgAgent(record, "task", ctx, diag);
-		assert.equal(result.ok, true);
+			// Inject a sentinel into the REAL run dir's events.jsonl.
+			const realRunDir = result.paths.runDir;
+			const eventsPath = path.join(realRunDir, "events.jsonl");
+			await fs.writeFile(eventsPath, JSON.stringify({ type: "result", content: "SENTINEL_EVENT_LEAK_TEST" }) + "\n");
 
-		// Inject a sentinel into the REAL run dir's events.jsonl.
-		const realRunDir = result.paths.runDir;
-		const eventsPath = path.join(realRunDir, "events.jsonl");
-		await fs.writeFile(eventsPath, JSON.stringify({ type: "result", content: "SENTINEL_EVENT_LEAK_TEST" }) + "\n");
+			// Write a result so bg-result has something to show.
+			await writeBgResult(result.paths, { version: 1, runId: result.runId, status: "completed", resultText: "real result", agentName: record.name });
 
-		// Write a result so bg-result has something to show.
-		await writeBgResult(result.paths, { version: 1, runId: result.runId, status: "completed", resultText: "real result", agentName: record.name });
+			// Run all 3 handlers and capture their notify messages.
+			const ctxForHandlers = makeCtx(home, {
+				ui: {
+					notify: (msg) => { ctxForHandlers._notifyLog = ctxForHandlers._notifyLog || []; ctxForHandlers._notifyLog.push(msg); },
+					setStatus: () => {},
+					setWidget: () => {},
+				},
+			});
 
-		// Run all 3 handlers and capture their notify messages.
-		const ctxForHandlers = makeCtx(home, {
-			ui: {
-				notify: (msg) => { ctxForHandlers._notifyLog = ctxForHandlers._notifyLog || []; ctxForHandlers._notifyLog.push(msg); },
-				setStatus: () => {},
-				setWidget: () => {},
-			},
-		});
+			await handleBgStatus(ctxForHandlers);
+			await handleBgResult(result.runId, ctxForHandlers);
+			await handleBgStop(result.runId, ctxForHandlers);
 
-		await handleBgStatus(ctxForHandlers);
-		await handleBgResult(result.runId, ctxForHandlers);
-		await handleBgStop(result.runId, ctxForHandlers);
-
-		const allMsgs = (ctxForHandlers._notifyLog || []).join("\n");
-		assert.ok(!allMsgs.includes("SENTINEL_EVENT_LEAK_TEST"), "events.jsonl content must NEVER appear in any bg-* command output");
-
-		// Cleanup the real-home run dir.
-		await markBgRunDone(result.paths);
-		await fs.rm(realRunDir, { recursive: true, force: true }).catch(() => {});
+			const allMsgs = (ctxForHandlers._notifyLog || []).join("\n");
+			assert.ok(!allMsgs.includes("SENTINEL_EVENT_LEAK_TEST"), "events.jsonl content must NEVER appear in any bg-* command output");
+		} finally {
+			await cleanupRealHomeRun(runId);
+		}
 	});
 }
 
@@ -684,7 +697,7 @@ async function main() {
 	await test("preflight->launch: backend gets correct config, task not in argv", testPreflightToLaunchContract);
 	await test("preflight: two runs produce distinct runIds", testPreflightUniqueRunIds);
 	await test("launch failure: reservation cleaned up", testLaunchFailureCleansReservation);
-	await test("worker denial: handleBgStop calls backend.kill with correlated windowId", testHandleBgStopKillsWindowViaList);
+	await test("bg-stop: handleBgStop calls backend.kill with correlated windowId", testHandleBgStopKillsWindowViaList);
 	await test("lost result: bg-result handles missing result.json gracefully", testLostResultIsHandledGracefully);
 	await test("stale run: counted active until reap", testStaleRunCountedUntilReap);
 	await test("concurrency: 5 reservations tracked + freed by cleanup", testConcurrencyCountTracksReservations);
