@@ -19,7 +19,14 @@ export default function tmuxTerminalExtension(pi: ExtensionAPI): void {
 		console.debug("tmux-terminal: worker not found adjacent to bg-terminal.ts, skipping registration");
 		return;
 	}
-	const bgStateDir = path.join(os.homedir(), ".pi", "bg-state");
+	// Must match the agents extension's bg-state root (bg-state.ts getBgStateDir:
+	// `<resolveTrustedHome()>/.pi/agent/bg`). resolveTrustedHome() is
+	// os.userInfo().homedir (immune to $HOME), and the path is `.pi/agent/bg`,
+	// NOT `.pi/bg-state`. We can't import getBgStateDir (REQ-13: no agents/lib
+	// imports outside bg-terminal.ts), so this is kept in sync by hand + the
+	// integration test. A mismatch makes launch reject every manifest as
+	// "invalid manifest path".
+	const bgStateDir = path.join(os.userInfo().homedir, ".pi", "agent", "bg");
 	pi.on("session_start", () => {
 		registerBgTerminalBackend(createTmuxBackend({
 			executor: defaultTmuxExecutor(),

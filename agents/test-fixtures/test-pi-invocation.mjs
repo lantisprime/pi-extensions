@@ -1,4 +1,7 @@
 import assert from "node:assert";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { getPiInvocation } from "../lib/child-args.ts";
 
 function testPiInvocation_explicitCommandWins() {
@@ -6,14 +9,37 @@ function testPiInvocation_explicitCommandWins() {
   assert.equal(result.command, "pi-x");
 }
 
-function testPiInvocation_realScript() {
-  // No env → uses real process.argv[1] and process.execPath
-  const result = getPiInvocation(["-p"]);
-  // process.argv[1] should exist and be a real script
-  assert.equal(result.command, process.execPath);
-  assert.equal(result.args[0], process.argv[1]);
-  // The rest of args should follow
-  assert.ok(result.args.includes("-p"));
+async function testPiInvocation_piEntrypointReInvokes() {
+  // A real script whose basename is "pi" IS the pi entrypoint → re-invoke it
+  // (the bundled-binary / dev case: re-run the same executable to spawn a child).
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-inv-"));
+  const piPath = path.join(dir, "pi");
+  await fs.writeFile(piPath, "#!/usr/bin/env node\n");
+  try {
+    const result = getPiInvocation(["-p"], undefined, { argv1: piPath, execPath: "/usr/bin/node" });
+    assert.equal(result.command, "/usr/bin/node");
+    assert.equal(result.args[0], piPath);
+    assert.ok(result.args.includes("-p"));
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
+
+async function testPiInvocation_nonPiScriptFallsThroughToPi() {
+  // REGRESSION (P5-fix, 2026-06-27): a non-pi parent script — e.g. the detached
+  // bg-worker.ts — must NOT be re-invoked as pi. Previously getPiInvocation
+  // re-ran argv[1] verbatim, so the bg-worker re-ran ITSELF with pi's flags
+  // (`--mode json … -p`), read a flag as the manifest path, and the child run
+  // failed in ~90ms. The guard now falls through to DEFAULT_PI_COMMAND ("pi").
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-inv-"));
+  const workerPath = path.join(dir, "bg-worker.ts");
+  await fs.writeFile(workerPath, "// worker\n");
+  try {
+    const result = getPiInvocation(["-p"], undefined, { argv1: workerPath, execPath: "/usr/bin/node" });
+    assert.equal(result.command, "pi", "a non-pi script must not be re-invoked as pi");
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 }
 
 function testPiInvocation_bunVirtualFallback() {
@@ -34,12 +60,13 @@ function testPiInvocation_genericRuntimeFallsBackToPath() {
   assert.equal(result.command, "/opt/app/server");
 }
 
-function main() {
+async function main() {
   testPiInvocation_explicitCommandWins();
-  testPiInvocation_realScript();
+  await testPiInvocation_piEntrypointReInvokes();
+  await testPiInvocation_nonPiScriptFallsThroughToPi();
   testPiInvocation_bunVirtualFallback();
   testPiInvocation_genericRuntimeFallsBackToPath();
-  console.log("OK: 4/4 tests passed");
+  console.log("OK: 5/5 tests passed");
 }
 
 main();
