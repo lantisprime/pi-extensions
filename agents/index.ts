@@ -81,9 +81,12 @@ export default function agentsExtension(pi: ExtensionAPI) {
 	const eventApi = pi as ExtensionAPI & { on?: (name: string, handler: (event: unknown, ctx: AgentsContext) => Promise<void> | void) => void };
 	let sessionAgentsCtx: AgentsContext | undefined;
 	// P8-4: clear any live background-run spinner timer + widget when the session shuts down.
+	// N3: bg-state authority root is ALWAYS resolveTrustedHome() (os.userInfo().homedir).
+	// The write path (preflight, worker) and every bg-state read must use the same root;
+	// agentsHomeDir is for user-config discovery only, not bg-run state.
 	eventApi.on?.("session_shutdown", async (_event, ctx) => {
 		disposeBackgroundRuns(ctx?.ui ?? { setWidget: () => {} });
-		await reapStaleBgRuns(ctx?.agentsHomeDir ?? resolveTrustedHome()); // free slots only — NOT key retirement (N5)
+		await reapStaleBgRuns(resolveTrustedHome()); // free slots only — NOT key retirement (N5)
 	});
 	eventApi.on?.("session_start", async (_event, ctx) => {
 		sessionAgentsCtx = ctx;
@@ -93,7 +96,11 @@ export default function agentsExtension(pi: ExtensionAPI) {
 		// a completed run's findings silently.
 		attachDeliverResult(pi, ctx);
 		ctx.profileLibrary = profileLibrary; // start with built-ins
-		// Discover user/project profiles and rebuild library
+		// Discover user/project profiles and rebuild library.
+		// os.homedir() is intentional here (NOT resolveTrustedHome()): profile discovery
+		// respects the HOME env var for user-expected config locations (~/.pi/agent/profiles).
+		// resolveTrustedHome() = os.userInfo().homedir ignores HOME and is used only for
+		// authority-root paths (bg-state, MAC key) that must be immune to a mutable HOME.
 		try {
 			const homeDir = ctx.agentsHomeDir ?? os.homedir();
 			const userProfilesDir = path.join(homeDir, ".pi", "agent", "profiles");
@@ -487,6 +494,14 @@ async function handleProfileUnregister(target: string, ctx: AgentsContext, diagn
 }
 
 // ── P4-5: Background agent commands ─────────────────────────────────────
+//
+// N3 INVARIANT: All bg-state paths (reads and writes) use resolveTrustedHome()
+// = os.userInfo().homedir (getpwuid-based, ignores HOME env var).
+// The worker hard-asserts manifest.homeDir === resolveTrustedHome(); preflight
+// writes under the same root.  agentsHomeDir is a config-discovery hint only,
+// never an authority root for bg-run state.  Changing this requires a
+// coordinated change to bg-preflight.ts options.homeDir, bg-worker.ts authority
+// derivation, and the N3/N5 security model — not a +4/-4 patch.
 
 /** Extract the first whitespace-delimited token from a subcommand's rest args
  *  to isolate a runId. Returns empty string if no token is present. */
@@ -563,7 +578,7 @@ export async function handleBgCommand(
 
 /** /agents bg-status — show running + recent background runs. */
 export async function handleBgStatus(ctx: AgentsContext): Promise<void> {
-	const homeDir = ctx.agentsHomeDir ?? resolveTrustedHome();
+	const homeDir = resolveTrustedHome();
 	const runs = await listBgRuns(homeDir);
 
 	if (runs.length === 0) {
@@ -618,7 +633,7 @@ export async function handleBgStop(args: string, ctx: AgentsContext): Promise<vo
 	}
 
 	// Reap via bg-state regardless of backend result.
-	await reapStaleBgRuns(ctx.agentsHomeDir ?? resolveTrustedHome());
+	await reapStaleBgRuns(resolveTrustedHome());
 	ctx.ui.notify(`Stop requested for ${runId.slice(0, 16)}….`, "info");
 }
 
@@ -633,7 +648,7 @@ export async function handleBgResult(args: string, ctx: AgentsContext): Promise<
 	// Validate the runId format before handing it to getBgRunPaths, which
 	// throws on invalid ids.  Catch the throw so we emit a friendly warning
 	// instead of an uncaught exception.
-	const homeDir = ctx.agentsHomeDir ?? resolveTrustedHome();
+	const homeDir = resolveTrustedHome();
 	let paths: ReturnType<typeof getBgRunPaths>;
 	try {
 		paths = getBgRunPaths(runId, homeDir);
