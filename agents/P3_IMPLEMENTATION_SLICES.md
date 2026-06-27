@@ -88,6 +88,10 @@ Completed and merged:
 - 14 new files + 2 anchored edits; 22 requirements / 63 tests
 - PR #98, commit f3b247c
 - Branch: `p5-tmux-terminal` (local + remote, deleted post-merge).
+- Post-merge fixes (D5 + D6): real-tmux smoke test surfaced two bugs invisible to FakeTmuxExecutor unit tests:
+  - **D5**: `isAvailable` probe changed from `has-session -t __pi_probe__` to `list-sessions`. Original probe returned exit 1 for nonexistent session; `defaultTmuxExecutor` catches → `{ok: false}`; my D1 `result.ok === true` check made `isAvailable` always return `false` even when server reachable. `list-sessions` correctly distinguishes server-reachable from server-unreachable.
+  - **D6**: launch argv now prepends `"node"` before workerPath (`[..., "--", "node", workerPath, manifestPath]`). `bg-worker.ts` is mode 644 with no shebang; tmux cannot exec it directly. Without the prefix, the window is created then immediately destroyed; user-options never set; `isAlive` returns false.
+  - New `test-real-tmux-smoke.mjs` exercises the actual implementation against an isolated `tmux -L p5-smoke-<pid>` socket; catches both bugs in CI.
 - Status: All 5 rounds of plan review complete (v1 14 blockers → v5 UNCONDITIONAL-GO); 1 round of code review (APPROVE, 0 blockers).
 - Plan (ACTIVE): agents/docs/P5_PLUGGABLE_TERMINAL_BACKEND_PLAN_V5.md
 - Plan review: agents/docs/P5_PLUGGABLE_TERMINAL_BACKEND_PLAN_REVIEW.md
@@ -99,10 +103,15 @@ Completed and merged:
   2. Removed contradictory first assertion in `testLaunchDoesNotInterpolateRunId`. The assertion `!newWindowStr.includes(SAMPLE_RUN_ID)` fails by design (REQ-5 mandates `windowName = pi-agent-<runId>`, so runId appears in argv). Kept the second (correct) assertion: `runIdOccurrences === 0` (no standalone runId token). Test author's own comment clarified intent.
   3. `test-bg.mjs` REQ-22 test wrapped as `async function testListEntryWithoutRunIdIsTreatedAsUnknown()` + main() entry, matching file style. Plan's inline-block style wouldn't execute (file uses `main()` invocation only).
   4. Anchors adapted: file uses `// ---...` dashes not `// ── Test helpers ──`. Used equivalent sections.
+  5. **D5 (post-merge, real-tmux smoke surfaced)**: `isAvailable` probe changed from `has-session -t __pi_probe__` to `list-sessions`. See D5/D6 note above.
+  6. **D6 (post-merge, real-tmux smoke surfaced)**: launch argv now prepends `"node"` before workerPath — `[..., "--", "node", workerPath, manifestPath]`. `bg-worker.ts` has no shebang and is not executable; tmux cannot exec it directly. See D5/D6 note above.
 - Regression guards verified:
   - Mutation #1 (realpathSync → path.resolve in resolve-worker-path.ts): `testWorkerPathIsRealpathed` fails as expected.
   - Mutation #2 (reorder WORKER_BASENAMES to `[.mjs, .ts, .js]`): `testWorkerPathPrefersTsOverMjs` fails as expected.
   - Both pass when reverted.
+- Real-tmux smoke test (post-merge):
+  - New `tmux-terminal/test-fixtures/test-real-tmux-smoke.mjs` exercises the actual implementation against an isolated `tmux -L p5-smoke-<pid>` socket. Skipped (exit 0) if tmux not on $PATH.
+  - Catches D5 and D6 — bugs invisible to FakeTmuxExecutor unit tests.
 
 ### P4R-PROJ Project Background Agents (DEFERRED)
 - Requires disk-backed trust reader

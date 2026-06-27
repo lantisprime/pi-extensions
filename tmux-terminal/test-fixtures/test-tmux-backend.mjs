@@ -39,8 +39,8 @@ const SAMPLE_CWD = "/Users/me/project";
 	executor.setDefaultResponse({ ok: true, stdout: "", stderr: "", exitCode: 0 });
 	const result = await backend.isAvailable();
 	assert.equal(result, true, "isAvailable must be true when tmux server reachable");
-	assert.ok(executor.calls.length >= 1, "isAvailable must call tmux has-session");
-	assert.deepEqual(executor.calls[0].args, ["has-session", "-t", "__pi_probe__"]);
+	assert.ok(executor.calls.length >= 1, "isAvailable must call tmux list-sessions (D5: probe distinguishes server-reachable from server-unreachable)");
+	assert.deepEqual(executor.calls[0].args, ["list-sessions"]);
 }
 {
 	const prevTmux = process.env.TMUX;
@@ -84,8 +84,8 @@ const SAMPLE_CWD = "/Users/me/project";
 	assert.deepEqual(launchCall.args, [
 		"new-window", "-d", "-n", SAMPLE_WINDOW_NAME, "-c", SAMPLE_CWD,
 		"-P", "-F", "#{window_id}", "--",
-		workerPath, manifestPath,
-	], "argv must contain ONLY workerPath + manifestPath, no agentName/runId/cwd/task");
+		"node", workerPath, manifestPath,
+	], "argv must contain node + workerPath + manifestPath, no agentName/runId/cwd/task (D6: node prefix required for .ts/.mjs worker)");
 }
 {
 	const { executor, backend, bgStateDir } = freshBackend();
@@ -153,7 +153,8 @@ const SAMPLE_CWD = "/Users/me/project";
 	await backend.launch({ agentName: "scout", runId: SAMPLE_RUN_ID, manifestPath, cwd: SAMPLE_CWD });
 	const launchCall = executor.calls.find(function _c(c) { return c.args[0] === "new-window"; });
 	const workerIdx = launchCall.args.indexOf("--") + 1;
-	assert.equal(launchCall.args[workerIdx + 1], manifestPath, "manifestPath MUST be a single argv token, not split");
+	assert.equal(launchCall.args[workerIdx], "node", "argv MUST have 'node' as the first positional (D6: required for .ts/.mjs worker)");
+	assert.equal(launchCall.args[workerIdx + 2], manifestPath, "manifestPath MUST be a single argv token, not split");
 }
 {
 	const { executor, backend, bgStateDir } = freshBackend();

@@ -31,7 +31,7 @@ export function createTmuxBackend(opts: CreateTmuxBackendOpts): TermBgBackend {
 		async isAvailable(): Promise<boolean> {
 			if (process.env.TMUX) return true;
 			try {
-				const result = await executor.exec(["has-session", "-t", "__pi_probe__"], { timeoutMs: 1000 });
+				const result = await executor.exec(["list-sessions"], { timeoutMs: 1000 });
 				return result.ok === true;
 			} catch {
 				return false;
@@ -49,7 +49,7 @@ export function createTmuxBackend(opts: CreateTmuxBackendOpts): TermBgBackend {
 			const newWindowArgv = [
 				"new-window", "-d", "-n", windowName, "-c", config.cwd,
 				"-P", "-F", "#{window_id}", "--",
-				workerPath, config.manifestPath,
+				"node", workerPath, config.manifestPath,
 			];
 
 			let newWindowResult;
