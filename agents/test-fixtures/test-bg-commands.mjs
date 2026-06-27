@@ -547,17 +547,33 @@ async function testPollingBusyGuardSkipsOverlappingTick() {
 	const timer = makeFakeTimer();
 	__setBgStatusPollingDeps({ setInterval: timer.setInterval.bind(timer), clearInterval: timer.clearInterval.bind(timer) });
 
-	const ctx = { ui: { setStatus() {} } };
+	// Use a slow setStatus to keep the first tick busy across the second tick.
+	let resolveSlow;
+	const slowPromise = new Promise((r) => { resolveSlow = r; });
+	let tickCount = 0;
+	const ctx = {
+		ui: {
+			setStatus() {
+				tickCount++;
+				if (tickCount === 1) return slowPromise; // first tick: stalls
+			},
+		},
+	};
+
 	ensureBgStatusPolling(ctx);
 
-	// Fire two ticks back-to-back.  First tick sets bgStatusPollBusy=true;
-	// second tick should early-return because busy is still true.
+	// Fire first tick — enters updateBgStatusLine, hits the slow setStatus.
 	const tick1 = timer.tick();
+	// Fire second tick — busy guard should skip it (returns immediately).
 	const tick2 = timer.tick();
 
+	// Resolve the slow promise so tick1 can complete.
+	resolveSlow();
 	await tick1;
 	await tick2;
-	// Both completed without error — busy guard prevented pile-up.
+
+	// Only one tick should have reached setStatus — the second was skipped.
+	assert.equal(tickCount, 1, "busy guard should skip second tick while first is still running");
 
 	__resetBgStatusPolling();
 }
