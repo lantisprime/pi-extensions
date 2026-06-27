@@ -19,16 +19,19 @@ export { dispatchChildRun, executeChildRun, nextStepForRunBlock, parseDoArgs, pa
 import { buildProjectAgentRecommendation, collectAgentDiagnostics, formatAgentInspect, formatAgentsConfig, formatAgentsDoctor, formatAgentsList, formatAgentsRegistry, formatAgentsVerify } from "./lib/diagnostics.ts";
 import { runEphemeralCommand, saveTempCommand, type EphemeralRunHandlerContext } from "./lib/ephemeral.ts";
 import { registerAgent, registerProjectAgents, unregisterAgent } from "./lib/registration.ts";
-import { runAgentCommand, runIntentCommand, dispatchChildRun } from "./lib/run-resolver.ts";
+import { runAgentCommand, runIntentCommand, dispatchChildRun, resolveRegisteredRunTarget } from "./lib/run-resolver.ts";
+import type { AgentsContextLike } from "./lib/run-resolver.ts";
 import { disposeBackgroundRuns } from "./lib/bg-run.ts";
 import { validateBuiltInAgentSpecs } from "./lib/specs.ts";
 import { registerSubagentTool } from "./lib/subagent-tool.ts";
+import { preflightBgAgent } from "./lib/bg-preflight.ts";
+import { getBgTerminalBackend } from "./lib/bg-terminal.ts";
 import { formatBuiltInProfilesList, toProfileLibrary, buildProfileLibrary, type ModelProfileLibrary, type ProfileLibraryBuildWarning } from "./lib/profiles.ts";
 import { discoverProfiles, rejectDuplicateProfileNames, DEFAULT_PROFILE_DISCOVERY_LIMITS, type ParsedProfile } from "./lib/profile-discovery.ts";
 import { addOrReplaceRegisteredProfile, findMatchingRegisteredProfile, type RegisteredProfile } from "./lib/registry.ts";
 import { runChainCommand } from "./lib/chain-runner.ts";
 import { loadGateConfig, classifyGateIntent, GATE_INSTRUCTIONS } from "./lib/intent-gate.ts";
-import { reapStaleBgRuns, resolveTrustedHome } from "./lib/bg-state.ts";
+import { reapStaleBgRuns, resolveTrustedHome, listBgRuns, getBgRunPaths, readBgResult, writeBgResult, markBgRunDone } from "./lib/bg-state.ts";
 import os from "node:os";
 import path from "node:path";
 
@@ -78,6 +81,9 @@ export default function agentsExtension(pi: ExtensionAPI) {
 	const eventApi = pi as ExtensionAPI & { on?: (name: string, handler: (event: unknown, ctx: AgentsContext) => Promise<void> | void) => void };
 	let sessionAgentsCtx: AgentsContext | undefined;
 	// P8-4: clear any live background-run spinner timer + widget when the session shuts down.
+	// N3: bg-state authority root is ALWAYS resolveTrustedHome() (os.userInfo().homedir).
+	// The write path (preflight, worker) and every bg-state read must use the same root;
+	// agentsHomeDir is for user-config discovery only, not bg-run state.
 	eventApi.on?.("session_shutdown", async (_event, ctx) => {
 		disposeBackgroundRuns(ctx?.ui ?? { setWidget: () => {} });
 		await reapStaleBgRuns(resolveTrustedHome()); // free slots only — NOT key retirement (N5)
@@ -90,7 +96,11 @@ export default function agentsExtension(pi: ExtensionAPI) {
 		// a completed run's findings silently.
 		attachDeliverResult(pi, ctx);
 		ctx.profileLibrary = profileLibrary; // start with built-ins
-		// Discover user/project profiles and rebuild library
+		// Discover user/project profiles and rebuild library.
+		// os.homedir() is intentional here (NOT resolveTrustedHome()): profile discovery
+		// respects the HOME env var for user-expected config locations (~/.pi/agent/profiles).
+		// resolveTrustedHome() = os.userInfo().homedir ignores HOME and is used only for
+		// authority-root paths (bg-state, MAC key) that must be immune to a mutable HOME.
 		try {
 			const homeDir = ctx.agentsHomeDir ?? os.homedir();
 			const userProfilesDir = path.join(homeDir, ".pi", "agent", "profiles");
@@ -127,7 +137,7 @@ export default function agentsExtension(pi: ExtensionAPI) {
 	pi.registerCommand("agents", {
 		description: "Show P3 agent diagnostics and run built-in or registered agents",
 		getArgumentCompletions: (prefix: string) => {
-			const options = ["list", "built-ins", "config", "inspect", "registry", "verify", "doctor", "register", "register-project", "unregister", "run", "do", "chain", "run-temp", "save-temp", "profiles"];
+			const options = ["list", "built-ins", "config", "inspect", "registry", "verify", "doctor", "register", "register-project", "unregister", "run", "do", "chain", "run-temp", "save-temp", "profiles", "bg", "bg-status", "bg-stop", "bg-result", "bg-open"];
 			const trimmed = prefix.trim();
 			const filtered = options.filter((option) => option.startsWith(trimmed));
 			return filtered.length > 0 ? filtered.map((value) => ({ value, label: value })) : null;
@@ -238,7 +248,27 @@ export default function agentsExtension(pi: ExtensionAPI) {
 				await saveTempCommand(parsed.rest, ephCtx, { projectTrusted: diagnostics.projectTrusted, userAgentsDir });
 				return;
 			}
-			ctx.ui.notify("Usage: /agents [list|built-ins|config|inspect <name>|registry|verify|doctor|register <path-or-name>|register-project [--all-safe]|unregister <name>|run <agent> <task>|chain <agent>,<agent>[,<agent>] <task>|run-temp <scout|planner|reviewer> <task>|save-temp <name>|profiles].", "warning");
+			if (parsed.action === "bg") {
+				await handleBgCommand(parsed.rest, ctx, diagnostics);
+				return;
+			}
+			if (parsed.action === "bg-status") {
+				await handleBgStatus(ctx);
+				return;
+			}
+			if (parsed.action === "bg-stop") {
+				await handleBgStop(parsed.rest, ctx);
+				return;
+			}
+			if (parsed.action === "bg-result") {
+				await handleBgResult(parsed.rest, ctx);
+				return;
+			}
+			if (parsed.action === "bg-open") {
+				await handleBgOpen(parsed.rest, ctx);
+				return;
+			}
+			ctx.ui.notify("Usage: /agents [list|built-ins|config|inspect <name>|registry|verify|doctor|register <path-or-name>|register-project [--all-safe]|unregister <name>|run <agent> <task>|chain <agent>,<agent>[,<agent>] <task>|run-temp <scout|planner|reviewer> <task>|save-temp <name>|profiles|bg <agent> <task>|bg-status|bg-stop <id>|bg-result <id>|bg-open <id>].", "warning");
 		},
 	});
 }
@@ -461,4 +491,236 @@ async function handleProfileUnregister(target: string, ctx: AgentsContext, diagn
 	const updated = { ...registry, profiles: profiles.filter((p) => p.name !== target), updatedAt: new Date().toISOString() };
 	await writeProjectRegistry(updated, diagnostics.projectRoot, ctx.agentsHomeDir);
 	ctx.ui.notify(`Unregistered profile '${target}'.`, "info");
+}
+
+// ── P4-5: Background agent commands ─────────────────────────────────────
+//
+// N3 INVARIANT: All bg-state paths (reads and writes) use resolveTrustedHome()
+// = os.userInfo().homedir (getpwuid-based, ignores HOME env var).
+// The worker hard-asserts manifest.homeDir === resolveTrustedHome(); preflight
+// writes under the same root.  agentsHomeDir is a config-discovery hint only,
+// never an authority root for bg-run state.  Changing this requires a
+// coordinated change to bg-preflight.ts options.homeDir, bg-worker.ts authority
+// derivation, and the N3/N5 security model — not a +4/-4 patch.
+
+/** Extract the first whitespace-delimited token from a subcommand's rest args
+ *  to isolate a runId. Returns empty string if no token is present. */
+function extractRunId(args: string): string {
+	return (args ?? "").trim().split(/\s+/)[0] || "";
+}
+
+/** /agents bg <agent> <task> — preflight + launch a background agent. */
+export async function handleBgCommand(
+	args: string,
+	ctx: AgentsContext,
+	diagnostics: Awaited<ReturnType<typeof collectAgentDiagnostics>>,
+): Promise<void> {
+	const backend = getBgTerminalBackend();
+	if (!backend) {
+		ctx.ui.notify("No terminal backend installed. Load tmux-terminal or equivalent to use background agents.", "warning");
+		return;
+	}
+	if (typeof backend.isAvailable === "function" && !(await backend.isAvailable())) {
+		ctx.ui.notify(`Terminal backend "${backend.name}" is not available.`, "error");
+		return;
+	}
+	// Parse <agent> <task> (split on first whitespace; agent name
+	// is the first token, everything after is the task).
+	const tokens = args.split(/\s+/);
+	if (tokens.length < 2) {
+		ctx.ui.notify("Usage: /agents bg <agent> <task>", "warning");
+		return;
+	}
+	const agentName = tokens[0];
+	const task = tokens.slice(1).join(" ").trim();
+	if (!agentName || !task) {
+		ctx.ui.notify("Usage: /agents bg <agent> <task>", "warning");
+		return;
+	}
+
+	// Resolve the agent target (same gate as /agents run).
+	const resolved = await resolveRegisteredRunTarget(agentName, diagnostics);
+	if (!resolved.ok) {
+		ctx.ui.notify(resolved.message, "warning");
+		return;
+	}
+
+	// Preflight: write signed manifest + reservation.
+	const preflightCtx = { cwd: ctx.cwd, hasUI: ctx.hasUI, agentsHomeDir: ctx.agentsHomeDir } as AgentsContextLike;
+	const result = await preflightBgAgent(resolved.record, task, preflightCtx, diagnostics);
+	if (!result.ok) {
+		ctx.ui.notify(`Preflight failed: ${result.reason}`, "error");
+		return;
+	}
+
+	// Launch via the terminal backend.
+	const launchResult = await backend.launch({
+		agentName: resolved.record.name ?? resolved.record.filePath,
+		runId: result.runId,
+		manifestPath: result.paths.manifestPath,
+		cwd: ctx.cwd ?? process.cwd(),
+	});
+
+	if (launchResult.status === "failed") {
+		// Clean up the reservation + manifest that preflight wrote.
+		// Without this, the slot stays reserved until the stale-reaper
+		// times it out (BG_MAX_DURATION_SEC).
+		try {
+			await writeBgResult(result.paths, { version: 1, runId: result.runId, status: "failed", error: launchResult.error ?? "unknown launch error" });
+			await markBgRunDone(result.paths);
+		} catch { /* best-effort; the reaper will catch it on next session */ }
+		ctx.ui.notify(`Launch failed: ${launchResult.error ?? "unknown error"}`, "error");
+		return;
+	}
+
+	ctx.ui.notify(`Background agent ${agentName} running (${result.runId.slice(0, 16)}…) via ${backend.name}.`, "info");
+}
+
+/** /agents bg-status — show running + recent background runs. */
+export async function handleBgStatus(ctx: AgentsContext): Promise<void> {
+	const homeDir = resolveTrustedHome();
+	const runs = await listBgRuns(homeDir);
+
+	if (runs.length === 0) {
+		ctx.ui.notify("No background agent runs.", "info");
+		return;
+	}
+
+	const lines: string[] = [];
+	const backend = getBgTerminalBackend();
+	let liveRunIds: string[] | undefined;
+	if (backend) {
+		// Collect runIds from backend entries (TermBgWindowEntry.runId), not
+		// opaque windowIds.  windowId is a backend handle that may differ from
+		// the bg-state runId; runId is the correlation key.
+		try { liveRunIds = (await backend.list()).filter(function _a(e) { return e.runId; }).map(function _b(e) { return e.runId!; }); } catch { /* best-effort */ }
+	}
+
+	for (const run of runs) {
+		const elapsed = run.createdAtMs ? Math.floor((Date.now() - run.createdAtMs) / 1000) : 0;
+		const alive = liveRunIds ? liveRunIds.includes(run.runId) : undefined;
+		// Guard: a done/failed/stopped run is naturally absent from the
+		// backend's live window list — don't mislabel it as stale.
+		const statusTag = (alive === false && !run.done) ? "(stale)" : run.status;
+		lines.push(`  ${run.runId.slice(0, 16)}  ${statusTag}  ${formatElapsed(elapsed)}  ${run.done ? "done" : "active"}`);
+	}
+
+	ctx.ui.notify(`Background agent runs (${runs.length}):\n${lines.join("\n")}`, "info");
+}
+
+/** /agents bg-stop <runId> — kill a background agent. */
+export async function handleBgStop(args: string, ctx: AgentsContext): Promise<void> {
+	const runId = extractRunId(args);
+	if (!runId) {
+		ctx.ui.notify("Usage: /agents bg-stop <runId>", "warning");
+		return;
+	}
+
+	const backend = getBgTerminalBackend();
+	if (backend) {
+		// Correlate runId → windowId via list() (kill() takes an opaque
+		// windowId, not a runId — the two may differ).
+		try {
+			const windows = await backend.list();
+			const entry = windows.find((e) => e.runId === runId);
+			if (entry) {
+				const killResult = await backend.kill(entry.windowId);
+				if (killResult.status === "failed") {
+					ctx.ui.notify(`Kill via backend failed: ${killResult.error ?? "unknown"} (falling back to reaper)`, "warning");
+				}
+			}
+		} catch { /* best-effort; reaper catches it below */ }
+	}
+
+	// Reap via bg-state regardless of backend result.
+	await reapStaleBgRuns(resolveTrustedHome());
+	ctx.ui.notify(`Stop requested for ${runId.slice(0, 16)}….`, "info");
+}
+
+/** /agents bg-result <runId> — show result for a completed/failed/stopped run. */
+export async function handleBgResult(args: string, ctx: AgentsContext): Promise<void> {
+	const runId = extractRunId(args);
+	if (!runId) {
+		ctx.ui.notify("Usage: /agents bg-result <runId>", "warning");
+		return;
+	}
+
+	// Validate the runId format before handing it to getBgRunPaths, which
+	// throws on invalid ids.  Catch the throw so we emit a friendly warning
+	// instead of an uncaught exception.
+	const homeDir = resolveTrustedHome();
+	let paths: ReturnType<typeof getBgRunPaths>;
+	try {
+		paths = getBgRunPaths(runId, homeDir);
+	} catch {
+		ctx.ui.notify(`Invalid run ID: ${runId.slice(0, 16)}….`, "warning");
+		return;
+	}
+	const result = await readBgResult(paths);
+	if (!result) {
+		ctx.ui.notify(`No result found for run ${runId.slice(0, 16)}…. (Still running or invalid runId?)`, "warning");
+		return;
+	}
+
+	const lines = [`Background agent result (${runId.slice(0, 16)}…):`];
+	lines.push(`  Status: ${result.status}`);
+	lines.push(`  Agent: ${result.agentName ?? "unknown"}`);
+	if (result.startedAt) lines.push(`  Started: ${result.startedAt}`);
+	if (result.finishedAt) lines.push(`  Finished: ${result.finishedAt}`);
+	if (result.error) lines.push(`  Error: ${result.error}`);
+	if (result.resultText) {
+		const truncated = result.resultText.length > 2000;
+		const preview = truncated
+			? result.resultText.slice(0, 2000)
+			: result.resultText;
+		lines.push(`  Result (${result.resultText.length} chars${truncated ? ", truncated" : ""}):`);
+		for (const l of preview.split("\n")) lines.push(`    ${l}`);
+		if (truncated) lines.push(`    … [use /agents bg-open <id> to see full output]`);
+	}
+
+	ctx.ui.notify(lines.join("\n"), "info");
+}
+
+/** /agents bg-open <runId> — check whether a background agent window is alive.
+ *
+ *  P4-5 current: liveness check only.  Window focus/activation requires a
+ *  terminal-backend focus() method which is deferred to a post-P4-7 backend
+ *  enhancement (see P5_PLUGGABLE_TERMINAL_BACKEND.md). */
+export async function handleBgOpen(args: string, ctx: AgentsContext): Promise<void> {
+	const runId = extractRunId(args);
+	if (!runId) {
+		ctx.ui.notify("Usage: /agents bg-open <runId>", "warning");
+		return;
+	}
+
+	const backend = getBgTerminalBackend();
+	if (!backend) {
+		ctx.ui.notify("No terminal backend installed. Cannot check window.", "warning");
+		return;
+	}
+
+	// Correlate runId → windowId via list() (isAlive() takes an opaque
+	// windowId, not a runId — the two may differ).
+	try {
+		const windows = await backend.list();
+		const entry = windows.find((e) => e.runId === runId);
+		if (!entry) {
+			ctx.ui.notify(`No live terminal window for ${runId.slice(0, 16)}….`, "warning");
+			return;
+		}
+		const alive = await backend.isAlive(entry.windowId);
+		if (!alive) {
+			ctx.ui.notify(`No live terminal window for ${runId.slice(0, 16)}….`, "warning");
+			return;
+		}
+		ctx.ui.notify(`Window for ${runId.slice(0, 16)}… is alive.`, "info");
+	} catch {
+		ctx.ui.notify(`Backend error checking window for ${runId.slice(0, 16)}….`, "warning");
+	}
+}
+
+function formatElapsed(seconds: number): string {
+	if (seconds < 60) return `${seconds}s`;
+	if (seconds < 3600) return `${Math.floor(seconds / 60)}m${seconds % 60}s`;
+	return `${Math.floor(seconds / 3600)}h${Math.floor((seconds % 3600) / 60)}m${seconds % 60}s`;
 }

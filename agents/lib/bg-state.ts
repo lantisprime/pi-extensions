@@ -435,6 +435,21 @@ export async function writeBgResult(paths: BgRunPaths, result: BgRunResult): Pro
 	await writeJsonAtomic(paths.resultPath, result, 0o600);
 }
 
+/** Read the result file for a completed/failed/stopped bg run.
+ *  Returns undefined if the result file does not exist (run still in progress)
+ *  or if the file is corrupt/unreadable. */
+export async function readBgResult(paths: BgRunPaths): Promise<BgRunResult | undefined> {
+	try {
+		const raw = await readUtf8FileNoSymlink(paths.resultPath, "result file");
+		return JSON.parse(raw) as BgRunResult;
+	} catch (error) {
+		// ENOENT: no result file yet (still running / never started)
+		// SyntaxError / permissions: corrupt or unreadable — treat as missing
+		if ((error as { code?: string }).code === "ENOENT") return undefined;
+		return undefined;
+	}
+}
+
 export async function appendBgEvent(paths: BgRunPaths, event: unknown): Promise<void> {
 	await assertWritableReservedRun(paths);
 	await appendUtf8FileNoSymlink(paths.eventsPath, `${JSON.stringify(event)}\n`, 0o600, "events file");
