@@ -781,6 +781,11 @@ export async function handleBgResult(args: string, ctx: AgentsContext): Promise<
 	if (result.startedAt) lines.push(`  Started: ${result.startedAt}`);
 	if (result.finishedAt) lines.push(`  Finished: ${result.finishedAt}`);
 	if (result.error) lines.push(`  Error: ${result.error}`);
+	// P5-diag: exit code / signal / stderr are embedded in the Error diagnostic above
+	// (composed by describeChildFailure) so they are not re-rendered here. The kept raw
+	// spill (stdout.jsonl under a 0700 dir) is the one structured field not in that
+	// paragraph — surface its path for deep debugging of a failed run.
+	if (result.stdoutTmpPath) lines.push(`  Raw output: ${result.stdoutTmpPath}`);
 	if (result.resultText) {
 		const truncated = result.resultText.length > 2000;
 		const preview = truncated

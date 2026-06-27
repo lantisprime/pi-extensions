@@ -396,4 +396,82 @@ function fakeCompletedResult(name, task) {
 	});
 }
 
+// 11. P5-diag: a non-completed child records WHY (regression — the worker used to
+// write `status: failed` with empty resultText and no error, discarding the child's
+// exit code / signal / stderr / kept raw spill).
+{
+	await withTempHome(async (home) => {
+		const { record, diag } = await setupRegisteredUserAgent(home);
+		const { paths } = await preflightAndRead(home, record, diag, "task");
+
+		// Child fails fast: non-zero exit, empty summary, NO captured error — the exact
+		// shape that previously produced a reasonless `failed` result.
+		await runBgWorker(paths.manifestPath, {
+			homeDir: home,
+			runner: async (spec) => ({
+				agentName: spec.name,
+				status: "failed",
+				exitCode: 1,
+				signal: null,
+				pid: 7,
+				durationMs: 90,
+				stdoutBytes: 0,
+				stderrPreview: "boom: cannot find module 'foo'",
+				invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin", stdinText: "task" } },
+				summary: { summaryText: "", toolCalls: [], errors: [], usage: undefined, cost: undefined, stopReason: undefined, model: undefined, provider: undefined, truncation: {} },
+				timedOut: false,
+				outputLimitExceeded: false,
+				stdoutTmpPath: "/tmp/pi-agent-xyz/stdout.jsonl",
+			}),
+		});
+
+		const result = JSON.parse(await fs.readFile(paths.resultPath, "utf8"));
+		assert.equal(result.status, "failed");
+		// WHY is now recorded: exit code + stderr both surface in the error diagnostic.
+		assert.match(result.error, /Exit code: 1/);
+		assert.match(result.error, /boom: cannot find module/);
+		// Structured fields populated for programmatic consumers.
+		assert.equal(result.exitCode, 1);
+		assert.match(result.stderrPreview, /boom/);
+		assert.equal(result.stdoutTmpPath, "/tmp/pi-agent-xyz/stdout.jsonl");
+		// F1: empty summary → resultText omitted so the diagnostic isn't rendered twice.
+		assert.equal(result.resultText, undefined, "resultText omitted on empty-summary failure");
+		assert.notEqual(result.error, result.resultText, "error and resultText must not be the identical string");
+		assert.ok((await fs.stat(paths.donePath)).isFile());
+	});
+}
+
+// 12. P5-diag: a signal-killed child (exitCode null) records the signal, not "Exit code: null".
+{
+	await withTempHome(async (home) => {
+		const { record, diag } = await setupRegisteredUserAgent(home);
+		const { paths } = await preflightAndRead(home, record, diag, "task");
+
+		await runBgWorker(paths.manifestPath, {
+			homeDir: home,
+			runner: async (spec) => ({
+				agentName: spec.name,
+				status: "failed",
+				exitCode: null,
+				signal: "SIGKILL",
+				pid: 8,
+				durationMs: 40,
+				stdoutBytes: 0,
+				stderrPreview: "",
+				invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin", stdinText: "task" } },
+				summary: { summaryText: "", toolCalls: [], errors: [], usage: undefined, cost: undefined, stopReason: undefined, model: undefined, provider: undefined, truncation: {} },
+				timedOut: false,
+				outputLimitExceeded: false,
+			}),
+		});
+
+		const result = JSON.parse(await fs.readFile(paths.resultPath, "utf8"));
+		assert.equal(result.status, "failed");
+		assert.equal(/Exit code/.test(result.error), false, "no 'Exit code' when signal-killed");
+		assert.match(result.error, /Signal: SIGKILL/);
+		assert.equal(result.signal, "SIGKILL");
+		assert.equal(result.exitCode, undefined, "no exitCode field when child was signal-killed");
+	});
+}
+
 console.log("P4-3 bg-worker tests passed");
