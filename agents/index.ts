@@ -521,7 +521,13 @@ export function __setBgStatusHomeOverride(home: string | undefined): void {
  *  count.  Reads from the bg-state authority root (resolveTrustedHome()),
  *  same as the write path + all other bg-state operations.  Silently
  *  no-ops when setStatus is unavailable (non-TUI / pre-P4-6 pi).
- *  Returns the count, or -1 on error / unavailable. */
+ *  Returns the count, or -1 on error / unavailable.
+ *
+ *  Note: "running" includes reserved, quarantined, and actively-executing
+ *  runs — it matches countActiveBgRuns() semantics (any non-done run that
+ *  isn't past its reservation expiry).  A reserved-but-not-yet-launched
+ *  run shows briefly until the launch succeeds or the launch-failure
+ *  cleanup frees the slot. */
 export async function updateBgStatusLine(ctx: AgentsContext): Promise<number> {
 	if (typeof ctx?.ui?.setStatus !== "function") return -1;
 	try {
@@ -539,7 +545,7 @@ export async function updateBgStatusLine(ctx: AgentsContext): Promise<number> {
  *  Stops itself when count drops to 0.  Restarts the timer if already
  *  running (defeats TOCTOU: a launch between count→0 and clearInterval).
  *  No-ops when setStatus is unavailable (non-TUI / pre-P4-6 pi). */
-function ensureBgStatusPolling(ctx: AgentsContext): void {
+export function ensureBgStatusPolling(ctx: AgentsContext): void {
 	if (typeof ctx?.ui?.setStatus !== "function") return;
 	// Restart any existing timer so a launch that raced with a tick that
 	// saw count=0 but hasn't cleared yet doesn't leave us polling-less.
@@ -562,6 +568,16 @@ function ensureBgStatusPolling(ctx: AgentsContext): void {
 		finally { bgStatusPollBusy = false; }
 	}, BG_STATUS_POLL_MS);
 	(bgStatusPollTimer as { unref?: () => void })?.unref?.();
+}
+
+/** Test-only: reset module-level polling state between test cases. */
+export function __resetBgStatusPolling(): void {
+	if (bgStatusPollTimer !== undefined) {
+		clearInterval(bgStatusPollTimer);
+		bgStatusPollTimer = undefined;
+	}
+	bgStatusPollBusy = false;
+	__bgStatusHomeOverride = undefined;
 }
 
 // ── P4-5: Background agent commands ─────────────────────────────────────

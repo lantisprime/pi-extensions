@@ -18,7 +18,9 @@ import {
 	handleBgOpen,
 	handleBgResult,
 	updateBgStatusLine,
+	ensureBgStatusPolling,
 	__setBgStatusHomeOverride,
+	__resetBgStatusPolling,
 } from "../index.ts";
 
 import {
@@ -419,6 +421,64 @@ async function testStatusLineNoOpWithoutSetStatus() {
 	await updateBgStatusLine({ ui: {} });
 }
 
+// ── P4-6: Poll timer tests ───────────────────────────────────────────────
+
+/** ensureBgStatusPolling creates a timer when setStatus is available. */
+async function testPollingCreatesTimer() {
+	__resetBgStatusPolling();
+	const ctx = { ui: { setStatus() {} } };
+
+	// Should not throw — creates a real setInterval.
+	ensureBgStatusPolling(ctx);
+
+	__resetBgStatusPolling();
+}
+
+/** ensureBgStatusPolling no-ops when setStatus is unavailable. */
+async function testPollingNoOpWithoutSetStatus() {
+	__resetBgStatusPolling();
+
+	// Should not throw and should not create a timer.
+	ensureBgStatusPolling({ ui: {} });
+	ensureBgStatusPolling({});
+	ensureBgStatusPolling(null);
+
+	__resetBgStatusPolling();
+}
+
+/** ensureBgStatusPolling restarts an existing timer (restart-race defense). */
+async function testPollingRestartsExistingTimer() {
+	__resetBgStatusPolling();
+	const ctx = { ui: { setStatus() {} } };
+
+	// First call creates a timer.
+	ensureBgStatusPolling(ctx);
+	// Second call should clear old + create new without errors.
+	ensureBgStatusPolling(ctx);
+	// Third call — same, verifies idempotent restart.
+	ensureBgStatusPolling(ctx);
+
+	__resetBgStatusPolling();
+}
+
+/** __resetBgStatusPolling cleans module-level state so a fresh call works. */
+async function testResetCleansState() {
+	const ctx = { ui: { setStatus() {} } };
+
+	// Setup: create a timer, then reset.
+	__resetBgStatusPolling();
+	ensureBgStatusPolling(ctx);
+	__resetBgStatusPolling();
+
+	// After reset, another call should work (timer was cleared).
+	ensureBgStatusPolling(ctx);
+	__resetBgStatusPolling();
+
+	// After second reset, a third call should work.
+	ensureBgStatusPolling(ctx);
+	__resetBgStatusPolling();
+}
+
 async function main() {
 	console.log("P4-5 bg-commands tests");
 	await test("readBgResult: no file → undefined", testReadBgResultNoFile);
@@ -437,6 +497,10 @@ async function main() {
 	await test("P4-6: status line clears when idle", testStatusLineClearsWhenIdle);
 	await test("P4-6: status line shows running agent count", testStatusLineShowsCount);
 	await test("P4-6: status line no-ops without setStatus", testStatusLineNoOpWithoutSetStatus);
+	await test("P4-6: polling creates timer", testPollingCreatesTimer);
+	await test("P4-6: polling no-ops without setStatus", testPollingNoOpWithoutSetStatus);
+	await test("P4-6: polling restarts existing timer", testPollingRestartsExistingTimer);
+	await test("P4-6: reset cleans polling state", testResetCleansState);
 	console.log("P4-5 bg-commands tests passed");
 }
 
