@@ -246,7 +246,7 @@ export default function agentsExtension(pi: ExtensionAPI) {
 				return;
 			}
 			if (parsed.action === "bg-status") {
-				await handleBgStatus(ctx, diagnostics);
+				await handleBgStatus(ctx);
 				return;
 			}
 			if (parsed.action === "bg-stop") {
@@ -488,6 +488,12 @@ async function handleProfileUnregister(target: string, ctx: AgentsContext, diagn
 
 // ── P4-5: Background agent commands ─────────────────────────────────────
 
+/** Extract the first whitespace-delimited token from a subcommand's rest args
+ *  to isolate a runId. Returns empty string if no token is present. */
+function extractRunId(args: string): string {
+	return (args ?? "").trim().split(/\s+/)[0] || "";
+}
+
 /** /agents bg <agent> <task> — preflight + launch a background agent. */
 async function handleBgCommand(
 	args: string,
@@ -559,14 +565,17 @@ async function handleBgStatus(ctx: AgentsContext): Promise<void> {
 
 	const lines: string[] = [];
 	const backend = getBgTerminalBackend();
-	let liveWindowIds: string[] | undefined;
+	let liveRunIds: string[] | undefined;
 	if (backend) {
-		try { liveWindowIds = (await backend.list()).map(function _a(e) { return e.windowId; }); } catch { /* best-effort */ }
+		// Collect runIds from backend entries (TermBgWindowEntry.runId), not
+		// opaque windowIds.  windowId is a backend handle that may differ from
+		// the bg-state runId; runId is the correlation key.
+		try { liveRunIds = (await backend.list()).filter(function _a(e) { return e.runId; }).map(function _b(e) { return e.runId!; }); } catch { /* best-effort */ }
 	}
 
 	for (const run of runs) {
 		const elapsed = run.createdAtMs ? Math.floor((Date.now() - run.createdAtMs) / 1000) : 0;
-		const alive = liveWindowIds ? liveWindowIds.includes(run.runId) : undefined;
+		const alive = liveRunIds ? liveRunIds.includes(run.runId) : undefined;
 		const statusTag = alive === false ? "(stale)" : run.status;
 		lines.push(`  ${run.runId.slice(0, 16)}  ${statusTag}  ${formatElapsed(elapsed)}  ${run.done ? "done" : "active"}`);
 	}
@@ -575,7 +584,8 @@ async function handleBgStatus(ctx: AgentsContext): Promise<void> {
 }
 
 /** /agents bg-stop <runId> — kill a background agent. */
-async function handleBgStop(runId: string, ctx: AgentsContext): Promise<void> {
+async function handleBgStop(args: string, ctx: AgentsContext): Promise<void> {
+	const runId = extractRunId(args);
 	if (!runId) {
 		ctx.ui.notify("Usage: /agents bg-stop <runId>", "warning");
 		return;
@@ -594,8 +604,9 @@ async function handleBgStop(runId: string, ctx: AgentsContext): Promise<void> {
 	ctx.ui.notify(`Stop requested for ${runId.slice(0, 16)}….`, "info");
 }
 
-/** /agents bg-result <runId> — show redacted result for a completed run. */
-async function handleBgResult(runId: string, ctx: AgentsContext): Promise<void> {
+/** /agents bg-result <runId> — show result for a completed/failed/stopped run. */
+async function handleBgResult(args: string, ctx: AgentsContext): Promise<void> {
+	const runId = extractRunId(args);
 	if (!runId) {
 		ctx.ui.notify("Usage: /agents bg-result <runId>", "warning");
 		return;
@@ -616,18 +627,25 @@ async function handleBgResult(runId: string, ctx: AgentsContext): Promise<void> 
 	if (result.finishedAt) lines.push(`  Finished: ${result.finishedAt}`);
 	if (result.error) lines.push(`  Error: ${result.error}`);
 	if (result.resultText) {
-		const preview = result.resultText.length > 2000
-			? result.resultText.slice(0, 2000) + "\n\n… [truncated, use /agents bg-open <id> to see full output]"
+		const truncated = result.resultText.length > 2000;
+		const preview = truncated
+			? result.resultText.slice(0, 2000)
 			: result.resultText;
-		lines.push(`  Result:`);
-		lines.push(preview);
+		lines.push(`  Result (${result.resultText.length} chars${truncated ? ", truncated" : ""}):`);
+		for (const l of preview.split("\n")) lines.push(`    ${l}`);
+		if (truncated) lines.push(`    … [use /agents bg-open <id> to see full output]`);
 	}
 
 	ctx.ui.notify(lines.join("\n"), "info");
 }
 
-/** /agents bg-open <runId> — switch to the terminal window for a bg run. */
-async function handleBgOpen(runId: string, ctx: AgentsContext): Promise<void> {
+/** /agents bg-open <runId> — check whether a background agent window is alive.
+ *
+ *  P4-5 current: liveness check only.  Window focus/activation requires a
+ *  terminal-backend focus() method which is deferred to a post-P4-7 backend
+ *  enhancement (see P5_PLUGGABLE_TERMINAL_BACKEND.md). */
+async function handleBgOpen(args: string, ctx: AgentsContext): Promise<void> {
+	const runId = extractRunId(args);
 	if (!runId) {
 		ctx.ui.notify("Usage: /agents bg-open <runId>", "warning");
 		return;
@@ -635,17 +653,10 @@ async function handleBgOpen(runId: string, ctx: AgentsContext): Promise<void> {
 
 	const backend = getBgTerminalBackend();
 	if (!backend) {
-		ctx.ui.notify("No terminal backend installed. Cannot open window.", "warning");
+		ctx.ui.notify("No terminal backend installed. Cannot check window.", "warning");
 		return;
 	}
 
-	const killResult = await backend.kill(""); // not kill — just testing window existence
-	if (killResult.status === "ok") {
-		ctx.ui.notify(`Window for ${runId.slice(0, 16)}… is alive but no focus method available.`, "info");
-		return;
-	}
-
-	// Best-effort: try isAlive to confirm the window exists.
 	const alive = await backend.isAlive(runId);
 	if (!alive) {
 		ctx.ui.notify(`No live terminal window for ${runId.slice(0, 16)}….`, "warning");
@@ -658,5 +669,5 @@ async function handleBgOpen(runId: string, ctx: AgentsContext): Promise<void> {
 function formatElapsed(seconds: number): string {
 	if (seconds < 60) return `${seconds}s`;
 	if (seconds < 3600) return `${Math.floor(seconds / 60)}m${seconds % 60}s`;
-	return `${Math.floor(seconds / 3600)}h${Math.floor((seconds % 3600) / 60)}m`;
+	return `${Math.floor(seconds / 3600)}h${Math.floor((seconds % 3600) / 60)}m${seconds % 60}s`;
 }
