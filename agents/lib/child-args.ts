@@ -100,7 +100,14 @@ export function getPiInvocation(args: string[], piCommandOverride?: string, env?
 	const currentScript = env?.argv1 ?? process.argv[1];
 	const execPath = env?.execPath ?? process.execPath;
 	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
-	if (currentScript && !isBunVirtualScript && existsSync(currentScript)) return { command: execPath, args: [currentScript, ...args] };
+	// Backstop (P5-fix): only re-invoke the current script as pi when it actually
+	// IS the pi entrypoint (basename "pi"). Without this, a non-pi parent process
+	// — e.g. the detached bg-worker.ts — would re-run ITSELF with pi's flags and
+	// fail. Non-pi parents fall through to DEFAULT_PI_COMMAND ("pi" on PATH). The
+	// bg-worker normally passes an explicit piCommand and never reaches here; this
+	// guard protects any other non-pi caller of the child runner.
+	const scriptBase = currentScript ? path.basename(currentScript).replace(/\.(c|m)?[jt]s$/i, "").toLowerCase() : "";
+	if (currentScript && !isBunVirtualScript && scriptBase === "pi" && existsSync(currentScript)) return { command: execPath, args: [currentScript, ...args] };
 	const execName = path.basename(execPath).toLowerCase();
 	if (!/^(node|bun)(\.exe)?$/.test(execName)) return { command: execPath, args };
 	return { command: DEFAULT_PI_COMMAND, args };
