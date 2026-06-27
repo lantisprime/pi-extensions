@@ -92,6 +92,30 @@ async function testTailKeepsLastNLines() {
 	__resetBackgroundRuns();
 }
 
+// Shared activity-line budget: concurrent runs split TAIL_SLOTS so the widget height stays bounded.
+async function testTailBudgetSplitAcrossConcurrentRuns() {
+	__resetBackgroundRuns();
+	const ui = makeUI();
+	const timer = makeFakeTimer();
+	let hA, hB;
+	const dA = deferred();
+	const dB = deferred();
+	startBackgroundRun({ ui, label: "run:a", run: (h) => { hA = h; return dA.promise; }, now: () => 0, setInterval: timer.setInterval.bind(timer), clearInterval: timer.clearInterval.bind(timer) });
+	startBackgroundRun({ ui, label: "run:b", run: (h) => { hB = h; return dB.promise; }, now: () => 0, setInterval: timer.setInterval.bind(timer), clearInterval: timer.clearInterval.bind(timer) });
+	await flush(); // let both run() bodies execute so handles are set
+	const tool = (name) => JSON.stringify({ toolName: name });
+	for (let i = 0; i < TAIL_SLOTS; i++) { hA.onProgress(tool(`a${i}`)); hB.onProgress(tool(`b${i}`)); }
+	timer.tick(); // render the latest tails
+	const perRun = Math.max(1, Math.floor(TAIL_SLOTS / 2));
+	assert.equal(tailLines(ui.lastWidget()).length, perRun * 2, `two concurrent runs share the budget: ${perRun} activity rows each`);
+	const labelRows = ui.lastWidget().content.filter((l) => !l.startsWith("   "));
+	assert.equal(labelRows.length, 2, "one label row per concurrent run");
+	dA.resolve({ message: "ok", level: "info" });
+	dB.resolve({ message: "ok", level: "info" });
+	await flush();
+	__resetBackgroundRuns();
+}
+
 // REQ-7 / N4: sanitize strips C0, DEL, and C1 (\x9b) controls and truncates.
 async function testProgressLineSanitized() {
 	const rawC0 = "\x1b[2Jhello";
@@ -227,6 +251,7 @@ async function main() {
 	await testPhaseSpinnerAnimatesThenClears();
 	await testSpinnerFrameAdvances();
 	await testTailKeepsLastNLines();
+	await testTailBudgetSplitAcrossConcurrentRuns();
 	await testProgressLineSanitized();
 	await testWidgetClearedAndNotifyOnSettle();
 	await testWidgetClearedOnRejectPath();
