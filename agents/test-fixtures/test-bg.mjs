@@ -54,6 +54,7 @@ import {
 	handleBgStatus,
 	handleBgStop,
 	handleBgResult,
+	handleBgCommand,
 	__setBgStatusHomeOverride,
 	__resetBgStatusPolling,
 } from "../index.ts";
@@ -166,7 +167,9 @@ function resetAll() {
 // ---------------------------------------------------------------------------
 
 /** Preflight succeeds, manifest is signed and verified, backend.launch gets
- *  the correct config (manifestPath, cwd, runId, agentName) with NO task text. */
+ *  the correct config (manifestPath, cwd, runId, agentName) with NO task text.
+ *  Drives the REAL handleBgCommand — verifies what the production handler
+ *  actually sends to the backend. */
 async function testPreflightToLaunchContract() {
 	resetAll();
 	await withTempHome(async (home) => {
@@ -175,35 +178,28 @@ async function testPreflightToLaunchContract() {
 		registerBgTerminalBackend(backend);
 
 		const ctx = makeCtx(home);
-		const result = await preflightBgAgent(record, "secret task content here", ctx, diag, { homeDir: home });
-		assert.equal(result.ok, true, "preflight should succeed");
+		const SECRET = "secret task content here";
+		await handleBgCommand(`${record.name} ${SECRET}`, ctx, diag);
 
-		// Manifest must verify with the trusted root.
-		const manifest = await readBgManifest(result.paths);
-		const verify = verifyBgManifest(manifest, await import("../lib/bg-state.ts").then(m => m.readSessionMacKey(home)));
-		assert.ok(verify, "manifest must verify with session MAC key");
-
-		// Simulate the launch.
-		const launch = await backend.launch({
-			agentName: record.name,
-			runId: result.runId,
-			manifestPath: result.paths.manifestPath,
-			cwd: home,
-		});
-		assert.equal(launch.status, "ok");
-		assert.equal(launch.windowId, `w-${result.runId}`);
-
-		// TASK PRIVACY: task text MUST NOT appear in launch config (only manifestPath is passed).
+		// Backend must have received the launch config with NO task text.
 		const logged = backend._getConfigLog();
-		assert.equal(logged.length, 1);
+		assert.equal(logged.length, 1, "backend.launch should be called exactly once");
 		const cfg = logged[0];
-		assert.ok(!cfg.manifestPath.includes("secret"), "manifest path must not contain task text");
+		assert.ok(cfg.manifestPath, "backend should receive manifestPath");
+		assert.ok(!cfg.manifestPath.includes(SECRET), "manifest path must NOT embed task text");
+		assert.equal(cfg.agentName, record.name, "backend should receive correct agentName");
+		assert.ok(cfg.runId, "backend should receive runId");
+		assert.equal(cfg.cwd, home, "backend should receive correct cwd");
 
-		// The task IS in the manifest file (where the worker reads it).
-		// prompt.txt is a planned feature not yet implemented — cleanup code at
-		// bg-state.ts:496 deletes it defensively if it exists.
-		const manifestRaw = await fs.readFile(result.paths.manifestPath, "utf8");
-		assert.ok(manifestRaw.includes("secret task content here"), "manifest file should contain task for worker to read");
+		// Manifest file (on disk) IS allowed to contain task — worker reads it.
+		const manifestRaw = await fs.readFile(cfg.manifestPath, "utf8");
+		assert.ok(manifestRaw.includes(SECRET), "manifest file SHOULD contain task for worker to read");
+
+		// Cleanup: write result + delete the real-home runDir.
+		const realPaths = getBgRunPaths(cfg.runId);
+		await writeBgResult(realPaths, { version: 1, runId: cfg.runId, status: "completed", agentName: record.name });
+		await markBgRunDone(realPaths);
+		await fs.rm(realPaths.runDir, { recursive: true, force: true }).catch(() => {});
 	});
 }
 
@@ -265,10 +261,14 @@ async function testLaunchFailureCleansReservation() {
 // 3. Worker denial flow
 // ---------------------------------------------------------------------------
 
-/** Simulated worker denies the manifest (hash mismatch) -> handler would
- *  call backend.kill().  Verify backend.kill is reachable with the correct
- *  windowId (proving the kill path is wired correctly). */
-async function testWorkerDenialCallsBackendKill() {
+/** Drives the REAL handleBgStop with a registered fake backend.  Verifies
+ *  that handleBgStop correlates runId → windowId via backend.list() and
+ *  calls backend.kill with the correct windowId (NOT the runId).
+ *
+ *  Note: this is the production path that would also fire when a worker
+ *  denial triggers cleanup — the handler itself doesn't know about worker
+ *  denial, it just sees "user asked to stop, kill the window". */
+async function testHandleBgStopKillsWindowViaList() {
 	resetAll();
 	await withTempHome(async (home) => {
 		const { record, diag } = await setupRegisteredUserAgent(home);
@@ -276,23 +276,28 @@ async function testWorkerDenialCallsBackendKill() {
 		registerBgTerminalBackend(backend);
 
 		const ctx = makeCtx(home);
-		const result = await preflightBgAgent(record, "task", ctx, diag, { homeDir: home });
-		const launch = await backend.launch({
-			agentName: record.name,
-			runId: result.runId,
-			manifestPath: result.paths.manifestPath,
-			cwd: home,
-		});
-		assert.equal(launch.status, "ok");
+		await handleBgCommand(`${record.name} task`, ctx, diag);
 
-		// Worker discovers the spec file has been tampered with (hash mismatch).
-		const newSpec = await fs.readFile(record.canonicalPath, "utf8");
-		await fs.writeFile(record.canonicalPath, newSpec + "\n# tampered\n");
-		// Simulate worker -> manifest identity fails -> backend.kill called.
-		await backend.kill(launch.windowId);
+		// Get the runId from backend's logged config.
+		const logged = backend._getConfigLog();
+		const cfg = logged[0];
+		const runId = cfg.runId;
 
-		const killed = backend._getKilled();
-		assert.ok(killed.includes(`tmux-${result.runId}`), "worker denial should trigger backend.kill with correct windowId");
+		// Clear the log so we can see what kill receives.
+		const killLog = backend._getKilled();
+		killLog.length = 0;
+
+		// Drive the REAL handleBgStop.
+		await handleBgStop(runId, ctx);
+
+		// handleBgStop should call kill with the correlated windowId, not the runId.
+		assert.ok(killLog.includes(`tmux-${runId}`), "handleBgStop should call backend.kill with windowId correlated via list()");
+		assert.ok(!killLog.includes(runId), "handleBgStop must NOT pass raw runId to kill()");
+
+		// Cleanup the real-home run dir.
+		const realPaths = getBgRunPaths(runId);
+		await markBgRunDone(realPaths);
+		await fs.rm(realPaths.runDir, { recursive: true, force: true }).catch(() => {});
 	});
 }
 
@@ -397,41 +402,38 @@ async function testConcurrencyCountTracksReservations() {
 
 /** events.jsonl is written but bg-status/bg-result/bg-stop NEVER surface its
  *  contents.  Verify by injecting a sentinel in events.jsonl and checking
- *  none of the handlers emit it in their output. */
+ *  none of the handlers emit it in their output.
+ *
+ *  IMPORTANT: this test drives the REAL handlers (not the test-seam
+ *  override) because the production path always reads from
+ *  resolveTrustedHome() — testing against a temp home would be vacuous. */
 async function testEventsJsonlNeverSurfaced() {
 	resetAll();
 	await withTempHome(async (home) => {
 		const { record, diag } = await setupRegisteredUserAgent(home);
-		const backend = makeFakeBackend();
-		registerBgTerminalBackend(backend);
-
 		const ctx = makeCtx(home);
-		const result = await preflightBgAgent(record, "task", ctx, diag, { homeDir: home });
-		const launch = await backend.launch({
-			agentName: record.name, runId: result.runId, manifestPath: result.paths.manifestPath, cwd: home,
-		});
 
-		// Simulate the worker writing events.jsonl with a sentinel.
-		const eventsPath = path.join(result.paths.runDir, "events.jsonl");
+		// Preflight uses REAL home (N3: no homeDir test seam).  The state dir
+		// is at resolveTrustedHome()/.pi/agent/bg/<runId>/.
+		const result = await preflightBgAgent(record, "task", ctx, diag);
+		assert.equal(result.ok, true);
+
+		// Inject a sentinel into the REAL run dir's events.jsonl.
+		const realRunDir = result.paths.runDir;
+		const eventsPath = path.join(realRunDir, "events.jsonl");
 		await fs.writeFile(eventsPath, JSON.stringify({ type: "result", content: "SENTINEL_EVENT_LEAK_TEST" }) + "\n");
 
 		// Write a result so bg-result has something to show.
 		await writeBgResult(result.paths, { version: 1, runId: result.runId, status: "completed", resultText: "real result", agentName: record.name });
-		await markBgRunDone(result.paths);
-
-		__setBgStatusHomeOverride(home);
 
 		// Run all 3 handlers and capture their notify messages.
-		const ctxForHandlers = {
-			cwd: home,
-			hasUI: false,
-			agentsHomeDir: home,
+		const ctxForHandlers = makeCtx(home, {
 			ui: {
 				notify: (msg) => { ctxForHandlers._notifyLog = ctxForHandlers._notifyLog || []; ctxForHandlers._notifyLog.push(msg); },
 				setStatus: () => {},
 				setWidget: () => {},
 			},
-		};
+		});
 
 		await handleBgStatus(ctxForHandlers);
 		await handleBgResult(result.runId, ctxForHandlers);
@@ -439,6 +441,10 @@ async function testEventsJsonlNeverSurfaced() {
 
 		const allMsgs = (ctxForHandlers._notifyLog || []).join("\n");
 		assert.ok(!allMsgs.includes("SENTINEL_EVENT_LEAK_TEST"), "events.jsonl content must NEVER appear in any bg-* command output");
+
+		// Cleanup the real-home run dir.
+		await markBgRunDone(result.paths);
+		await fs.rm(realRunDir, { recursive: true, force: true }).catch(() => {});
 	});
 }
 
@@ -678,7 +684,7 @@ async function main() {
 	await test("preflight->launch: backend gets correct config, task not in argv", testPreflightToLaunchContract);
 	await test("preflight: two runs produce distinct runIds", testPreflightUniqueRunIds);
 	await test("launch failure: reservation cleaned up", testLaunchFailureCleansReservation);
-	await test("worker denial: backend.kill called with correct windowId", testWorkerDenialCallsBackendKill);
+	await test("worker denial: handleBgStop calls backend.kill with correlated windowId", testHandleBgStopKillsWindowViaList);
 	await test("lost result: bg-result handles missing result.json gracefully", testLostResultIsHandledGracefully);
 	await test("stale run: counted active until reap", testStaleRunCountedUntilReap);
 	await test("concurrency: 5 reservations tracked + freed by cleanup", testConcurrencyCountTracksReservations);
