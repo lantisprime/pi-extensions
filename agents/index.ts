@@ -605,6 +605,9 @@ export async function handleBgStatus(ctx: AgentsContext): Promise<void> {
 	const homeDir = resolveTrustedHome();
 	const runs = await listBgRuns(homeDir);
 
+	// P4-6: refresh the status line — a run may have completed since last update.
+	await updateBgStatusLine(ctx);
+
 	if (runs.length === 0) {
 		ctx.ui.notify("No background agent runs.", "info");
 		return;
@@ -682,6 +685,10 @@ export async function handleBgResult(args: string, ctx: AgentsContext): Promise<
 		return;
 	}
 	const result = await readBgResult(paths);
+
+	// P4-6: refresh the status line — the run may have completed since last update.
+	await updateBgStatusLine(ctx);
+
 	if (!result) {
 		ctx.ui.notify(`No result found for run ${runId.slice(0, 16)}…. (Still running or invalid runId?)`, "warning");
 		return;
