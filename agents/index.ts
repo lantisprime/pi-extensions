@@ -102,8 +102,8 @@ export default function agentsExtension(pi: ExtensionAPI) {
 		// a completed run's findings silently.
 		attachDeliverResult(pi, ctx);
 		// P4-6: show current background agent count in the footer on session start.
-		await updateBgStatusLine(ctx);
-		ensureBgStatusPolling(ctx);
+		// Only start polling if there are active runs — avoid a throwaway timer on idle sessions.
+		if (await updateBgStatusLine(ctx) > 0) ensureBgStatusPolling(ctx);
 		ctx.profileLibrary = profileLibrary; // start with built-ins
 		// Discover user/project profiles and rebuild library.
 		// os.homedir() is intentional here (NOT resolveTrustedHome()): profile discovery
@@ -656,7 +656,8 @@ export async function handleBgStatus(ctx: AgentsContext): Promise<void> {
 	const runs = await listBgRuns(homeDir);
 
 	// P4-6: refresh the status line — a run may have completed since last update.
-	await updateBgStatusLine(ctx);
+	// Re-arm polling if there are still active runs (the poll may have self-stopped at 0).
+	if (await updateBgStatusLine(ctx) > 0) ensureBgStatusPolling(ctx);
 
 	if (runs.length === 0) {
 		ctx.ui.notify("No background agent runs.", "info");
@@ -711,7 +712,8 @@ export async function handleBgStop(args: string, ctx: AgentsContext): Promise<vo
 
 	// Reap via bg-state regardless of backend result.
 	await reapStaleBgRuns(resolveTrustedHome());
-	await updateBgStatusLine(ctx);
+	// Re-arm polling if there are still active runs (e.g. a multi-agent session).
+	if (await updateBgStatusLine(ctx) > 0) ensureBgStatusPolling(ctx);
 	ctx.ui.notify(`Stop requested for ${runId.slice(0, 16)}….`, "info");
 }
 
@@ -737,7 +739,8 @@ export async function handleBgResult(args: string, ctx: AgentsContext): Promise<
 	const result = await readBgResult(paths);
 
 	// P4-6: refresh the status line — the run may have completed since last update.
-	await updateBgStatusLine(ctx);
+	// Re-arm polling if there are still active runs.
+	if (await updateBgStatusLine(ctx) > 0) ensureBgStatusPolling(ctx);
 
 	if (!result) {
 		ctx.ui.notify(`No result found for run ${runId.slice(0, 16)}…. (Still running or invalid runId?)`, "warning");
