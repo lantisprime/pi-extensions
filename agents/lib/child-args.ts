@@ -100,12 +100,17 @@ export function getPiInvocation(args: string[], piCommandOverride?: string, env?
 	const currentScript = env?.argv1 ?? process.argv[1];
 	const execPath = env?.execPath ?? process.execPath;
 	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
-	// Backstop (P5-fix): only re-invoke the current script as pi when it actually
-	// IS the pi entrypoint (basename "pi"). Without this, a non-pi parent process
-	// — e.g. the detached bg-worker.ts — would re-run ITSELF with pi's flags and
-	// fail. Non-pi parents fall through to DEFAULT_PI_COMMAND ("pi" on PATH). The
-	// bg-worker normally passes an explicit piCommand and never reaches here; this
-	// guard protects any other non-pi caller of the child runner.
+	// P5-fix: re-invoke the current script as pi only when its basename is "pi"
+	// (the installed entrypoint — `which pi` resolves to .../bin/pi). The detached
+	// bg-worker REACHES here with argv[1] = bg-worker.{ts,mjs,js} and relies on
+	// this guard: without it the worker would re-run ITSELF as pi
+	// (`node bg-worker.ts --mode json … -p`), read a flag as the manifest path,
+	// and exit 1 — so the agent never runs. Any non-"pi" basename (the worker, a
+	// test harness, any tool that calls the child runner) falls through to
+	// DEFAULT_PI_COMMAND ("pi" on PATH). Tradeoff: a pi run from source as
+	// `node <entry>.js` (basename ≠ "pi") with no `pi` on PATH would also fall
+	// through and fail to spawn — accepted, because re-invoking argv[1] for the
+	// worker/tools is the worse failure and an installed pi is always on PATH.
 	const scriptBase = currentScript ? path.basename(currentScript).replace(/\.(c|m)?[jt]s$/i, "").toLowerCase() : "";
 	if (currentScript && !isBunVirtualScript && scriptBase === "pi" && existsSync(currentScript)) return { command: execPath, args: [currentScript, ...args] };
 	const execName = path.basename(execPath).toLowerCase();

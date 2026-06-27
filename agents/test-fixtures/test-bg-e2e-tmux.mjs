@@ -41,6 +41,8 @@ async function main() {
 	if (!tmuxPath) skip("tmux not on PATH");
 	const piPath = await resolveOnPath("pi");
 	if (!piPath) skip("pi not on PATH");
+	// Liveness: a fundamentally broken pi → skip (not a bg-launch regression).
+	try { await exec("pi", ["--version"]); } catch { skip("pi --version failed; pi not runnable in this environment"); }
 
 	const reg = await import("../lib/registration.ts");
 	const diagMod = await import("../lib/diagnostics.ts");
