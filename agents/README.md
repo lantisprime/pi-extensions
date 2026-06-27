@@ -163,14 +163,57 @@ these commands fall back to the original blocking behavior.
 /agents profiles unregister <name>   Remove a registered profile
 ```
 
-Profiles carry model/capability hints (`model`, `thinking`) and are resolved with
-agent spec precedence (higher trumps lower): user > built-in, project > user. Three built-in profiles ship
-with the extension: `fast-local`, `reasoning-deep`, `adversarial-review`.
+A **model profile** is a reusable preset of model/capability hints (`model`, `thinking`) you assign to
+an agent so you don't repeat them per spec.
 
-A profile that sets neither `model` nor `thinking` has no effect; `/agents
-profiles` and `/agents inspect` label it `effect: none (Pi default)`. Built-in
-agents started through `/agents do` apply their role-default profile, and a
-no-op default is skipped.
+**Sources & file format.** Profiles come from three places, discovered at session start:
+
+| Source | Location | Trust |
+|---|---|---|
+| built-in | code-owned (`lib/profiles.ts`) | always available |
+| user | `~/.pi/agent/profiles/*.md` | available once registered |
+| project | `<repo>/.pi/profiles/*.md` | **requires project trust + registration** |
+
+A profile file is Markdown frontmatter:
+
+```markdown
+---
+name: codex-review
+model: openai-codex/gpt-5.5
+thinking: high
+purpose: Adversarial review on a different provider
+---
+```
+
+**Precedence (important): `built-in > user > project`.** If two sources define the **same name**, the
+higher one wins and the lower is **shadowed** (reported as a `profile-name-shadowed` warning in
+`/agents profiles`). **Do not name a custom profile after a built-in** (`fast-local`,
+`reasoning-deep`, `adversarial-review`) — it will be silently shadowed by the built-in and never take
+effect. Use a unique name and assign it explicitly.
+
+**Built-in profiles:**
+
+| Profile | `model` | `thinking` | Default for role |
+|---|---|---|---|
+| `fast-local` | — | — | `scout` |
+| `reasoning-deep` | — | `high` | `planner` |
+| `adversarial-review` | — | `high` | `reviewer` |
+
+(None pin a `model` — they only set `thinking` and signal intent. To pin an actual model, define your
+own profile and assign it.)
+
+**Assigning a profile to an agent** (any one of):
+
+1. **Registered agent spec** — `profile: <name>` in the spec's frontmatter (applies on every run).
+2. **Per run** — `/agents run <agent> --profile <name> <task>` (must come right after the agent name).
+3. **Built-in role defaults** — `scout→fast-local`, `planner→reasoning-deep`, `reviewer→adversarial-review`,
+   applied automatically on the `/agents do` and natural-language-gate paths (not on bare `/agents run`).
+
+A profile that sets neither `model` nor `thinking` has no effect; `/agents profiles` and `/agents
+inspect` label it `effect: none (Pi default)`, and a no-op role default is skipped. When a spec sets
+both `model` and `profile`, the profile's model wins (profile-as-authority). Project profiles only
+resolve when project trust is active and the file's raw-byte hash still matches its registration
+(fail-closed) — see [Registration](#registration) and `SECURITY_MODEL.md`.
 
 ### Disambiguation
 

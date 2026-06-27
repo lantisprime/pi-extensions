@@ -5,13 +5,14 @@ import path from "node:path";
 import {
 	assembleReviewBundle,
 	resolveReviewBase,
+	resolveDiffTarget,
 	writeReviewBundle,
 	readContainedReferencedDoc,
 	isProviderId,
 	ALL_PROVIDER_IDS,
 	DEFAULT_BUNDLE_CAPS,
 } from "../lib/context-providers/review-context.ts";
-import { isSafeGitRef, assertSafeGitRef, defaultGitRunner } from "../lib/context-providers/git-runner.ts";
+import { isSafeGitRef, assertSafeGitRef, parseRange, defaultGitRunner } from "../lib/context-providers/git-runner.ts";
 
 // ── Fake git runner ──────────────────────────────────────────────────────
 // `routes` is an array of [predicate(args), GitResult]. First match wins; default ok:false.
@@ -575,6 +576,184 @@ async function dispatch_childCwdIsProjectRootAllPaths() {
 	} finally { await fs.rm(rawTmpDir, { recursive: true, force: true }).catch(() => {}); }
 }
 
+// ── P11: review-target flags + header clarity ───────────────────────────────
+const HEAD_SHA = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+const sinkHasArg = (sink, tok) => sink.some((c) => c.args.includes(tok));
+const sinkHasSubstr = (sink, tok) => sink.some((c) => c.args.some((a) => typeof a === "string" && a.includes(tok)));
+
+// ── Group A: range parsing & semantics ──────────────────────────────────────
+function p11_A2_twodot_positive() {
+	const r = parseRange("a..b");
+	assert.equal(r.ok, true); assert.equal(r.left, "a"); assert.equal(r.right, "b"); assert.equal(r.op, "..");
+}
+function p11_A3_threedot_positive() {
+	const r = parseRange("a...b");
+	assert.equal(r.ok, true); assert.equal(r.op, "...", "... matched longest-first, not a + .b");
+	assert.equal(r.right, "b");
+}
+function p11_A4_open_right() {
+	const r = parseRange("a..");
+	assert.equal(r.ok, true); assert.equal(r.right, "HEAD", "open right defaults to HEAD"); assert.equal(r.op, "..");
+}
+function p11_A5_empty_left() { assert.equal(parseRange("..b").ok, false); assert.match(parseRange("..b").reason, /empty left/); }
+function p11_A6_both_empty() { assert.equal(parseRange("..").ok, false); assert.match(parseRange("..").reason, /empty range/); }
+function p11_A7_too_many() { assert.equal(parseRange("a..b..c").ok, false); assert.match(parseRange("a..b..c").reason, /more than one/); }
+function p11_A_no_operator() { assert.equal(parseRange("abc").ok, false); assert.match(parseRange("abc").reason, /missing/); }
+
+// A1/A3: range mode issues a THREE-dot diff but a two-dot (for "..") / three-dot (for "...") log —
+// the diff & log describe the same change set (diverged-coherence), and ".." ≠ "..." invocations.
+async function p11_A1_diff_log_coherent() {
+	const sink = [];
+	const routes = [
+		[argsAre("rev-parse", "--show-toplevel"), { stdout: "/repo\n" }],
+		[argsAre("rev-parse", "--abbrev-ref", "HEAD"), { stdout: "feature\n" }],
+		[(a) => a[0] === "rev-parse" && a[1] === "--verify", { stdout: "ok\n" }],
+		[argsAre("diff", "--numstat", "main...feature"), { stdout: "1\t0\tc.txt\n" }],
+		[(a) => a[0] === "diff" && a[1] === "main...feature" && a[2] === "--", { stdout: "diff --git\n+x\n" }],
+		[argsAre("log", "main..feature", "--max-count=50", "--format=%h %s"), { stdout: "c3 add c\n" }],
+	];
+	const { markdown } = await assembleReviewBundle(ALL_PROVIDER_IDS, { git: makeGit(routes, sink), cwd: "/repo", reviewTarget: { kind: "range", spec: "main..feature" } });
+	// numstat used three-dot; log used two-dot.
+	assert.ok(sink.some((c) => c.args[0] === "diff" && c.args.includes("main...feature")), "diff is three-dot");
+	assert.ok(sink.some((c) => c.args[0] === "log" && c.args.includes("main..feature")), "log is two-dot");
+	assert.match(markdown, /## Branch commits/);
+	assert.match(markdown, /add c/);
+	// A3: three-dot INPUT produces a three-dot log range (different invocation than "..").
+	const t3 = await resolveDiffTarget(makeGit([[(a) => a[0] === "rev-parse", { stdout: "x\n" }]]), "/repo", ["main"], { kind: "range", spec: "main...feature" });
+	assert.equal(t3.logRange, "main...feature", "... input → three-dot log range");
+	assert.deepEqual(t3.diffArgs, ["main...feature"], "diff is always three-dot");
+}
+
+// ── Group B: base==HEAD detection (resolved SHAs) ───────────────────────────
+function baseRoutes(branch, baseSha, headSha) {
+	return [
+		[argsAre("rev-parse", "--abbrev-ref", "HEAD"), { stdout: `${branch}\n` }],
+		[(a) => a[0] === "rev-parse" && a[1] === "HEAD" && a.length === 2, { stdout: `${headSha}\n` }],
+		[(a) => a[0] === "rev-parse" && a.length === 2 && a[1] !== "HEAD", { stdout: `${baseSha}\n` }],
+	];
+}
+async function p11_B1_base_name_on_main() {
+	const t = await resolveDiffTarget(makeGit(baseRoutes("main", HEAD_SHA, HEAD_SHA)), "/repo", ["main"], { kind: "base", ref: "main" });
+	assert.equal(t.mode, "base");
+	assert.match(t.scopeNote, /resolves to HEAD|UNCOMMITTED changes only/, "base==HEAD note fires for --base main on main");
+}
+async function p11_B3_base_full_sha() {
+	const t = await resolveDiffTarget(makeGit(baseRoutes("feature", HEAD_SHA, HEAD_SHA)), "/repo", ["main"], { kind: "base", ref: HEAD_SHA });
+	assert.match(t.scopeNote, /resolves to HEAD|UNCOMMITTED/, "full sha of HEAD → note");
+}
+async function p11_B12_normal_base_no_note() {
+	const t = await resolveDiffTarget(makeGit(baseRoutes("feature", "aaaa", "bbbb")), "/repo", ["main"], { kind: "base", ref: "v1.0" });
+	assert.equal(t.scopeNote, null, "distinct base sha → no base==HEAD note");
+	assert.deepEqual(t.diffArgs, ["v1.0"]); assert.equal(t.logRange, "v1.0..HEAD"); assert.equal(t.includeUntracked, true);
+}
+async function p11_B8_default_noorigin_single_note() {
+	// On main, no origin/main, merge-base fails → ONE actionable note, NO legacy degraded (no double note).
+	const t = await resolveDiffTarget(makeGit([[argsAre("rev-parse", "--abbrev-ref", "HEAD"), { stdout: "main\n" }]]), "/repo", ["main", "master"], { kind: "auto" });
+	assert.equal(t.onDefaultBranch, true);
+	assert.match(t.scopeNote, /pass --base|To review a committed branch/, "actionable note present");
+	assert.equal(t.degraded, null, "legacy degraded suppressed on default branch (no double note)");
+}
+async function p11_B10_nonrepo_suppressed() {
+	const t = await resolveDiffTarget(makeGit([]), "/tmp", ["main"], { kind: "auto" });
+	assert.equal(t.onDefaultBranch, false);
+	assert.equal(t.scopeNote, null, "no actionable note in a non-repo");
+	assert.match(t.degraded, /not a git repository|could not resolve/, "legacy degraded wins in non-repo");
+}
+
+// ── Group C: security / option-injection (sink-asserted) ────────────────────
+async function p11_C2_joined_vs_perside() {
+	// "a..-O": joined passes isSafeGitRef, but right side "-O" fails per-side → range IGNORED, no "-O" in argv.
+	assert.equal(isSafeGitRef("a..-O"), true, "joined string passes the ref regex (the trap)");
+	assert.equal(isSafeGitRef("-O"), false, "right side alone is rejected");
+	const sink = [];
+	const routes = [[argsAre("rev-parse", "--show-toplevel"), { stdout: "/repo\n" }], ...healthyRoutes()];
+	const { meta } = await assembleReviewBundle(ALL_PROVIDER_IDS, { git: makeGit(routes, sink), cwd: "/repo", reviewTarget: { kind: "range", spec: "a..-O" } });
+	assert.equal(meta.mode, "auto", "unsafe range fell back to auto");
+	assert.match(meta.scopeNote, /invalid --range/, "fallback explained");
+	assert.ok(!sinkHasSubstr(sink, "-O"), "no git argv token ever contains -O");
+}
+async function p11_C3_base_single_dash() {
+	const sink = [];
+	const routes = [[argsAre("rev-parse", "--show-toplevel"), { stdout: "/repo\n" }], ...healthyRoutes()];
+	const { meta } = await assembleReviewBundle(ALL_PROVIDER_IDS, { git: makeGit(routes, sink), cwd: "/repo", reviewTarget: { kind: "base", ref: "-O/tmp/x" } });
+	assert.equal(meta.mode, "auto");
+	assert.match(meta.scopeNote, /ignored unsafe --base/);
+	assert.ok(!sinkHasArg(sink, "-O/tmp/x"), "unsafe base token never reaches git argv");
+}
+async function p11_C4_base_double_dash() {
+	for (const evil of ["--upload-pack=evil", "--no-index", "--output=/tmp/x"]) {
+		const sink = [];
+		const routes = [[argsAre("rev-parse", "--show-toplevel"), { stdout: "/repo\n" }], ...healthyRoutes()];
+		const { meta } = await assembleReviewBundle(ALL_PROVIDER_IDS, { git: makeGit(routes, sink), cwd: "/repo", reviewTarget: { kind: "base", ref: evil } });
+		assert.equal(meta.mode, "auto", `${evil} → auto`);
+		assert.ok(!sinkHasArg(sink, evil), `${evil} never reaches git argv`);
+	}
+}
+async function p11_C5_C6_shellish_reflog() {
+	for (const evil of ["a;rm", "$(x)", "@{upstream}", "HEAD@{1}"]) {
+		const t = await resolveDiffTarget(makeGit([]), "/repo", ["main"], { kind: "base", ref: evil });
+		assert.equal(t.mode, "auto", `${evil} rejected → auto`);
+	}
+}
+async function p11_C10_logrange_safe() {
+	const t = await resolveDiffTarget(makeGit([[(a) => a[0] === "rev-parse", { stdout: "x\n" }]]), "/repo", ["main"], { kind: "range", spec: "v1.0..v2.0" });
+	assert.ok(t.logRange === null || isSafeGitRef(t.logRange), "logRange is null or isSafeGitRef-true");
+	assert.ok(t.diffArgs.every(isSafeGitRef), "every diffArg is isSafeGitRef-true");
+}
+
+// ── Group G: degraded / empty-review UX ─────────────────────────────────────
+async function p11_G3_range_no_untracked() {
+	const sink = [];
+	const routes = [[argsAre("rev-parse", "--show-toplevel"), { stdout: "/repo\n" }], [argsAre("rev-parse", "--abbrev-ref", "HEAD"), { stdout: "feature\n" }], [(a) => a[0] === "rev-parse" && a[1] === "--verify", { stdout: "x\n" }], [argsStartWith("diff", "--numstat"), { stdout: "1\t0\tc.txt\n" }], [(a) => a[0] === "diff" && a[2] === "--", { stdout: "diff\n+x\n" }], [(a) => a[0] === "log", { stdout: "c1 x\n" }]];
+	await assembleReviewBundle(ALL_PROVIDER_IDS, { git: makeGit(routes, sink), cwd: "/repo", reviewTarget: { kind: "range", spec: "a..b" } });
+	assert.ok(sink.every((c) => c.args[0] !== "ls-files"), "range mode never runs ls-files --others (no untracked)");
+}
+async function p11_G5_range_on_main_wins() {
+	const sink = [];
+	const routes = [[argsAre("rev-parse", "--show-toplevel"), { stdout: "/repo\n" }], [argsAre("rev-parse", "--abbrev-ref", "HEAD"), { stdout: "main\n" }], [(a) => a[0] === "rev-parse" && a[1] === "--verify", { stdout: "x\n" }], [argsStartWith("diff", "--numstat"), { stdout: "1\t0\tc.txt\n" }], [(a) => a[0] === "diff" && a[2] === "--", { stdout: "diff\n+x\n" }], [(a) => a[0] === "log", { stdout: "c1 x\n" }]];
+	const { markdown, meta } = await assembleReviewBundle(ALL_PROVIDER_IDS, { git: makeGit(routes, sink), cwd: "/repo", reviewTarget: { kind: "range", spec: "a..b" } });
+	assert.equal(meta.mode, "range", "explicit range wins over the on-main auto path");
+	assert.match(markdown, /Range: a\.\.b/, "header shows the range, not the uncommitted-only note");
+	assert.doesNotMatch(markdown, /UNCOMMITTED changes only/);
+}
+
+// ── P11 code-review fixes ───────────────────────────────────────────────────
+// CR-2: an invalid --range/unsafe --base on the DEFAULT branch must still surface the actionable
+// "pass --base/--range" guidance — a fat-fingered flag must not yield LESS clarity than no flag.
+async function p11_CR2_invalid_range_on_main_keeps_guidance() {
+	const t = await resolveDiffTarget(makeGit([[argsAre("rev-parse", "--abbrev-ref", "HEAD"), { stdout: "main\n" }]]), "/repo", ["main", "master"], { kind: "range", spec: "..bad" });
+	assert.equal(t.mode, "auto");
+	assert.match(t.scopeNote, /invalid --range/, "fallback reason still shown");
+	assert.match(t.scopeNote, /pass --base <ref>|To review a committed branch/, "actionable guidance NOT swallowed");
+	assert.notEqual(t.degraded, null, "legacy degraded kept (not nulled) when a fallback note occupies scopeNote");
+}
+// rev-parse HEAD failing must NOT produce a false base==HEAD claim (headSha null handling, I4).
+async function p11_B_revparse_head_fails_no_false_note() {
+	const routes = [
+		[argsAre("rev-parse", "--abbrev-ref", "HEAD"), { stdout: "feature\n" }],
+		[(a) => a[0] === "rev-parse" && a[1] === "HEAD" && a.length === 2, { ok: false, stdout: "", code: 128 }],
+		[(a) => a[0] === "rev-parse" && a.length === 2 && a[1] !== "HEAD", { stdout: "abc123\n" }],
+	];
+	const t = await resolveDiffTarget(makeGit(routes), "/repo", ["main"], { kind: "base", ref: "v1.0" });
+	assert.equal(t.mode, "base");
+	assert.equal(t.scopeNote, null, "no base==HEAD note when rev-parse HEAD fails (no false claim)");
+}
+// CR-7: a runner that RESOLVES with a non-string stdout must not make assembleReviewBundle throw.
+async function p11_CR7_nonstring_stdout_no_throw() {
+	const badGit = async () => ({ ok: true, stdout: undefined, stderr: undefined, code: 0 });
+	for (const target of [{ kind: "auto" }, { kind: "base", ref: "v1.0" }, { kind: "range", spec: "a..b" }]) {
+		await assert.doesNotReject(() => assembleReviewBundle(ALL_PROVIDER_IDS, { git: badGit, cwd: "/repo", reviewTarget: target }), `mode ${target.kind} must never throw on non-string stdout`);
+	}
+}
+// Reverse / empty (a..a) range: accepted, three-dot diff, no crash or mislabel.
+async function p11_A_reverse_and_empty_range() {
+	const t = await resolveDiffTarget(makeGit([[(a) => a[0] === "rev-parse", { stdout: "x\n" }]]), "/repo", ["main"], { kind: "range", spec: "a..a" });
+	assert.equal(t.mode, "range");
+	assert.deepEqual(t.diffArgs, ["a...a"]); assert.equal(t.logRange, "a..a"); assert.equal(t.includeUntracked, false);
+	const rev = await resolveDiffTarget(makeGit([[(a) => a[0] === "rev-parse", { stdout: "x\n" }]]), "/repo", ["main"], { kind: "range", spec: "b..a" });
+	assert.deepEqual(rev.diffArgs, ["b...a"], "reverse range is not silently reordered");
+}
+
 async function main() {
 	testProviderIdGuard();
 	testGitRefGuard();
@@ -604,7 +783,32 @@ async function main() {
 	await reviewContext_referencedDocLinkedWorktreeRoot();
 	await reviewContext_referencedDocTOCTOURace();
 	await dispatch_childCwdIsProjectRootAllPaths();
-	console.log("OK: 26/26 tests passed");
+	// ── P11: review-target flags + header clarity ──
+	p11_A2_twodot_positive();
+	p11_A3_threedot_positive();
+	p11_A4_open_right();
+	p11_A5_empty_left();
+	p11_A6_both_empty();
+	p11_A7_too_many();
+	p11_A_no_operator();
+	await p11_A1_diff_log_coherent();
+	await p11_B1_base_name_on_main();
+	await p11_B3_base_full_sha();
+	await p11_B12_normal_base_no_note();
+	await p11_B8_default_noorigin_single_note();
+	await p11_B10_nonrepo_suppressed();
+	await p11_C2_joined_vs_perside();
+	await p11_C3_base_single_dash();
+	await p11_C4_base_double_dash();
+	await p11_C5_C6_shellish_reflog();
+	await p11_C10_logrange_safe();
+	await p11_G3_range_no_untracked();
+	await p11_G5_range_on_main_wins();
+	await p11_CR2_invalid_range_on_main_keeps_guidance();
+	await p11_B_revparse_head_fails_no_false_note();
+	await p11_CR7_nonstring_stdout_no_throw();
+	await p11_A_reverse_and_empty_range();
+	console.log("OK: 50/50 tests passed");
 }
 
 main().catch((err) => { console.error(err); process.exit(1); });

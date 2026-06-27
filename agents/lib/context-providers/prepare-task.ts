@@ -1,4 +1,4 @@
-import { assembleReviewBundle, writeReviewBundle, type BundleMeta } from "./review-context.ts";
+import { assembleReviewBundle, writeReviewBundle, NOTE_BASE_EQ_HEAD, type BundleMeta, type ReviewTargetInput } from "./review-context.ts";
 import { type ProviderId } from "./provider-id.ts";
 import { getBuiltInAgentSpec, resolveSpecContextProviders, type AgentSpec } from "../specs.ts";
 
@@ -33,9 +33,14 @@ export function providersForAgent(agent: string | AgentSpec): ProviderId[] {
 }
 
 function buildDirective(bundlePath: string, meta: BundleMeta, rawTask: string): string {
-	const scope = meta.base
-		? `branch ${meta.branch ?? "(current)"} vs base ${meta.base}, plus uncommitted changes`
-		: `uncommitted changes vs HEAD${meta.branch ? ` on ${meta.branch}` : ""}`;
+	// base==HEAD (e.g. --base main on main): the committed delta is empty, so the directive must say
+	// uncommitted-only to match the header note, not "vs base, plus uncommitted" (CR-1).
+	const baseEqHead = meta.mode === "base" && meta.scopeNote === NOTE_BASE_EQ_HEAD;
+	const scope = meta.mode === "range"
+		? `the committed range ${meta.base ?? "(range)"} (no uncommitted changes)`
+		: (!baseEqHead && meta.base)
+			? `branch ${meta.branch ?? "(current)"} vs base ${meta.base}, plus uncommitted changes`
+			: `uncommitted changes vs HEAD${meta.branch ? ` on ${meta.branch}` : ""}`;
 	return [
 		`Before responding, use your \`read\` tool to read the review-context bundle at this absolute path:`,
 		bundlePath,
@@ -52,6 +57,8 @@ function buildDirective(bundlePath: string, meta: BundleMeta, rawTask: string): 
 export type PrepareTaskOptions = {
 	cwd?: string;
 	tmpDir?: string;
+	/** P11: explicit review target (--base/--range), forwarded into the bundle assembler. */
+	reviewTarget?: ReviewTargetInput;
 	/** Test seam: override the assembler. */
 	assemble?: typeof assembleReviewBundle;
 	/** Test seam: override the bundle writer. */
@@ -66,10 +73,15 @@ export async function prepareAgentTask(agent: string | AgentSpec, rawTask: strin
 	const assemble = opts.assemble ?? assembleReviewBundle;
 	const writeBundle = opts.writeBundle ?? writeReviewBundle;
 	try {
-		const { markdown, meta } = await assemble(providers, { cwd: opts.cwd });
+		const { markdown, meta } = await assemble(providers, { cwd: opts.cwd, reviewTarget: opts.reviewTarget });
+		const hasChanges = meta.changedFiles.length > 0 || meta.untracked.length > 0;
+		// P11 G1/G2: an EXPLICIT target (--base/--range) that produced no changes but DID degrade
+		// (refs may not exist) still writes the bundle so the honest "may not exist" note reaches the
+		// child. Auto mode, or an explicit target on a genuinely clean tree (G4), stays a no-op.
+		const deliverDegradedTarget = (meta.mode === "base" || meta.mode === "range") && meta.degraded != null;
 		// No changes (clean tree, or cwd isn't a git work tree) → nothing worth reviewing. Run the
 		// raw task rather than point the child at an empty bundle. Also keeps non-repo callers a no-op.
-		if (meta.changedFiles.length === 0 && meta.untracked.length === 0) {
+		if (!hasChanges && !deliverDegradedTarget) {
 			return { task: rawTask, bundlePath: null, providers, dispose: NOOP_DISPOSE, projectRoot: meta.projectRoot };
 		}
 		const handle = await writeBundle(markdown, { tmpDir: opts.tmpDir });

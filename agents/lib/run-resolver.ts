@@ -11,6 +11,7 @@ import {
 import { collectChildProcess, formatChildAgentRunResult, formatAgentResultForContext, runBuiltInChildAgent, runChildAgent, type ChildAgentRunner, type ChildAgentRunResult } from "./child-runner.ts";
 import { getBuiltInAgentSpec, isReservedBuiltInAgentName } from "./specs.ts";
 import { prepareAgentTask } from "./context-providers/prepare-task.ts";
+import { type ReviewTargetInput } from "./context-providers/review-context.ts";
 import type { ModelProfileLibrary } from "./profiles.ts";
 import type { ProjectAgentRegistry } from "./registry.ts";
 import { resolveRunIntent, profileEffect, INTENT_AUTORUN_CONFIDENCE, ROLE_DEFAULT_PROFILE, type IntentCandidate } from "./intent-router.ts";
@@ -95,7 +96,11 @@ export function nextStepForRunBlock(record: AgentDiagnosticRecord, code: string)
  *  run can notify on completion). Optional onProgress streams stdout lines to the widget.
  *  onProgress is forwarded into the runner options; when absent the options are byte-identical
  *  to the pre-P8 path (so the synchronous/tool callers are unchanged). */
-async function executeChildRunResult(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string, profileOverride?: string, onProgress?: (line: string) => void, timeoutMs?: number): Promise<BgRunSettle> {
+/** Test-only seam: override fn in unit tests to observe the (task, opts) prepareAgentTask receives
+ *  from the dispatch chain (proves reviewTarget threading). Do not mutate in production. */
+export const __prepareTaskSeam = { fn: prepareAgentTask };
+
+async function executeChildRunResult(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string, profileOverride?: string, onProgress?: (line: string) => void, timeoutMs?: number, reviewTarget?: ReviewTargetInput): Promise<BgRunSettle> {
 	try {
 		const childOptions = buildChildRunOptions(ctx);
 		const profiles = ctx.profileLibrary;
@@ -111,7 +116,7 @@ async function executeChildRunResult(agent: Parameters<ChildAgentRunner>[0], tas
 		// P9: assemble review context (diff/branch/changed files/plan docs) for agents that declare
 		// `context:` and rewrite the task to point the sandboxed child at the bundle file. No-op for
 		// agents without context or when there's nothing to review. dispose() in finally (B3).
-		const prepared = await prepareAgentTask(agent, task, { cwd: ctx.cwd });
+		const prepared = await __prepareTaskSeam.fn(agent, task, { cwd: ctx.cwd, reviewTarget });
 		const childTask = prepared.task;
 		// P10-B: override cwd with the canonical project root (REQ-B3) so the child's read/grep/ls
 		// resolve from the repo root, not the caller's subdir or linked-worktree subpath.
@@ -140,8 +145,8 @@ async function executeChildRunResult(agent: Parameters<ChildAgentRunner>[0], tas
 }
 
 /** Synchronous run + notify (the no-UI / tool fallback). Behavior unchanged from pre-P8. */
-export async function executeChildRun(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string, profileOverride?: string, timeoutMs?: number): Promise<void> {
-	const settle = await executeChildRunResult(agent, task, ctx, source, profileOverride, undefined, timeoutMs);
+export async function executeChildRun(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string, profileOverride?: string, timeoutMs?: number, reviewTarget?: ReviewTargetInput): Promise<void> {
+	const settle = await executeChildRunResult(agent, task, ctx, source, profileOverride, undefined, timeoutMs, reviewTarget);
 	ctx.ui.notify(settle.message, settle.level);
 }
 
@@ -149,17 +154,17 @@ export async function executeChildRun(agent: Parameters<ChildAgentRunner>[0], ta
  *  Backgrounding returns immediately so pi's composer stays live (REQ-1). The synchronous path
  *  is taken when !hasUI OR the host lacks setWidget (REQ-8), keeping non-TUI/tool callers and the
  *  existing test suites unchanged (their ctx.ui has no setWidget). */
-export async function dispatchChildRun(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string, profileOverride?: string, timeoutMs?: number): Promise<void> {
+export async function dispatchChildRun(agent: Parameters<ChildAgentRunner>[0], task: string, ctx: AgentsContextLike, source: string, profileOverride?: string, timeoutMs?: number, reviewTarget?: ReviewTargetInput): Promise<void> {
 	if (ctx.hasUI && typeof ctx.ui.setWidget === "function") {
 		const label = typeof agent === "string" ? agent : agent.name;
 		startBackgroundRun({
 			ui: ctx.ui as BgRunUI,
 			label,
-			run: (handle) => executeChildRunResult(agent, task, ctx, source, profileOverride, handle.onProgress, timeoutMs),
+			run: (handle) => executeChildRunResult(agent, task, ctx, source, profileOverride, handle.onProgress, timeoutMs, reviewTarget),
 		});
 		return;
 	}
-	await executeChildRun(agent, task, ctx, source, profileOverride, timeoutMs);
+	await executeChildRun(agent, task, ctx, source, profileOverride, timeoutMs, reviewTarget);
 }
 
 export async function runAgentCommand(input: string, ctx: AgentsContextLike, diagnostics: AgentDiagnostics): Promise<void> {
@@ -171,7 +176,7 @@ export async function runAgentCommand(input: string, ctx: AgentsContextLike, dia
 	if (parsed.warning) ctx.ui.notify(parsed.warning, "warning");
 	if (isReservedBuiltInAgentName(parsed.name)) {
 		ctx.ui.notify(`Running built-in agent '${parsed.name}' with read-only tools.`, "info");
-		await dispatchChildRun(parsed.name, parsed.task, ctx, "built-in", parsed.profileOverride, parsed.timeoutMs);
+		await dispatchChildRun(parsed.name, parsed.task, ctx, "built-in", parsed.profileOverride, parsed.timeoutMs, parsed.reviewTarget);
 		return;
 	}
 
@@ -180,11 +185,11 @@ export async function runAgentCommand(input: string, ctx: AgentsContextLike, dia
 		ctx.ui.notify(resolved.message, "warning");
 		return;
 	}
-	await runResolvedTarget(resolved.record, parsed.task, ctx, diagnostics, parsed.profileOverride, parsed.timeoutMs);
+	await runResolvedTarget(resolved.record, parsed.task, ctx, diagnostics, parsed.profileOverride, parsed.timeoutMs, parsed.reviewTarget);
 }
 
-export function parseRunArgs(input: string): { ok: true; name: string; task: string; profileOverride?: string; timeoutMs?: number; warning?: string } | { ok: false; message: string } {
-	const usage = "Usage: /agents run <agent> [--profile <name>] [--timeout <seconds>] <task>";
+export function parseRunArgs(input: string): { ok: true; name: string; task: string; profileOverride?: string; timeoutMs?: number; reviewTarget?: ReviewTargetInput; warning?: string } | { ok: false; message: string } {
+	const usage = "Usage: /agents run <agent> [--profile <name>] [--timeout <seconds>] [--base <ref> | --range <a>..<b>] <task>";
 	const trimmed = input.trim();
 	if (!trimmed) return { ok: false, message: usage };
 
@@ -192,41 +197,70 @@ export function parseRunArgs(input: string): { ok: true; name: string; task: str
 	const name = tokens[0];
 	if (!name) return { ok: false, message: usage };
 
-	// Consume leading --profile/--timeout flags (any order, immediately after the agent name).
-	// A flag appearing mid-task is part of the task, with a warning (preserves prior --profile behavior).
-	const leading = parseLeadingRunFlags(tokens, 1, usage);
+	// Consume leading --profile/--timeout/--base/--range flags (any order, immediately after the agent
+	// name). A flag appearing mid-task is part of the task, with a warning (preserves prior behavior).
+	const leading = parseLeadingRunFlags(tokens, 1, usage, { allowTargetFlags: true });
 	if (!leading.ok) return { ok: false, message: usage };
 	const restTokens = tokens.slice(leading.taskStart);
-	const warning = restTokens.some((t) => t === "--profile" || t === "--timeout")
-		? "--profile/--timeout must come right after the agent name; treated as task text"
+	const strayFlag = restTokens.some((t) => t === "--profile" || t === "--timeout" || t === "--base" || t === "--range")
+		? "--profile/--timeout/--base/--range must come right after the agent name; treated as task text"
 		: undefined;
+	// CR-5: a spaced range value (`--range a .. b`) splits on whitespace — only "a" is captured and the
+	// leftover "..", "b" become task text. Detect the orphaned operator token and warn so it isn't silent.
+	const spacedRange = leading.reviewTarget && restTokens[0] && /^\.\.\.?/.test(restTokens[0])
+		? "a --range/--base value looks split by spaces — write it without spaces (e.g. --range a..b); trailing tokens were treated as task text"
+		: undefined;
+	const warning = leading.warning ?? spacedRange ?? strayFlag;
 	const task = restTokens.join(" ").trim();
 	if (!task) return { ok: false, message: usage };
-	return { ok: true, name, task, profileOverride: leading.profileOverride, timeoutMs: leading.timeoutMs, warning };
+	return { ok: true, name, task, profileOverride: leading.profileOverride, timeoutMs: leading.timeoutMs, reviewTarget: leading.reviewTarget, warning };
 }
 
-/** Consume leading --profile <name> / --timeout <seconds> flags from tokens[start..]. Any order,
- *  each at most once. Returns the index where the task begins. --timeout is in SECONDS (1..3600). */
-function parseLeadingRunFlags(tokens: string[], start: number, _usage: string): { ok: true; profileOverride?: string; timeoutMs?: number; taskStart: number } | { ok: false } {
+/** Consume leading --profile <name> / --timeout <seconds> [/ --base <ref> / --range <a>..<b>] flags
+ *  from tokens[start..]. Any order, each at most once. Returns the index where the task begins.
+ *  --timeout is in SECONDS (1..3600). P11: --base/--range are parsed ONLY when allowTargetFlags is
+ *  true (run-only — /agents do and the gate pass false, so they treat the flags as task text — B6).
+ *  Parsing is SYNTACTIC only: ref-token safety is enforced later by isSafeGitRef in resolveDiffTarget
+ *  (the security boundary), so e.g. `--base -O` parses here and is rejected+noted at resolve time. */
+function parseLeadingRunFlags(tokens: string[], start: number, _usage: string, opts: { allowTargetFlags?: boolean } = {}): { ok: true; profileOverride?: string; timeoutMs?: number; reviewTarget?: ReviewTargetInput; warning?: string; taskStart: number } | { ok: false } {
 	let i = start;
 	let profileOverride: string | undefined;
 	let timeoutMs: number | undefined;
-	while (i < tokens.length && (tokens[i] === "--profile" || tokens[i] === "--timeout")) {
+	let baseRef: string | undefined;
+	let rangeSpec: string | undefined;
+	const isTargetFlag = (t: string) => !!opts.allowTargetFlags && (t === "--base" || t === "--range");
+	while (i < tokens.length && (tokens[i] === "--profile" || tokens[i] === "--timeout" || isTargetFlag(tokens[i]))) {
 		const flag = tokens[i];
 		const value = tokens[i + 1];
 		if (value === undefined || value.startsWith("--")) return { ok: false };
 		if (flag === "--profile") {
 			if (profileOverride !== undefined) return { ok: false }; // repeated
 			profileOverride = value;
-		} else {
+		} else if (flag === "--timeout") {
 			if (timeoutMs !== undefined) return { ok: false }; // repeated
 			const sec = Number(value);
 			if (!Number.isInteger(sec) || sec <= 0 || sec > 3600) return { ok: false };
 			timeoutMs = sec * 1000;
+		} else if (flag === "--base") {
+			if (baseRef !== undefined) return { ok: false }; // repeated
+			baseRef = value;
+		} else { // --range
+			if (rangeSpec !== undefined) return { ok: false }; // repeated
+			rangeSpec = value;
 		}
 		i += 2;
 	}
-	return { ok: true, profileOverride, timeoutMs, taskStart: i };
+	// REQ-11: --range wins over --base; surface a warning when both were given so a typed flag is
+	// never silently dropped (the confusion P11 removes).
+	let reviewTarget: ReviewTargetInput | undefined;
+	let warning: string | undefined;
+	if (rangeSpec !== undefined) {
+		reviewTarget = { kind: "range", spec: rangeSpec };
+		if (baseRef !== undefined) warning = "both --range and --base given; using --range, ignoring --base";
+	} else if (baseRef !== undefined) {
+		reviewTarget = { kind: "base", ref: baseRef };
+	}
+	return { ok: true, profileOverride, timeoutMs, reviewTarget, warning, taskStart: i };
 }
 
 /** P6-3a: extract the registered-run tail of runAgentCommand into a reusable function.
@@ -261,7 +295,7 @@ export async function preflightAgentGate(
 	return { ok: true, parsed: currentParsed, gate };
 }
 
-export async function runResolvedTarget(record: RunnableRegisteredRecord, task: string, ctx: AgentsContextLike, diagnostics: AgentDiagnostics, profileOverride?: string, timeoutMs?: number): Promise<void> {
+export async function runResolvedTarget(record: RunnableRegisteredRecord, task: string, ctx: AgentsContextLike, diagnostics: AgentDiagnostics, profileOverride?: string, timeoutMs?: number, reviewTarget?: ReviewTargetInput): Promise<void> {
 	const preflight = await preflightAgentGate(record, ctx, diagnostics);
 	if (!preflight.ok) {
 		ctx.ui.notify(preflight.reason, "warning");
@@ -269,7 +303,7 @@ export async function runResolvedTarget(record: RunnableRegisteredRecord, task: 
 	}
 	const currentParsed = preflight.parsed;
 	ctx.ui.notify(`Running registered ${record.source} agent '${currentParsed.spec.name}' with read-only tools.`, "info");
-	await dispatchChildRun(currentParsed.spec, task, ctx, record.source, profileOverride, timeoutMs);
+	await dispatchChildRun(currentParsed.spec, task, ctx, record.source, profileOverride, timeoutMs, reviewTarget);
 }
 
 /** P6-3b: parse /agents do input. Leading --profile/--timeout flags (no agent-name token). */
@@ -278,7 +312,9 @@ export function parseDoArgs(input: string): { ok: true; task: string; profileOve
 	const trimmed = input.trim();
 	if (!trimmed) return { ok: false, message: usage };
 	const tokens = trimmed.split(/\s+/);
-	const leading = parseLeadingRunFlags(tokens, 0, usage); // flags start at index 0 (no agent name)
+	// flags start at index 0 (no agent name). allowTargetFlags:false — /agents do never targets a
+	// diff (--base/--range stay task text), so the NL/classifier path can't smuggle a review target (B6).
+	const leading = parseLeadingRunFlags(tokens, 0, usage, { allowTargetFlags: false });
 	if (!leading.ok) return { ok: false, message: usage };
 	const task = tokens.slice(leading.taskStart).join(" ").trim();
 	if (!task) return { ok: false, message: usage };
