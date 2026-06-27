@@ -101,16 +101,21 @@ function render(): void {
 	}
 	const frame = SPINNER_FRAMES[frameIndex % SPINNER_FRAMES.length];
 	const lines: string[] = [];
+	// Share a fixed activity-line budget (TAIL_SLOTS) across concurrent runs so the widget height
+	// stays bounded no matter how many run at once: one run gets all TAIL_SLOTS rows; N runs get
+	// floor(TAIL_SLOTS / N) each (min 1). Phase spinners have no tail and don't consume the budget.
+	const runCount = [...registry.values()].filter((e) => !e.phase).length;
+	const perRunSlots = runCount > 0 ? Math.max(1, Math.floor(TAIL_SLOTS / runCount)) : TAIL_SLOTS;
 	for (const entry of registry.values()) {
 		const elapsed = Math.max(0, Math.floor((deps.now() - entry.startedAt) / 1000));
 		lines.push(`${frame} ${entry.label} · ${elapsed}s`);
 		// Phase spinners (no activity tail) render just the label row — skip the slot block so a
-		// single-line phase doesn't reserve TAIL_SLOTS blank rows.
+		// single-line phase doesn't reserve blank rows.
 		if (entry.phase) continue;
-		// Always emit TAIL_SLOTS lines (newest at the bottom, blank-padded at the top) so the
-		// widget height is fixed — the tail scrolls in place instead of growing the widget.
-		const slots = entry.tail.slice(-TAIL_SLOTS);
-		while (slots.length < TAIL_SLOTS) slots.unshift("");
+		// Emit perRunSlots lines (newest at the bottom, blank-padded at the top) so the per-run
+		// height is fixed — the tail scrolls in place instead of growing the widget.
+		const slots = entry.tail.slice(-perRunSlots);
+		while (slots.length < perRunSlots) slots.unshift("");
 		for (const t of slots) lines.push(`   ${t}`);
 	}
 	try { activeUI.setWidget(WIDGET_KEY, lines, { placement: "aboveEditor" }); } catch { /* detached/closed UI context */ }
