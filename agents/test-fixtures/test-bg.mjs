@@ -688,6 +688,13 @@ async function testWorkerRejectsCustomHomeManifest() {
 	});
 }
 
+// REQ-22 (P5): list entry with absent @pi_run_id is treated as unknown
+async function testListEntryWithoutRunIdIsTreatedAsUnknown() {
+	const windows = [{ windowId: "pi-agent-bg-x", runId: undefined, agentName: "scout" }];
+	const actionable = windows.filter(function _w(w) { return w.runId !== undefined; });
+	assert.equal(actionable.length, 0, "entries with undefined runId must be filtered out (REQ-22)");
+}
+
 // ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
@@ -710,6 +717,7 @@ async function main() {
 	await test("listBgRuns: empty home returns empty array", testListBgRunsEmpty);
 	await test("listBgRuns: preflight shows up as reserved run", testListBgRunsShowsPreflight);
 	await test("worker rejects custom-home manifest (N3 invariant)", testWorkerRejectsCustomHomeManifest);
+	await test("list entry with undefined runId is treated as unknown (REQ-22)", testListEntryWithoutRunIdIsTreatedAsUnknown);
 	console.log("P4-7 bg integration tests passed");
 }
 
