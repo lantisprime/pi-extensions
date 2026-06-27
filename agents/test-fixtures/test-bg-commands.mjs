@@ -18,6 +18,7 @@ import {
 	handleBgOpen,
 	handleBgResult,
 	updateBgStatusLine,
+	__setBgStatusHomeOverride,
 } from "../index.ts";
 
 import {
@@ -332,6 +333,7 @@ async function testStatusLineClearsWhenIdle() {
 	const home = path.join(root, "home");
 	await fs.mkdir(home, { recursive: true });
 	try {
+		__setBgStatusHomeOverride(home);
 		const statuses = [];
 		const ctx = {
 			ui: {
@@ -340,13 +342,14 @@ async function testStatusLineClearsWhenIdle() {
 		};
 
 		// Empty temp home → count should be 0 → status cleared.
-		await updateBgStatusLine(ctx, home);
+		await updateBgStatusLine(ctx);
 
 		const last = statuses[statuses.length - 1];
 		assert.ok(last, "setStatus should have been called");
 		assert.equal(last.key, "agents:bg-count");
 		assert.equal(last.text, undefined, "status should be cleared when no agents are running");
 	} finally {
+		__setBgStatusHomeOverride(undefined);
 		await fs.rm(root, { recursive: true, force: true }).catch(() => {});
 	}
 }
@@ -358,6 +361,8 @@ async function testStatusLineShowsCount() {
 	const home = path.join(root, "home");
 	await fs.mkdir(home, { recursive: true });
 	try {
+		__setBgStatusHomeOverride(home);
+
 		// Create one reserved run → count should be 1.
 		const state = await createBgRunState({ homeDir: home, runId: "bg-p46-ct-01" });
 		try {
@@ -368,7 +373,7 @@ async function testStatusLineShowsCount() {
 				},
 			};
 
-			await updateBgStatusLine(ctx, home);
+			await updateBgStatusLine(ctx);
 
 			const last = statuses[statuses.length - 1];
 			assert.ok(last, "setStatus should have been called");
@@ -391,7 +396,7 @@ async function testStatusLineShowsCount() {
 				},
 			};
 
-			await updateBgStatusLine(ctx, home);
+			await updateBgStatusLine(ctx);
 
 			const last = statuses[statuses.length - 1];
 			assert.equal(last.text, "2 agents running",
@@ -403,6 +408,7 @@ async function testStatusLineShowsCount() {
 			}
 		}
 	} finally {
+		__setBgStatusHomeOverride(undefined);
 		await fs.rm(root, { recursive: true, force: true }).catch(() => {});
 	}
 }

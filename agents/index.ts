@@ -507,17 +507,25 @@ async function handleProfileUnregister(target: string, ctx: AgentsContext, diagn
 const BG_STATUS_KEY = "agents:bg-count";
 const BG_STATUS_POLL_MS = 15_000; // refresh every 15s while runs are active
 let bgStatusPollTimer: ReturnType<typeof setInterval> | undefined;
+let bgStatusPollBusy = false; // guard against pile-up when countActiveBgRuns is slow
+
+/** Test-only: override the home dir for countActiveBgRuns.  Production
+ *  code never calls this — it's for test isolation so tests don't mutate
+ *  real bg-state on the developer's machine. */
+let __bgStatusHomeOverride: string | undefined;
+export function __setBgStatusHomeOverride(home: string | undefined): void {
+	__bgStatusHomeOverride = home;
+}
 
 /** Update the pi footer status line with the current background agent
  *  count.  Reads from the bg-state authority root (resolveTrustedHome()),
  *  same as the write path + all other bg-state operations.  Silently
- *  no-ops when setStatus is unavailable (non-TUI / pre-P4-6 pi).
- *  homeDir is a test seam; production callers omit it. */
-export async function updateBgStatusLine(ctx: AgentsContext, homeDir?: string): Promise<void> {
-	if (typeof ctx.ui.setStatus !== "function") return;
+ *  no-ops when setStatus is unavailable (non-TUI / pre-P4-6 pi). */
+export async function updateBgStatusLine(ctx: AgentsContext): Promise<void> {
+	if (typeof ctx?.ui?.setStatus !== "function") return;
 	try {
-		const count = homeDir !== undefined
-			? await countActiveBgRuns(homeDir)
+		const count = __bgStatusHomeOverride !== undefined
+			? await countActiveBgRuns(__bgStatusHomeOverride)
 			: await countActiveBgRuns();
 		ctx.ui.setStatus(BG_STATUS_KEY, count > 0 ? `${count} agent${count === 1 ? "" : "s"} running` : undefined);
 	} catch { /* best-effort; don't break the session over a status update */ }
@@ -531,6 +539,10 @@ function ensureBgStatusPolling(ctx: AgentsContext): void {
 	if (typeof ctx?.ui?.setStatus !== "function") return;
 	if (bgStatusPollTimer !== undefined) return;
 	bgStatusPollTimer = setInterval(async () => {
+		// Guard against pile-up: if countActiveBgRuns takes longer than
+		// BG_STATUS_POLL_MS (e.g. slow disk), skip this tick.
+		if (bgStatusPollBusy) return;
+		bgStatusPollBusy = true;
 		try {
 			const count = await countActiveBgRuns();
 			await updateBgStatusLine(ctx);
@@ -539,6 +551,7 @@ function ensureBgStatusPolling(ctx: AgentsContext): void {
 				bgStatusPollTimer = undefined;
 			}
 		} catch { /* swallow — don't crash the poll loop */ }
+		finally { bgStatusPollBusy = false; }
 	}, BG_STATUS_POLL_MS);
 	(bgStatusPollTimer as { unref?: () => void })?.unref?.();
 }
