@@ -11,11 +11,12 @@ goal and walks through the extensions that help achieve it.
 4. [Intent-based agent routing](#intent-based-agent-routing) — let Pi pick the right agent
 5. [Model profiles](#model-profiles) — reusable model/capability presets
 6. [Agent chain workflows](#agent-chain-workflows) — scout → planner → reviewer pipelines
-7. [Ephemeral one-shot agents](#ephemeral-one-shot-agents) — safe throwaway runs
-8. [Just-in-time runbook guidance](#just-in-time-runbook-guidance) — command-specific context
-9. [Web research with security](#web-research-with-security) — safe web search in Pi
-10. [Permission modes deep dive](#permission-modes-deep-dive) — ask, read-only, auto, yolo
-11. [Extension combo: full safety stack](#extension-combo-full-safety-stack)
+7. [Background agents](#background-agents) — run a long agent in tmux while you keep working
+8. [Ephemeral one-shot agents](#ephemeral-one-shot-agents) — safe throwaway runs
+9. [Just-in-time runbook guidance](#just-in-time-runbook-guidance) — command-specific context
+10. [Web research with security](#web-research-with-security) — safe web search in Pi
+11. [Permission modes deep dive](#permission-modes-deep-dive) — ask, read-only, auto, yolo
+12. [Extension combo: full safety stack](#extension-combo-full-safety-stack)
 
 ---
 
@@ -291,8 +292,66 @@ at the start):
 If a run times out, Pi will usually suggest either narrowing the task or raising
 `--timeout` — narrowing is generally the better first move.
 
+> This subsection is about the **automatic** non-blocking behavior of `/agents
+> do`, `run`, `chain`, and `run-temp` inside a TUI. To launch an agent that keeps
+> running in its **own tmux window** — surviving even if you close the prompt, and
+> managed with explicit `bg-*` commands — see
+> [Background agents](#background-agents).
+
 See [Intent-based agent routing](#intent-based-agent-routing) and
 [Registered custom agents](#registered-custom-agents).
+
+### Agents (background): run a long agent in tmux while you keep working
+
+**Who it is for**: You want to kick off a long agent run (a wide review, a deep
+recon) into its own detached tmux window and keep using Pi — checking on it,
+reading its result, or stopping it whenever you like.
+
+**Setup** — load both extensions and make sure a tmux server is running:
+
+```bash
+tmux new-session -d -s main          # if you are not already inside tmux
+pi -e ./agents/index.ts -e ./tmux-terminal/index.ts
+```
+
+**Steps**
+
+1. Register the agent as a **user** agent (background runs need a registered
+   user agent, by name):
+   ```text
+   /agents register ~/.pi/agent/agents/deep-reviewer.md
+   ```
+2. Launch it in the background:
+   ```text
+   /agents bg deep-reviewer review every handler in agents/lib for auth bugs
+   ```
+   ```text
+   Background agent deep-reviewer running (bg-mqv1x9k2-a1b2…) via tmux.
+   ```
+   The agent runs in a detached window named `pi-agent-<runId>`; your prompt
+   stays free.
+3. Check on it any time:
+   ```text
+   /agents bg-status
+     bg-mqv1x9k2-a1b2  running  1m 12s  active
+   ```
+4. Read the result when it is done — including *why* it failed, if it did:
+   ```text
+   /agents bg-result bg-mqv1x9k2-a1b2
+   ```
+5. Stop a run you no longer need with `/agents bg-stop <id>`.
+
+**Common mistakes**
+
+- `No terminal backend installed` means `tmux-terminal` is not loaded — add
+  `-e ./tmux-terminal/index.ts`.
+- `Terminal backend "tmux" is not available` means no tmux server is reachable —
+  start one (`tmux new-session -d -s main`) or run Pi inside tmux.
+- Background agents resolve **registered user agents by name**. An unregistered
+  agent, or one whose spec changed on disk, is rejected by the same `canRunAgent`
+  gate as `/agents run`.
+
+See [Background agents](#background-agents).
 
 ---
 
@@ -587,6 +646,173 @@ uniquely-named profile (not `adversarial-review`) and either pass `--profile <na
 - Mid-chain failure, hash mismatch, or timeout stops all subsequent agents.
 - Maximum 3 agents per chain.
 - No chain through `run_subagent` — the tool schema has no chain parameter.
+
+---
+
+## Background agents
+
+**Goal**: Launch an agent into its own detached **tmux window** so it keeps
+running independently of your Pi prompt, then check status, read its result, or
+stop it on demand.
+
+### When to use it (vs. the automatic background runs)
+
+`/agents do`, `run`, `chain`, and `run-temp` already run **non-blocking** inside a
+TUI: the agent runs while a widget shows progress, then its result is fed back
+into the conversation (see
+[Background runs, the live indicator, and timeout](#scenario-cookbook)). That is
+the right tool for most runs.
+
+Reach for **`/agents bg`** when you want the run decoupled from this Pi session:
+
+- a long run (wide review, deep recon) you want to start and walk away from;
+- a run whose window you want to inspect or keep alive on its own;
+- managing several concurrent runs explicitly by id.
+
+A `bg` run lives in a tmux window named `pi-agent-<runId>` and is managed with the
+`bg-status` / `bg-result` / `bg-open` / `bg-stop` commands below.
+
+### Prerequisites
+
+1. **tmux ≥ 3.0 on `$PATH`, with a running server.** Either start Pi *inside*
+   tmux, or start a server first:
+   ```bash
+   tmux new-session -d -s main
+   ```
+   Availability is satisfied when `$TMUX` is set (Pi is inside tmux) **or**
+   `tmux list-sessions` succeeds.
+2. **The `tmux-terminal` extension loaded alongside `agents`** (either order — it
+   registers the terminal backend on `session_start`):
+   ```bash
+   pi -e ./agents/index.ts -e ./tmux-terminal/index.ts
+   ```
+   Install once by symlinking it into your extensions dir:
+   ```bash
+   ln -s "$PWD/tmux-terminal" ~/.pi/agent/extensions/tmux-terminal
+   ```
+3. **A registered user agent.** Background runs resolve a **registered user
+   agent by name** — the spec lives under `~/.pi/agent/agents/` and is registered
+   first. (Project-scoped agents are not yet supported for background runs.)
+
+### Step by step
+
+**1. Write and register the agent** (a user agent, by full path):
+
+```bash
+# ~/.pi/agent/agents/deep-reviewer.md
+```
+```markdown
+---
+name: deep-reviewer
+description: Wide read-only review pass
+tools: [read, grep, find, ls]
+---
+Review the delegated area thoroughly and report findings with file:line refs.
+```
+```text
+/agents register ~/.pi/agent/agents/deep-reviewer.md
+```
+
+**2. Launch it in the background:**
+
+```text
+/agents bg deep-reviewer review every handler in agents/lib for auth bugs
+```
+
+The first whitespace-separated token is the agent name; everything after it is
+the task. On success:
+
+```text
+Background agent deep-reviewer running (bg-mqv1x9k2-a1b2…) via tmux.
+```
+
+Under the hood: the agent is resolved through the same `canRunAgent` gate as
+`/agents run`, a **signed manifest** is written (preflight), and the
+`tmux-terminal` backend opens a detached `pi-agent-<runId>` window that runs the
+worker → child `pi`. The footer shows a live count of active background runs.
+
+**3. Watch it:**
+
+```text
+/agents bg-status
+Background agent runs (1):
+  bg-mqv1x9k2-a1b2  running  1m 12s  active
+```
+
+Each row is `<runId>  <status>  <elapsed>  <active|done>`. A run whose tmux window
+has vanished while still not done is shown as `(stale)`.
+
+**4. Read the result** (works for completed, failed, or stopped runs):
+
+```text
+/agents bg-result bg-mqv1x9k2-a1b2
+Background agent result (bg-mqv1x9k2-a1b2…):
+  Status: completed
+  Agent: deep-reviewer
+  Started: 2026-06-27T12:00:01.000Z
+  Finished: 2026-06-27T12:03:14.000Z
+  Result (1843 chars):
+    <the agent's findings>
+```
+
+**A run that did NOT complete records *why*.** A failed run shows an `Error:`
+line carrying the child's exit code, signal, and stderr, plus a `Raw output:`
+path to the kept raw transcript for deeper debugging:
+
+```text
+/agents bg-result bg-r4k9m2p7-c8d0
+Background agent result (bg-r4k9m2p7-c8d0…):
+  Status: failed
+  Agent: deep-reviewer
+  Error: Background agent did not complete (status: failed).
+Exit code: 1.
+stderr: Error: Model "bogus-model" not found. Use --list-models to see available models.
+→ next: child exited non-zero (exit 1) — check the stderr/tool output above and rerun with a narrower task.
+  Raw output: /var/folders/.../pi-agent-XXXXXX/stdout.jsonl
+```
+
+**5. Stop a run** you no longer need (kills the tmux window and frees the slot):
+
+```text
+/agents bg-stop bg-mqv1x9k2-a1b2
+```
+
+**6. Check the window liveness** with `/agents bg-open <id>` (reports whether the
+backing tmux window is still alive; switch to it manually with
+`tmux select-window -t pi-agent-<runId>`).
+
+### Command reference
+
+| Command | What it does |
+|---|---|
+| `/agents bg <agent> <task>` | Launch a registered user agent in a detached tmux window. |
+| `/agents bg-status` | List running + recent runs with status, elapsed, and active/done. |
+| `/agents bg-result <runId>` | Show a finished run's status, result text, or failure diagnostic. |
+| `/agents bg-open <runId>` | Report whether the run's tmux window is still alive. |
+| `/agents bg-stop <runId>` | Kill the run's window and free its slot. |
+
+`<runId>` can be the short prefix shown by `bg-status` (the first 16 chars) — it
+is matched against the full id.
+
+### Troubleshooting
+
+| Symptom | Cause → fix |
+|---|---|
+| `No terminal backend installed. Load tmux-terminal or equivalent…` | The `tmux-terminal` extension is not loaded. Add `-e ./tmux-terminal/index.ts` to your `pi` invocation (or symlink it into `~/.pi/agent/extensions/`). |
+| `Terminal backend "tmux" is not available.` | No reachable tmux server. Run Pi inside tmux, or `tmux new-session -d -s main` first. |
+| The agent name is rejected / "not registered" | Background runs need a **registered user agent**. Register it by full path: `/agents register ~/.pi/agent/agents/<name>.md`. If you edited the spec, its hash changed — re-register. |
+| `Preflight failed: …` | The manifest/reservation could not be written — usually a slot limit or a home-dir/permissions issue. `/agents bg-status` to see active runs; `/agents doctor` to check the install. |
+| `Launch failed: …` | tmux refused the new window (e.g. server died between the availability check and launch). Confirm the server (`tmux ls`) and retry. |
+| A run shows `Status: failed` | Read the `Error:` line — it now carries the exit code, signal, and stderr — and open the `Raw output:` transcript for the full child output. |
+
+### Limitations
+
+- **No TUI attach.** The run lives in its own detached window; switch to it
+  manually (`tmux select-window -t pi-agent-<runId>`). Pi does not embed it.
+- **Server-bound.** If the tmux server dies, every `pi-agent-*` window — and its
+  run — dies with it.
+- **Per-run timeout** still applies (the `BG_MAX_DURATION_SEC` ceiling); a run
+  that exceeds it is killed and recorded as timed-out.
 
 ---
 
