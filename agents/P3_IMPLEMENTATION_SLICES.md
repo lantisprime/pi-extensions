@@ -118,6 +118,122 @@ Completed and merged:
 
 ### P4R-PROJ Project Background Agents (DEFERRED)
 - Requires disk-backed trust reader
+
+### P5c tmux-control (COMPLETE — shipped via PR #106)
+- Companion extension to `tmux-terminal` (the backend that creates the windows this extension controls).
+- 21 new files + 0 anchored edits; 19 local requirements / 30 unit tests + 3 smoke.
+- Merge: PR #106, commit `4cc5232`.
+- Branch: `feat/tmux-control` (deleted post-merge).
+- Surface:
+  - 6 slash commands: `/tmux-list`, `/tmux-capture`, `/tmux-send`, `/tmux-tail`, `/tmux-launch`, `/tmux-config`
+  - 4 LLM-callable tools: `tmux_list`, `tmux_capture`, `tmux_send`, `tmux_launch`
+  - 1 NLP input hook (`pi.on("input")`) — patterns like `tail bg-abc123`, `spawn tmux session for X` bypass the LLM via `{action: "handled"}`.
+- Safety invariants preserved:
+  - argv-only execFile (no shell)
+  - 5s hard timeout on every tmux call
+  - prefix gate (`pi-agent-` default) refuses writes to non-prefixed windows
+  - window-name validation rejects shell metacharacters
+  - bounded inputs (4 KB text, 5000-line capture)
+- Bridge to `bg-terminal`: dynamic-import `agents/lib/bg-terminal.ts` for `runId → windowId` resolution; falls back to prefix-match when no backend registered; works standalone without agents extension.
+- Dependency model: `typebox` is provided by pi's `jiti` + `virtualModules` at runtime — end users do NOT install it. Test runner auto-installs typebox via `npm install --no-save typebox` on first run.
+- PR-post-merge fix: a follow-up commit documented the dependency model and added the auto-install in `test-fixtures/run-control-tests.sh` (commit `5454087`, on PR #106).
+- Real-tmux smoke: 9/9 steps against isolated `tmux -L pi-ctrl-smoke-<pid>` socket; skipped (exit 0) if tmux not on $PATH. Required-before-commit per `test-pi-extensions-via-tmux`.
+- REQ-13 import guard: no `agents/lib` static imports outside `lib/resolve.ts` (which uses dynamic import via `import(url)`).
+- Stats: 21 files, 1819 insertions in PR #106; 1819 → 1850 with the dep-doc commit.
+
+### P5c-2 tmux-control TUI automation surface (S1 + S2 MERGED into main via PR #109; S3-S6 OPEN)
+- Extends `tmux-control` from "send literal text + capture" into a general-purpose TUI driver.
+- Plan: `agents/docs/P5C2_TMUX_CONTROL_TUI_AUTOMATION_PLAN.md` (482 lines, 19 sections, 19 REQ rows).
+- Review cycle:
+  - Pass 2 (adversarial): `agents/docs/P5C2_TMUX_CONTROL_TUI_AUTOMATION_ADVERSARIAL_REVIEW.md` — REVISE-AND-RESUBMIT (4 blockers + OD-1).
+  - Pass 4 (re-review): `agents/docs/P5C2_TMUX_CONTROL_TUI_AUTOMATION_REVIEW.md` — APPROVE-WITH-MINOR-FIXES.
+- Slice status:
+
+| Slice | Objective | Primary files | Status | Commit | Parallel? |
+|---|---|---|---|---|---|
+| `P5c-2-S1` | `pasteText` via `set-buffer -b pictl-paste -- <text>` + `paste-buffer -p -d` (bracketed paste) + REQ-20 sanitization + Path A verification | new `lib/paste.ts`, `lib/send.ts` (multi-line routing), `index.ts`, `constants.ts` | **MERGED (PR #109)** | `e32eadf` on PR #109 (merged `ac59f5b` into main 2026-06-28; cherry-pick of `68c27d7` on cmux branch) | done |
+| `P5c-2-S2` | `waitForWindow({regex?, stableMs?, timeoutMs})` w/ injectable clock; regex > stable > sleep > timeout; bounded polls; per-call 5s exec; null-init lastChangeAt + reset-to-null-on-change; RegExp always copied | new `lib/wait.ts`, `constants.ts` (DEFAULT_WAIT_LINES), tests | **MERGED (PR #109)** | `d8ee10b` on PR #109 (merged `ac59f5b` into main 2026-06-28; cherry-pick of `5f2ffeb` on cmux branch; amended post-review) | done |
+| `P5c-2-S3` | `pressEnterCount` for `tmux_send` (surface seam already in `send.ts` since S1) | `lib/send.ts`, `index.ts` | OPEN (top priority) | — | standalone |
+| `P5c-2-S4` | `checkExtendedKeys` warn-only at `session_start` (sync handler + fire-and-forget) | new `lib/keyscheck.ts`, `index.ts` | OPEN | — | parallel-safe (independent of S3) |
+| `P5c-2-S5` | `mode: "literal"\|"keys"` for `tmux_send` (surface seam already in `send.ts` since S1; keys mode defaults `pressEnter:false`) | `lib/send.ts`, `index.ts` | OPEN | — | after S3 (same file contention) |
+| `P5c-2-S6` | `tmux_drive_claude` composite tool (uses S1 + S2; must buffer across stdin reads per S6 design note in S1) | new `lib/drive.ts`, `index.ts` | OPEN | — | last (after S3 + S4 + S5) |
+
+- Hard-won design choices (preserve across slicing):
+  1. **`paste-buffer -p` is required.** Without `-p`, tmux defaults to LF→CR conversion and reproduces the premature-submit bug S1 is meant to fix. REQ-1 asserts `args.includes("-p") && !args.includes("-r")`.
+  2. **REQ-1's end-to-end "no premature submit" property is `UNGUARDED-IN-CI`.** Only the live-tmux smoke proves it. Unit test asserts the mechanism (`-p` in argv); cannot prove TUI reception.
+  3. **`session_start` stays sync; `checkExtendedKeys` is fire-and-forget.** Existing `test-extension-integration.mjs:40` assertion `startResult === undefined` is preserved unchanged.
+  4. **`mode: "keys"` defaults `pressEnter:false`.** Fixes the v0.1 double-submit bug where `sendText("C-c", {mode:"keys"})` would fire Enter after the token. Asserted in `testSendKeysMode`: total send-keys call count = 1.
+  5. **`set-buffer -b pictl-paste -- <text>` with `--` terminator.** The `TmuxExecutor` has no stdin channel (verified — `lib/exec.ts:9–11`), so the safer `load-buffer -` path is unavailable. Leading-dash payloads (`-rf danger`) need the `--` terminator or tmux misparses them as options. Tagged `UNGUARDED-IN-CI` in the Safety table.
+  6. **`waitForWindow` long waits are polling, not long execs.** REQ-8: each capture is a separate `capture-pane` exec bounded by 5s; the long wait is achieved via bounded polls. `polls ≤ ceil(timeoutMs/intervalMs)+1`. Injectable `deps.now` / `deps.sleep` make the loop deterministic in tests.
+  7. **S2 is internal, exposed only via S6.** `waitForWindow` is not added to a slash command or LLM tool — it's a library function consumed by `tmux_drive_claude` (S6). Import directly from `lib/wait.ts`.
+- Stats: 19 REQ rows. PR #109 ships 14 S1 unit tests + 18 `waitForWindow` unit tests + 12 real-tmux smoke steps total in `test-real-tmux-smoke.mjs` (10 pre-existing + 2 new for `waitForWindow`) + 2 Path A bracketed-paste marker checks in `test-pathA.mjs`. Existing REQ-13 import-guard gets an additional argv-only static guard (REQ-17) with red-then-green self-check.
+- **S2 review cycle (Claude + Codex via tmux, 3 rounds)**:
+  - **Claude (Opus 4.8)**: R1 `approve-with-nits` (0 blockers, 5 missing tests, 3 nits — one matches Codex Blocker #1). R2 `approve` ("ship it").
+  - **Codex (gpt-5.5 high)**: R1 `changes-requested` (2 BLOCKERS — `lastChangeAt` seeding, stateful RegExp; 3 missing tests). R2 `changes-requested` (still — first fix didn't reset on change). R3 `approve-with-nits` (one doc nit on `compileRegex` comment precision).
+  - **Convergence**: both reviewers approved after two iterations. "Not on first repeat" semantics expanded to apply to every run of same-output captures, not just the initial capture.
+  - **Single-commit amendment**: S2 originally committed as `214f888`, amended to `5f2ffeb` post-review per project pattern (cf. S1 commit `68c27d7` which absorbed research-driven fixes). Original hash orphaned. On PR #109 (cherry-pick to `feat/p5c-2-foundations`), the equivalent hash is `d8ee10b`. PR #109 MERGED into main 2026-06-28 at `ac59f5b`.
+- S2 file conflict analysis (post-S2 commit `d8ee10b` on feat/p5c-2-foundations):
+  - **S3** touches `lib/send.ts` + `lib/index.ts` only — no `lib/wait.ts` overlap.
+  - **S4** is a new file `lib/keyscheck.ts` (parallel-safe with S3) — no overlap with S1 or S2.
+  - **S5** touches `lib/send.ts` + `lib/index.ts` only — no `lib/wait.ts` overlap (after S3).
+  - **S6** is a new file `lib/drive.ts` — imports both `pasteText` (S1) and `waitForWindow` (S2) directly. No overlap with S2 file (`wait.ts`).
+- Research grounding: `TMUX_TUI_AUTOMATION.md` (repo root) — 12k-byte recipe for driving any TUI via tmux, including the timing/auth/bracketed-paste lessons that P5c-2's design depends on.
+
+### P5b-1 cmux-terminal (OPENED — scaffold on `feat/cmux-control-and-p5b-cmux-terminal`)
+- New `cmux-terminal/` extension implementing the `TermBgBackend` interface for cmux (Ghostty-based macOS terminal multiplexer; https://github.com/manaflow-ai/cmux).
+- **Pattern**: mirrors `tmux-terminal/` 1:1 with cmux CLI swaps + cmux-specific adaptations.
+- **5-slice ladder**:
+
+| Slice | Objective | Primary files | Tests | Parallel? |
+|---|---|---|---|---|
+| `P5b-1-S1` | `createCmuxBackend()` factory: `isAvailable` (macOS gate + `cmux identify`), `launch` (`cmux new-workspace --name X --cwd P --command "..." --layout '{...}' --focus false`), `kill` (`cmux close-workspace --workspace ID`), `isAlive` (`cmux list-workspaces --json` parse), `list` (`cmux list-workspaces --json` filtered by `@pi_run_id`) | `cmux-terminal/lib/cmux-backend.ts` (new), `cmux-terminal/lib/exec.ts` (new) | 8 unit tests + 1 real-cmux smoke | top-level |
+| `P5b-1-S2` | `resolve-worker-path.ts` — D7 lesson: walk UP from `import.meta.url` to find `agents/lib/bg-worker.{ts,mjs,js}` even when symlinked | `cmux-terminal/lib/resolve-worker-path.ts` (new), `cmux-terminal/test-fixtures/test-helpers.mjs` (new) | 2 tests (realpath + precedence) | parallel with S1 |
+| `P5b-1-S3` | `path-validate.ts`, `redact-error.ts`, `shell-escape.ts`, `constants.ts` — copy tmux-terminal equivalents with cmux constants (`CMUX_WINDOW_PREFIX = "pi-cmux-"`, etc.) | `cmux-terminal/lib/{path-validate, redact-error, shell-escape, constants}.ts` (new) | 3 tests | parallel with S1, S2 |
+| `P5b-1-S4` | `cmux-terminal/index.ts` — extension entry; registers backend on `session_start`, same shape as `tmux-terminal/index.ts` | `cmux-terminal/index.ts` (new) | 1 extension-integration test | serial after S1 |
+| `P5b-1-S5` | Real-cmux smoke: `test-real-cmux-smoke.mjs` — 11-step isolated `cmux --socket /tmp/cmux-smoke-<pid>.sock` flow | `cmux-terminal/test-fixtures/test-real-cmux-smoke.mjs` (new) | smoke (skipped if cmux not on PATH or non-macOS) | serial after S4 |
+
+- **Hard-won lessons inherited from P5 + P5c**:
+  1. **D7 symlink-loading fix is required** (P5 lesson). `resolveWorkerPath()` walks UP from `import.meta.url`; tested via copy + child process.
+  2. **Real-cmux smoke is mandatory**, not optional. FakeCmuxExecutor hides all the platform-specific bugs.
+  3. **macOS-only gate at `isAvailable`**: `process.platform === "darwin"` first, then `cmux identify --json`. Returning false on non-mac means bg-terminal falls through to next backend.
+  4. **`--focus false` discipline on all layout ops** (cmux SKILL.md rule). Default to false in `cmux-backend.ts`.
+  5. **`--` argv terminator** for argv-injection resistance (P5c-2 OD-1 lesson).
+- **REQ-13 import guard** (mirroring tmux-terminal): no `agents/lib` static imports outside `lib/resolve.ts` (which uses dynamic import).
+- **Research grounding**: episodic memory episode `20260627-133046-cmux-research-for-pi-extension-design-an-6d74` (research store) + `https://cmux.com/docs/api`.
+
+### P5d cmux-control (OPENED — scaffold on `feat/cmux-control-and-p5b-cmux-terminal`)
+- New user-facing `cmux-control/` extension parallel to `tmux-control/` (P5c), but driving cmux instead of tmux.
+- **Pattern**: mirrors `tmux-control/` 1:1 with cmux-specific adaptations.
+- **5-slice ladder**:
+
+| Slice | Objective | Primary files | Tests | Parallel? |
+|---|---|---|---|---|
+| `P5d-S1` | `exec.ts` (argv-only cmux executor with hard 5s timeout), `socket.ts` (Unix socket client at `/tmp/cmux.sock` or `CMUX_SOCKET_PATH`), `identify.ts` (`cmux identify --json` wrapper + env-var fallback to `CMUX_WORKSPACE_ID`/`CMUX_SURFACE_ID`) | `cmux-control/lib/{exec, socket, identify}.ts` | 6 tests (exec errors, socket re-connect, identify parse) | top-level |
+| `P5d-S2` | `safety.ts` (ref validation: `workspace:N`, `pane:N`, `surface:N` regex; prefix gate default `pi-cmux-`), `focus-ops.ts` (**cmux-unique**: refuses `select-workspace`/`focus-pane`/`focus-panel`/`tab-action` without explicit user opt-in via `--i-mean-focus` flag or confirmation prompt) | `cmux-control/lib/{safety, focus-ops}.ts` | 8 tests | parallel with S1 |
+| `P5d-S3` | `list.ts` (`cmux list-workspaces --json`, `cmux list-panes --workspace ID`, `cmux tree --workspace ID`), `capture.ts` (`cmux read-screen --surface ID`), `send.ts` (`cmux send --surface ID "text"` + `cmux send-key --surface ID enter`), `launch.ts` (`cmux new-workspace --name X --cwd P --command "..." --focus false`, `cmux new-pane --workspace ID --type terminal --direction right --focus false`) | `cmux-control/lib/{list, capture, send, launch}.ts` | 14 tests | parallel with S1, S2 |
+| `P5d-S4` | `resolve.ts` (dynamic-import bridge to `agents/lib/bg-terminal.ts` — same pattern as `tmux-control/lib/resolve.ts`), `nlp.ts` (NL patterns: `list cmux workspaces`, `split pane right`, `send 'continue' to surface:3`), `constants.ts` | `cmux-control/lib/{resolve, nlp, constants}.ts` | 6 tests | parallel with S3 |
+| `P5d-S5` | `index.ts` — extension entry: 6 slash commands, 5 LLM tools, NLP input hook | `cmux-control/index.ts` | 1 extension-integration test | serial after S1-S4 |
+
+- **cmux-unique features** (vs tmux-control):
+  1. **`focus-ops.ts` gate** — refuses focus-changing cmux verbs (`select-workspace`, `focus-pane`, `focus-panel`, `tab-action`) without explicit user opt-in. Mirrors cmux's own SKILL.md non-disruptive automation rule. Auto-defaults `--focus false` on every layout op.
+  2. **Workspace/surface refs** instead of session/window. `cmux list-workspaces --workspace workspace:2` etc. Replaces tmux's `session:window_index` syntax.
+  3. **Environment-var resolution** — reads `CMUX_WORKSPACE_ID` and `CMUX_SURFACE_ID` from cmux-injected shell sessions, defaulting to `cmux identify --json` if unset.
+  4. **Notification ops** (cmux-only): `cmux notify --title T --body B`, `cmux set-status build "running" --workspace ID --color "#ff9500"`, `cmux set-progress 0.5 --workspace ID --label "Building"`.
+  5. **Browser surface ops** (cmux-only): `cmux new-pane --workspace ID --type browser --url URL --focus false`.
+- **Safety invariants preserved from tmux-control**:
+  - argv-only execFile (no shell)
+  - 5s hard timeout on every cmux call
+  - prefix gate (`pi-cmux-` default) refuses writes to non-prefixed workspaces/surfaces
+  - workspace/surface ref validation (regex-checked `workspace:N`, `pane:N`, `surface:N`)
+  - bounded inputs (4 KB text, 5000-line read-screen)
+- **Dependency model**: same as tmux-control — `typebox` provided by pi's `jiti` + `virtualModules` at runtime; test runner auto-installs on first run.
+- **REQ-13 import guard**: no `agents/lib` static imports outside `lib/resolve.ts`.
+- **Surface (planned v0.1)**:
+  - 6 slash commands: `/cmux-list`, `/cmux-tree`, `/cmux-capture`, `/cmux-send`, `/cmux-launch`, `/cmux-split`, `/cmux-notify`, `/cmux-config`
+  - 5 LLM-callable tools: `cmux_list_workspaces`, `cmux_tree`, `cmux_read_screen`, `cmux_send`, `cmux_send_key`, `cmux_new_workspace`, `cmux_new_pane`, `cmux_notify`
+  - 1 NLP input hook (NL patterns for cmux commands)
+- **Research grounding**: episodic memory episode `20260627-133046-cmux-research-for-pi-extension-design-an-6d74` + `https://cmux.com/docs` (CLI Reference, Notifications).
+
 - Not in current cut
 
 - P3e: docs, README, user manual, smoke, PR #38, commit `04695e6`
