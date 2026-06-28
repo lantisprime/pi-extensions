@@ -114,6 +114,92 @@ import { PASTE_BUFFER_NAME, BRACKET_START, BRACKET_END } from "../lib/constants.
 	assert.match(r.error, /Enter failed/);
 }
 
+// ── sendText pressEnterCount (P5c-2-S3) ───────────────────────────────
+
+// sendText: pressEnterCount:3 fires exactly 3 Enter calls on multi-line path (routes through pasteText).
+{
+	const fake = createFakeTmux();
+	// pasteText does set + paste + 3 Enters = 5 responses
+	fake.program(Array(5).fill(okResult("")));
+	const r = await sendText(fake, [], { sessionName: "smoke", windowIndex: "2" },
+		"line1\nline2\nline3", { pressEnterCount: 3 });
+	assert.equal(r.ok, true);
+	const enterCalls = fake.calls.filter((c) => c.args.includes("Enter")).length;
+	assert.equal(enterCalls, 3, `expected 3 Enter calls, got ${enterCalls}`);
+}
+
+// sendText: pressEnterCount:100 clamps to MAX_ENTER_COUNT (10) on multi-line path.
+{
+	const fake = createFakeTmux();
+	// pasteText does set + paste + 10 clamped Enters = 12 responses
+	fake.program(Array(12).fill(okResult("")));
+	const r = await sendText(fake, [], { sessionName: "smoke", windowIndex: "2" },
+		"multi\nline", { pressEnterCount: 100 });
+	assert.equal(r.ok, true);
+	const enterCalls = fake.calls.filter((c) => c.args.includes("Enter")).length;
+	assert.equal(enterCalls, 10, `expected clamp to MAX_ENTER_COUNT=10, got ${enterCalls}`);
+}
+
+// sendText: pressEnterCount:3 fires exactly 3 Enter calls on literal (single-line) path.
+// Regression guard for S3: the literal-mode Enter block must honor pressEnterCount, not just send 1.
+{
+	const fake = createFakeTmux();
+	// literal path does send-keys + 3 Enters = 4 responses (no set/paste; no -l flag interception)
+	fake.program(Array(4).fill(okResult("")));
+	const r = await sendText(fake, [], { sessionName: "smoke", windowIndex: "2" },
+		"single line no newlines", { pressEnterCount: 3 });
+	assert.equal(r.ok, true);
+	assert.equal(fake.calls.length, 4, "single-line + pressEnterCount:3 should be send-keys + 3 Enters");
+	const enterCalls = fake.calls.filter((c) => c.args.includes("Enter")).length;
+	assert.equal(enterCalls, 3, `literal path: expected 3 Enter calls, got ${enterCalls}`);
+}
+
+// sendText: pressEnterCount:NaN is fail-safe on literal path — Enter loop skipped (0 Enters).
+// NaN-safe parity with pasteText: Math.max(NaN, 0) = NaN; `for (let i = 0; i < NaN; i++)` does not execute.
+// Regression guard for codex MAJOR round 2: effectiveEnterCount must be 0, not NaN.
+{
+	const fake = createFakeTmux();
+	// literal path does send-keys only (Enter loop skipped) = 1 response
+	fake.program([okResult("")]);
+	const r = await sendText(fake, [], { sessionName: "smoke", windowIndex: "2" },
+		"single line", { pressEnterCount: NaN });
+	assert.equal(r.ok, true);
+	const enterCalls = fake.calls.filter((c) => c.args.includes("Enter")).length;
+	assert.equal(enterCalls, 0, `NaN pressEnterCount must skip Enter loop on literal path, got ${enterCalls}`);
+	assert.equal(r.effectiveEnterCount, 0, `NaN pressEnterCount must yield effectiveEnterCount=0 (not NaN), got ${r.effectiveEnterCount}`);
+}
+
+// sendText: effectiveEnterCount reflects the actual (post-clamp) Enter count on the literal path.
+// Regression guard for codex MAJOR: the displayed count must match what was fired, not what was requested.
+{
+	const fake = createFakeTmux();
+	fake.program(Array(11).fill(okResult("")));  // send-keys + 10 clamped Enters
+	const r = await sendText(fake, [], { sessionName: "smoke", windowIndex: "2" },
+		"single line", { pressEnterCount: 100 });
+	assert.equal(r.ok, true);
+	assert.equal(r.effectiveEnterCount, 10, `effectiveEnterCount must reflect clamp (100→10), got ${r.effectiveEnterCount}`);
+}
+
+// sendText: effectiveEnterCount=0 when pressEnter is false (no Enters fired regardless of pressEnterCount).
+{
+	const fake = createFakeTmux();
+	fake.program([okResult("")]);  // send-keys only, no Enter
+	const r = await sendText(fake, [], { sessionName: "smoke", windowIndex: "2" },
+		"single line", { pressEnter: false, pressEnterCount: 5 });
+	assert.equal(r.ok, true);
+	assert.equal(r.effectiveEnterCount, 0, `pressEnter:false must yield effectiveEnterCount=0, got ${r.effectiveEnterCount}`);
+}
+
+// pasteText: effectiveEnterCount reflects the actual (post-clamp) Enter count.
+{
+	const fake = createFakeTmux();
+	fake.program(Array(12).fill(okResult("")));  // set + paste + 10 clamped Enters
+	const r = await pasteText(fake, [], { sessionName: "smoke", windowIndex: "2" },
+		"hello", { pressEnterCount: 100 });
+	assert.equal(r.ok, true);
+	assert.equal(r.effectiveEnterCount, 10, `pasteText effectiveEnterCount must reflect clamp, got ${r.effectiveEnterCount}`);
+}
+
 // ── launchSession ─────────────────────────────────────────────────────
 
 // launchSession: spawns session
@@ -293,12 +379,14 @@ import { PASTE_BUFFER_NAME, BRACKET_START, BRACKET_END } from "../lib/constants.
 }
 
 // pasteText: pressEnterCount:NaN is a fail-safe — Math.min/max produce NaN, NaN>0 is false, loop skipped.
+// Regression guard for codex MAJOR round 2: effectiveEnterCount must be 0, not NaN.
 {
 	const fake = createFakeTmux();
 	fake.program([okResult(""), okResult("")]);
 	const r = await pasteText(fake, [], { sessionName: "smoke", windowIndex: "2" }, "hello", { pressEnterCount: NaN });
 	assert.equal(r.ok, true);
 	assert.equal(fake.calls.length, 2, "set + paste only; NaN treated as 0 Enters (fail-safe)");
+	assert.equal(r.effectiveEnterCount, 0, `NaN pressEnterCount must yield effectiveEnterCount=0 (not NaN), got ${r.effectiveEnterCount}`);
 }
 
 // pasteText REQ-20: embedded \e[200~ (paste-start) is rejected before any tmux call.

@@ -264,6 +264,11 @@ function registerTools(pi: ExtensionAPI): void {
 			window: Type.String({ description: "Window name or runId" }),
 			text: Type.String({ description: "Text to send (max 4000 bytes). Multi-line is delivered as one bracketed paste event." }),
 			pressEnter: Type.Optional(Type.Boolean({ description: "Send Enter after text (default true)" })),
+			pressEnterCount: Type.Optional(Type.Integer({
+				description: "Number of separate Enter invocations after text (default 1, clamped 0..10). Ignored when pressEnter is false. Applied on both the literal (single-line) and bracketed-paste (multi-line) paths.",
+				minimum: 0,
+				maximum: 10,
+			})),
 		}),
 		async execute(_id, params, _signal, _onUpdate, _ctx) {
 			const sock = getSocketPrefix();
@@ -271,9 +276,13 @@ function registerTools(pi: ExtensionAPI): void {
 			const wins = await listAgentWindows(executor, sock, currentPrefix);
 			const resolved = resolveTarget(params.window, wins, { prefix: currentPrefix });
 			if ("error" in resolved) return { content: [{ type: "text", text: resolved.error }], details: { ok: false } };
-			const r = await sendText(executor, sock, resolved.target, params.text, { pressEnter: params.pressEnter });
+			const r = await sendText(executor, sock, resolved.target, params.text, { pressEnter: params.pressEnter, pressEnterCount: params.pressEnterCount });
 			if (!r.ok) return { content: [{ type: "text", text: `send failed: ${r.error}` }], details: { ok: false } };
-			return { content: [{ type: "text", text: `Sent ${r.sentBytes} bytes${params.pressEnter !== false ? " + Enter" : ""} to "${resolved.target.windowName}"${r.routedViaPaste ? " (via bracketed paste)" : ""}.` }], details: { ok: true, target: `${resolved.target.sessionName}:${resolved.target.windowIndex}`, sentBytes: r.sentBytes, routedViaPaste: r.routedViaPaste ?? false } };
+			// Use sendText's reported effective count (post-clamp) for the displayed message;
+			// falls back to params-based inference if the field is missing (defensive, e.g. older sendText).
+			const enterCount = r.effectiveEnterCount ?? (params.pressEnter === false ? 0 : (params.pressEnterCount ?? 1));
+			const enterSuffix = enterCount === 0 ? "" : enterCount === 1 ? " + Enter" : ` + ${enterCount}x Enter`;
+			return { content: [{ type: "text", text: `Sent ${r.sentBytes} bytes${enterSuffix} to "${resolved.target.windowName}"${r.routedViaPaste ? " (via bracketed paste)" : ""}.` }], details: { ok: true, target: `${resolved.target.sessionName}:${resolved.target.windowIndex}`, sentBytes: r.sentBytes, routedViaPaste: r.routedViaPaste ?? false, pressEnterCount: enterCount } };
 		},
 	});
 

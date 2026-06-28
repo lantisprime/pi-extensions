@@ -18,7 +18,7 @@
 //   - Text length capped at MAX_TEXT_BYTES (4 KB) to prevent floods.
 //   - send-keys with literal text uses `-l` to suppress key-name parsing.
 import type { TmuxExecutor } from "./exec.ts";
-import { TMUX_INVOCATION_TIMEOUT_MS, MAX_TEXT_BYTES } from "./constants.ts";
+import { TMUX_INVOCATION_TIMEOUT_MS, MAX_TEXT_BYTES, MAX_ENTER_COUNT } from "./constants.ts";
 import { pasteText } from "./paste.ts";
 
 export type SendMode = "literal" | "keys";
@@ -34,6 +34,8 @@ export interface SendResult {
 	error?: string;
 	/** True if the text was routed through pasteText (multi-line). Omitted for the literal path. */
 	routedViaPaste?: boolean;
+	/** Number of Enters actually fired after clamping (0..MAX_ENTER_COUNT). Omitted on failure paths. */
+	effectiveEnterCount?: number;
 }
 
 export interface SendOpts {
@@ -67,7 +69,7 @@ export async function sendText(
 			pressEnter: opts?.pressEnter,
 			pressEnterCount: opts?.pressEnterCount,
 		});
-		return { ...r, routedViaPaste: true };
+		return { ...r, routedViaPaste: true, effectiveEnterCount: r.effectiveEnterCount };
 	}
 
 	const t = `${target.sessionName}:${target.windowIndex}`;
@@ -82,15 +84,23 @@ export async function sendText(
 	}
 
 	const pressEnter = opts?.pressEnter !== false;
+	// Clamp to 0..MAX_ENTER_COUNT. The clamp converts Infinity → MAX_ENTER_COUNT
+	// (bounded) and NaN propagates; Number.isFinite() then normalizes NaN → 0 so
+	// the reported effectiveEnterCount is always coherent with what was fired.
+	// Mirrors the pasteText path; this is the literal/single-line side of S3.
+	const rawCount = Math.min(Math.max(opts?.pressEnterCount ?? 1, 0), MAX_ENTER_COUNT);
+	const pressEnterCount = pressEnter ? (Number.isFinite(rawCount) ? rawCount : 0) : 0;
 	if (pressEnter) {
-		const r2 = await executor.exec(
-			[...socketPrefix, "send-keys", "-t", t, "Enter"],
-			{ timeoutMs: TMUX_INVOCATION_TIMEOUT_MS },
-		);
-		if (!r2.ok) {
-			return { ok: false, error: `text sent but Enter failed: ${r2.stderr}` };
+		for (let i = 0; i < pressEnterCount; i++) {
+			const r2 = await executor.exec(
+				[...socketPrefix, "send-keys", "-t", t, "Enter"],
+				{ timeoutMs: TMUX_INVOCATION_TIMEOUT_MS },
+			);
+			if (!r2.ok) {
+				return { ok: false, error: `text sent but Enter failed: ${r2.stderr}` };
+			}
 		}
 	}
 
-	return { ok: true, sentBytes: text.length };
+	return { ok: true, sentBytes: text.length, effectiveEnterCount: pressEnterCount };
 }

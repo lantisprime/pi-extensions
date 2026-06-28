@@ -39,6 +39,8 @@ export interface PasteResult {
 	ok: boolean;
 	sentBytes?: number;
 	error?: string;
+	/** Number of Enters actually fired after clamping (0..MAX_ENTER_COUNT). Omitted on failure paths. */
+	effectiveEnterCount?: number;
 }
 
 export interface PasteOpts {
@@ -100,9 +102,11 @@ export async function pasteText(
 
 	const t = `${target.sessionName}:${target.windowIndex}`;
 	const pressEnter = opts?.pressEnter !== false;
-	// Clamp to 0..MAX_ENTER_COUNT. NaN-safe: NaN > 0 is false, so the Enter loop
-	// is skipped entirely (fail-safe — never fires an unbounded number of Enters).
-	const pressEnterCount = Math.min(Math.max(opts?.pressEnterCount ?? 1, 0), MAX_ENTER_COUNT);
+	// Clamp to 0..MAX_ENTER_COUNT. The clamp converts Infinity → MAX_ENTER_COUNT
+	// (bounded) and NaN propagates; Number.isFinite() then normalizes NaN → 0 so
+	// the reported effectiveEnterCount is always coherent with what was fired.
+	const rawCount = Math.min(Math.max(opts?.pressEnterCount ?? 1, 0), MAX_ENTER_COUNT);
+	const pressEnterCount = pressEnter ? (Number.isFinite(rawCount) ? rawCount : 0) : 0;
 
 	// Step 1: set-buffer with `--` options terminator so leading-dash text
 	// is delivered verbatim (REQ-2, OD-1).
@@ -139,5 +143,5 @@ export async function pasteText(
 		}
 	}
 
-	return { ok: true, sentBytes: text.length };
+	return { ok: true, sentBytes: text.length, effectiveEnterCount: pressEnterCount };
 }
