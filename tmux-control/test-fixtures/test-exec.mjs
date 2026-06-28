@@ -8,6 +8,7 @@ import { sendText } from "../lib/send.ts";
 import { launchSession } from "../lib/launch.ts";
 import { pasteText } from "../lib/paste.ts";
 import { waitForWindow } from "../lib/wait.ts";
+import { checkExtendedKeys } from "../lib/keyscheck.ts";
 import { PASTE_BUFFER_NAME, BRACKET_START, BRACKET_END } from "../lib/constants.ts";
 
 // ── listAgentWindows ──────────────────────────────────────────────────
@@ -814,6 +815,139 @@ import { PASTE_BUFFER_NAME, BRACKET_START, BRACKET_END } from "../lib/constants.
 		const sIdx = args.indexOf("-S");
 		assert.equal(args[sIdx + 1], "-50", `call ${i} should use DEFAULT_WAIT_LINES=50`);
 	}
+}
+
+// ── checkExtendedKeys (P5c-2-S4) ──────────────────────────────────────────
+
+// checkExtendedKeys: tmux 3.6 with extended-keys-format=csi-u → ok.
+{
+	const fake = createFakeTmux();
+	fake.program([
+		okResult("tmux 3.6a\n"),
+		okResult("csi-u\n"),
+	]);
+	const r = await checkExtendedKeys(fake, []);
+	assert.equal(r.ok, true, `expected ok:true for csi-u, got ${JSON.stringify(r)}`);
+	assert.equal(r.format, "csi-u");
+	assert.match(String(r.version), /tmux 3\.6/);
+	// First call: tmux -V (no socket prefix in args beyond "-V").
+	assert.equal(fake.calls[0].args[0], "-V");
+	// Second call: show-option with socket prefix prepended.
+	assert.equal(fake.calls[1].args[0], "show-option");
+	assert.equal(fake.calls[1].args[1], "-gv");
+	assert.equal(fake.calls[1].args[2], "extended-keys-format");
+}
+
+// checkExtendedKeys: tmux 3.6 with extended-keys-format=xterm-keys → !ok.
+{
+	const fake = createFakeTmux();
+	fake.program([
+		okResult("tmux 3.6\n"),
+		okResult("xterm-keys\n"),
+	]);
+	const r = await checkExtendedKeys(fake, []);
+	assert.equal(r.ok, false, `expected ok:false for xterm-keys, got ${JSON.stringify(r)}`);
+	assert.equal(r.format, "xterm-keys");
+	assert.match(String(r.warning), /extended-keys-format is "xterm-keys"/);
+	assert.match(String(r.warning), /csi-u/);
+}
+
+// checkExtendedKeys: tmux 3.4 → !ok (version < 3.5). No show-option call.
+{
+	const fake = createFakeTmux();
+	fake.program([
+		okResult("tmux 3.4\n"),
+	]);
+	const r = await checkExtendedKeys(fake, []);
+	assert.equal(r.ok, false, `expected ok:false for tmux < 3.5, got ${JSON.stringify(r)}`);
+	assert.match(String(r.warning), /does not support extended-keys-format/);
+	assert.match(String(r.warning), /3\.4/);
+	assert.equal(fake.calls.length, 1, "no show-option call when version < 3.5");
+}
+
+// checkExtendedKeys: tmux -V parse failure → !ok (unparseable output).
+{
+	const fake = createFakeTmux();
+	fake.program([
+		okResult("garbage output with no version\n"),
+	]);
+	const r = await checkExtendedKeys(fake, []);
+	assert.equal(r.ok, false, `expected ok:false for parse failure, got ${JSON.stringify(r)}`);
+	assert.match(String(r.warning), /could not parse tmux version/);
+	assert.equal(r.version, "garbage output with no version");
+	assert.equal(fake.calls.length, 1, "no show-option call on parse failure");
+}
+
+// checkExtendedKeys: tmux 3.5 (edge — exactly the threshold) with csi-u → ok.
+{
+	const fake = createFakeTmux();
+	fake.program([
+		okResult("tmux 3.5\n"),
+		okResult("csi-u\n"),
+	]);
+	const r = await checkExtendedKeys(fake, []);
+	assert.equal(r.ok, true, `tmux 3.5 (threshold) with csi-u should be ok, got ${JSON.stringify(r)}`);
+}
+
+// checkExtendedKeys: tmux -V exec fails → !ok with error message.
+{
+	const fake = createFakeTmux();
+	fake.program([
+		errResult("spawn tmux ENOENT", -1),
+	]);
+	const r = await checkExtendedKeys(fake, []);
+	assert.equal(r.ok, false);
+	assert.match(String(r.warning), /version check failed/);
+	assert.equal(fake.calls.length, 1);
+}
+
+// checkExtendedKeys: show-option fails (option not found, etc.) → !ok.
+{
+	const fake = createFakeTmux();
+	fake.program([
+		okResult("tmux 3.6\n"),
+		errResult("unknown option: extended-keys-format", 1),
+	]);
+	const r = await checkExtendedKeys(fake, []);
+	assert.equal(r.ok, false);
+	assert.match(String(r.warning), /could not read extended-keys-format option/);
+	assert.equal(fake.calls.length, 2);
+}
+
+// checkExtendedKeys: tmux next-3.6 → ok (version parser strips "next-" prefix).
+{
+	const fake = createFakeTmux();
+	fake.program([
+		okResult("tmux next-3.6\n"),
+		okResult("csi-u\n"),
+	]);
+	const r = await checkExtendedKeys(fake, []);
+	assert.equal(r.ok, true, `tmux next-3.6 with csi-u should be ok, got ${JSON.stringify(r)}`);
+	assert.equal(r.format, "csi-u");
+}
+
+// checkExtendedKeys: executor.exec() throws (rejection, not {ok:false}) → caught, returns {ok:false, warning}.
+{
+	const fake = createFakeTmux();
+	fake.exec = async () => { throw new Error("executor exploded"); };
+	const r = await checkExtendedKeys(fake, []);
+	assert.equal(r.ok, false, `executor throw should yield ok:false, got ${JSON.stringify(r)}`);
+	assert.match(String(r.warning), /exploded/);
+}
+
+// checkExtendedKeys: show-option executor.exec() throws → caught, returns {ok:false, version, warning}.
+{
+	const fake = createFakeTmux();
+	let callCount = 0;
+	fake.exec = async (args) => {
+		callCount++;
+		if (callCount === 1) return { ok: true, stdout: "tmux 3.6\n", stderr: "", exitCode: 0 };
+		throw new Error("show-option exec threw");
+	};
+	const r = await checkExtendedKeys(fake, []);
+	assert.equal(r.ok, false);
+	assert.equal(r.version, "tmux 3.6");
+	assert.match(String(r.warning), /show-option exec threw/);
 }
 
 console.log("test-exec: all tests passed");

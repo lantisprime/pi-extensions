@@ -16,6 +16,7 @@ import { discoverMainServerPrefix } from "./lib/socket.ts";
 import { listAgentWindows } from "./lib/list.ts";
 import { captureWindow } from "./lib/capture.ts";
 import { sendText } from "./lib/send.ts";
+import { checkExtendedKeys } from "./lib/keyscheck.ts";
 import { pasteText } from "./lib/paste.ts";
 import { launchSession } from "./lib/launch.ts";
 import { resolveRunId } from "./lib/resolve.ts";
@@ -430,5 +431,23 @@ export default function tmuxControlExtension(pi: ExtensionAPI): void {
 		registerCommands(pi);
 		registerTools(pi);
 		registerInputHook(pi);
+
+		// Fire-and-forget extended-keys check (REQ-14).
+		// Does NOT block registration — the handler stays synchronous.
+		// No-socket → no-op (no warn, no error).
+		const sock = getSocketPrefix();
+		if (sock) {
+			const sessionPi = pi;
+			checkExtendedKeys(defaultTmuxExecutor(), sock).then((r) => {
+				if (!r.ok && r.warning) {
+					sessionPi.ui?.notify?.(r.warning, "warning");
+				}
+			}).catch(() => {
+				// Swallow — rejection leaks must not become unhandled-rejection.
+				// The executor should never throw (contract: return {ok:false}),
+				// but a defensive catch costs nothing and prevents noise in
+				// --unhandled-rejections=strict environments.
+			});
+		}
 	});
 }
