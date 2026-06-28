@@ -18,9 +18,19 @@
 //                   (REQ-1, REQ-18) so multi-line prompts arrive intact.
 //                   Uses pasteText (not sendText) to avoid the S1 routing
 //                   ambiguity — drive always wants the paste path.
-//   3. done      — waitForWindow polls for doneRegex (default
-//                   "Cooked for|Baked for|✻"). The regex match means the
-//                   TUI has stopped streaming and is back at the prompt.
+//   3. done      — waitForWindow polls for a STABILITY signal by default:
+//                   output must be unchanged for `doneStableMs` (2000ms).
+//                   The previous regex-based default ("Cooked for|Baked for|✻")
+//                   had two correctness bugs flagged by codex review:
+//                     a) Stale match — a prior "Cooked for 5s" line in
+//                        scrollback matches before the new prompt starts.
+//                     b) Streaming ✻ — the spinner glyph appears while the
+//                        TUI is still working; regex would match on the
+//                        first poll while the answer is incomplete.
+//                   Callers can opt BACK INTO regex-based detection by
+//                   passing `doneRegex` (any non-empty string). When opt-in
+//                   is used, the orchestrator accepts the documented
+//                   hazards and trades them for a single-poll trigger.
 //                   Timeout yields phase:"done" WITH partial output so the
 //                   caller can inspect whatever the TUI produced before
 //                   the orchestrator gave up.
@@ -55,11 +65,14 @@ import { resolveTarget } from "./safety.ts";
 import type { ListedWindow } from "./list.ts";
 import {
 	DEFAULT_DRIVE_READY_REGEX,
-	DEFAULT_DRIVE_DONE_REGEX,
 	DEFAULT_DRIVE_READY_TIMEOUT_MS,
 	DEFAULT_DRIVE_DONE_TIMEOUT_MS,
 	DEFAULT_DRIVE_LINES,
 } from "./constants.ts";
+// DEFAULT_DRIVE_DONE_REGEX is intentionally NOT used as the default for
+// done-detection anymore (see phase 3 doc above). It remains exported from
+// constants.ts as a *suggested* pattern for callers who explicitly opt in
+// to regex-based done detection via the `doneRegex` parameter.
 
 export interface DriveClaudeOpts {
 	/** Window name (e.g. "pi-agent-bg-abc") or runId (e.g. "bg-abc"). */
@@ -69,8 +82,12 @@ export interface DriveClaudeOpts {
 	/** Regex (string) matched against the pane to confirm the TUI is ready
 	 *  for input. Default DEFAULT_DRIVE_READY_REGEX. */
 	readyRegex?: string;
-	/** Regex (string) matched against the pane to confirm the TUI has
-	 *  finished its response. Default DEFAULT_DRIVE_DONE_REGEX. */
+	/** OPT-IN: regex (string) matched against the pane to confirm the TUI
+	 *  has finished its response. When omitted (default), the orchestrator
+	 *  uses stability-based detection (output unchanged for doneStableMs).
+	 *  Pass a non-empty string to opt BACK INTO regex-based detection.
+	 *  See codex review for the rationale (stale-match and streaming-✻
+	 *  correctness hazards of the previous regex default). */
 	doneRegex?: string;
 	/** Max ms to wait for the ready marker. Default DEFAULT_DRIVE_READY_TIMEOUT_MS. */
 	readyTimeoutMs?: number;
@@ -109,11 +126,11 @@ export interface DriveClaudeResult {
  * windows, because the caller's snapshot is authoritative for the current
  * invocation.
  *
- * @throws Nothing — every failure path returns `{ok:false, ...}`. The only
- *         potentially-throwing call (waitForWindow on a malformed readyRegex/
- *         doneRegex string) propagates SyntaxError to the caller. Tool layer
- *         should validate patterns if user-supplied regex is a concern; the
- *         default constants are well-formed.
+ * @throws Nothing — every failure path (including malformed readyRegex /
+ *         doneRegex patterns) returns `{ok:false, phase, error}` so the
+ *         tool layer can surface a structured error to the LLM rather than
+ *         throwing across the tool boundary. A malformed readyRegex yields
+ *         phase:"ready"; a malformed doneRegex yields phase:"done".
  */
 export async function driveClaude(
 	executor: TmuxExecutor,
@@ -126,9 +143,13 @@ export async function driveClaude(
 	// mirror the documented constants — keeping them inline (rather than
 	// inside the function calls) makes the call sites in the LLM tool
 	// reviewable without re-scanning constants.ts.
+	//
+	// doneRegex is intentionally NOT defaulted here. The default for
+	// done-detection is stability-based (stableMs); regex-based detection
+	// is opt-in via `opts.doneRegex` (see phase 3 comment below).
 	const lines = opts.lines ?? DEFAULT_DRIVE_LINES;
 	const readyRegex = opts.readyRegex ?? DEFAULT_DRIVE_READY_REGEX;
-	const doneRegex = opts.doneRegex ?? DEFAULT_DRIVE_DONE_REGEX;
+	const doneRegex = opts.doneRegex;
 	const readyTimeoutMs = opts.readyTimeoutMs ?? DEFAULT_DRIVE_READY_TIMEOUT_MS;
 	const doneTimeoutMs = opts.doneTimeoutMs ?? DEFAULT_DRIVE_DONE_TIMEOUT_MS;
 	const pressEnterCount = opts.pressEnterCount ?? 1;
@@ -148,12 +169,30 @@ export async function driveClaude(
 	// the idle state, so we must NOT paste — the prompt would land on a
 	// confused prompt area and the TUI could submit it as an unintended
 	// command. Safe to bail.
-	const readyWait = await waitForWindow(
-		executor,
-		socketPrefix,
-		{ sessionName: target.sessionName, windowIndex: target.windowIndex },
-		{ regex: readyRegex, timeoutMs: readyTimeoutMs, lines },
-	);
+	//
+	// A malformed readyRegex throws SyntaxError from waitForWindow (which
+	// compiles it via `new RegExp` eagerly). Convert that to a structured
+	// phase:"ready" error so the tool layer can surface it without throwing
+	// across the tool boundary.
+	let readyWait;
+	try {
+		readyWait = await waitForWindow(
+			executor,
+			socketPrefix,
+			{ sessionName: target.sessionName, windowIndex: target.windowIndex },
+			{ regex: readyRegex, timeoutMs: readyTimeoutMs, lines },
+		);
+	} catch (e) {
+		if (e instanceof SyntaxError) {
+			return {
+				ok: false,
+				phase: "ready",
+				error: `invalid readyRegex ${JSON.stringify(readyRegex)}: ${e.message}`,
+				target: targetStr,
+			};
+		}
+		throw e;
+	}
 	if (!readyWait.ok) {
 		// waitForWindow returns `error` on capture-error and `output` on
 		// timeout. Use whichever the reason provides; both are non-empty
@@ -177,16 +216,43 @@ export async function driveClaude(
 		return { ok: false, phase: "paste", error: paste.error, target: targetStr };
 	}
 
-	// Phase 3 — wait for done. On timeout, return PARTIAL OUTPUT so the
-	// caller can inspect whatever the TUI produced before we gave up. This
-	// is the most useful state for recovery (re-call with longer timeout,
-	// capture-and-move-on, etc.).
-	const doneWait = await waitForWindow(
-		executor,
-		socketPrefix,
-		{ sessionName: target.sessionName, windowIndex: target.windowIndex },
-		{ regex: doneRegex, timeoutMs: doneTimeoutMs, lines },
-	);
+// Phase 3 — wait for done. Uses stableMs as the DEFAULT done-detection
+	// mechanism (output hasn't changed for doneStableMs). Regex-based done
+	// detection is available as an opt-in (doneRegex overrides stableMs).
+	// On timeout, return PARTIAL OUTPUT so the caller can inspect whatever
+	// the TUI produced before we gave up.
+	const doneStableMs = 2_000;
+	const doneWaitOpts: Parameters<typeof waitForWindow>[3] = { timeoutMs: doneTimeoutMs, lines };
+	if (doneRegex !== undefined && doneRegex !== "") {
+		// Caller explicitly chose regex-based detection (opt-in).
+		doneWaitOpts.regex = doneRegex;
+	} else {
+		// Default: stability-based detection (output unchanged for doneStableMs).
+		doneWaitOpts.stableMs = doneStableMs;
+	}
+	// A malformed doneRegex throws SyntaxError from waitForWindow (which
+	// compiles it via `new RegExp` eagerly). Convert that to a structured
+	// phase:"done" error so the tool layer can surface it without throwing
+	// across the tool boundary.
+	let doneWait;
+	try {
+		doneWait = await waitForWindow(
+			executor,
+			socketPrefix,
+			{ sessionName: target.sessionName, windowIndex: target.windowIndex },
+			doneWaitOpts,
+		);
+	} catch (e) {
+		if (e instanceof SyntaxError) {
+			return {
+				ok: false,
+				phase: "done",
+				error: `invalid doneRegex ${JSON.stringify(doneRegex)}: ${e.message}`,
+				target: targetStr,
+			};
+		}
+		throw e;
+	}
 	if (!doneWait.ok) {
 		// Compose an error that includes the wait reason + the partial output
 		// snapshot. The caller-facing result.output is the partial capture;

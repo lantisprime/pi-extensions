@@ -98,6 +98,46 @@ assert.equal(registeredTools.size, expectedTools.length, `expected exactly ${exp
 	assert.ok(typeof result.content[0].text === "string", "tmux_launch: returns text content");
 }
 
+// ── Tool: tmux_drive_claude (P5c-2-S6) ─────────────────────────────
+
+// tmux_drive_claude: schema exposes all 8 documented parameters.
+{
+	const tool = registeredTools.get("tmux_drive_claude");
+	assert.ok(tool, "tmux_drive_claude tool registered");
+	const props = tool.parameters.properties;
+	for (const name of ["window", "prompt", "readyRegex", "doneRegex", "readyTimeoutMs", "doneTimeoutMs", "pressEnterCount", "lines"]) {
+		assert.ok(props[name], `schema includes parameter: ${name}`);
+	}
+}
+
+// tmux_drive_claude: empty window identifier → phase:"resolve" error (no tmux call).
+// Exercises the tool-layer's translation of driveClaude's structured result into
+// a tool result. Without a real tmux server, the tool's resolveTarget path fires
+// (resolveTarget returns {error:"empty window identifier"} for empty input).
+// The driveClaude orchestrator converts that to {ok:false, phase:"resolve"} and
+// the tool layer surfaces it as content+details.
+{
+	const tool = registeredTools.get("tmux_drive_claude");
+	const ctx = { ui: { notify() {} } };
+	const result = await tool.execute("call-4", { window: "", prompt: "hi" }, new AbortController().signal, () => {}, ctx);
+	assert.equal(result.details.ok, false, "empty window: ok=false");
+	assert.equal(result.details.phase, "resolve", `empty window → phase:"resolve", got ${result.details.phase}`);
+	assert.ok(typeof result.content[0].text === "string", "returns text content");
+	assert.ok(result.content[0].text.startsWith("drive failed at resolve"), `error message format: drive failed at <phase>, got: ${result.content[0].text.slice(0, 80)}`);
+}
+
+// tmux_drive_claude: bad window identifier (invalid chars) → phase:"resolve" error.
+// isValidWindowName rejects whitespace + shell metacharacters; the tool surfaces
+// the validation error as a structured drive-failed message.
+{
+	const tool = registeredTools.get("tmux_drive_claude");
+	const ctx = { ui: { notify() {} } };
+	const result = await tool.execute("call-5", { window: "name with space", prompt: "hi" }, new AbortController().signal, () => {}, ctx);
+	assert.equal(result.details.ok, false, "invalid window chars: ok=false");
+	assert.equal(result.details.phase, "resolve", `invalid window → phase:"resolve", got ${result.details.phase}`);
+	assert.match(result.content[0].text, /invalid window identifier/, "error mentions invalid window identifier");
+}
+
 console.log("test-extension-integration: all tests passed");
 console.log(`  ✓ ${registeredCommands.size} slash commands: ${[...registeredCommands.keys()].join(", ")}`);
 console.log(`  ✓ ${registeredTools.size} tools: ${[...registeredTools.keys()].join(", ")}`);

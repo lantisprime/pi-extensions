@@ -344,7 +344,7 @@ function registerTools(pi: ExtensionAPI): void {
 			window: Type.String({ description: "Window name (e.g. pi-agent-bg-abc) or runId (e.g. bg-abc)" }),
 			prompt: Type.String({ description: "Prompt text (max 4000 bytes)" }),
 			readyRegex: Type.Optional(Type.String({ description: `Regex (string pattern) matched against the pane to confirm the TUI is ready for input. Default: ${DEFAULT_DRIVE_READY_REGEX}` })),
-			doneRegex: Type.Optional(Type.String({ description: `Regex (string pattern) matched against the pane to confirm the TUI has finished its response. Default: ${DEFAULT_DRIVE_DONE_REGEX}` })),
+			doneRegex: Type.Optional(Type.String({ description: `OPT-IN regex (string pattern) matched against the pane to confirm the TUI has finished its response. Default: stability-based (output unchanged for ~2s). Pass a non-empty string to override with a single-poll regex trigger — e.g. "${DEFAULT_DRIVE_DONE_REGEX}" matches Claude Code's "Cooked for Ns"/"Baked for Ns" lines and the ✻ spinner glyph. See tmux-control/lib/drive.ts for the rationale (stale-match and streaming-✻ correctness hazards of regex-based detection).` })),
 			readyTimeoutMs: Type.Optional(Type.Integer({ description: `Max ms to wait for the ready marker. Default ${DEFAULT_DRIVE_READY_TIMEOUT_MS}.`, minimum: 1000, maximum: 300000 })),
 			doneTimeoutMs: Type.Optional(Type.Integer({ description: `Max ms to wait for the done marker. Default ${DEFAULT_DRIVE_DONE_TIMEOUT_MS}.`, minimum: 1000, maximum: 600000 })),
 			pressEnterCount: Type.Optional(Type.Integer({ description: "Number of separate Enter invocations fired after the paste (default 1, clamped 0..10)", minimum: 0, maximum: 10 })),
