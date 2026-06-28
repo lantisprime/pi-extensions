@@ -41,7 +41,7 @@ assert.equal(startResult, undefined, "session_start handler is sync (returns und
 
 // ── Slash commands ───────────────────────────────────────────────────
 
-const expectedCommands = ["tmux-list", "tmux-capture", "tmux-send", "tmux-tail", "tmux-launch", "tmux-config"];
+const expectedCommands = ["tmux-list", "tmux-capture", "tmux-send", "tmux-tail", "tmux-launch", "tmux-paste", "tmux-config"];
 for (const name of expectedCommands) {
 	assert.ok(registeredCommands.has(name), `slash command /${name} registered`);
 }
@@ -55,7 +55,7 @@ for (const [name, def] of registeredCommands) {
 
 // ── Tools ────────────────────────────────────────────────────────────
 
-const expectedTools = ["tmux_list", "tmux_capture", "tmux_send", "tmux_launch"];
+const expectedTools = ["tmux_list", "tmux_capture", "tmux_send", "tmux_paste", "tmux_launch"];
 for (const name of expectedTools) {
 	assert.ok(registeredTools.has(name), `tool ${name} registered`);
 	assert.ok(typeof registeredTools.get(name).execute === "function", `${name}: has execute`);

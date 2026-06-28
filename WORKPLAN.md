@@ -9,13 +9,13 @@ The canonical `pi-extensions` workplan now lives in episodic memory.
 NOT hardcode an episode ID here — it drifts on every revision. The active head is
 the source of truth; older entries in the chain are `superseded`.
 
-## Active implementation (P4 + P5 fully shipped + all post-merge fixes)
+## Active implementation (P5c-2-S1 + S2 shipped + P5b/P5d still OPEN)
 
-P4 Background Agents (P4R + P4-2..P4-7) and P5 Pluggable Terminal Backend are merged and feature is live.
+**P5c-2-S1 (pasteText) and S2 (waitForWindow) are shipped. P5c-2-S3 (pressEnterCount surface) is the next slice.**
 
-- Current episode ID: `20260627-092842-p5-fully-shipped-d5-d6-d7-fixes-merged-p-7d1e`
-- Tags include: `canonical-workplan`, `workplan`, `p4r-complete`, `p5-merged`, `p5-pr-98`, `p5-pr-100`, `p5-pr-102`, `p5-d5-d6-fix`, `p5-d7-fix`
-- Summary: P5 fully shipped with all 3 post-merge fixes (D5 probe + D6 node prefix + D7 symlink-loading) via PRs #100 + #102. Feature live for users via `~/.pi/agent/extensions/tmux-terminal` symlink. Next natural: P5b (zellij/wezterm/headless) or P4R-PROJ deferred.
+- Current episode ID: `20260628-014530-p5c-2-s2-waitforwindow-shipped-commit-5f-7d8b`
+- Tags include: `canonical-workplan`, `workplan`, `p4r-complete`, `p5-merged`, `p5c-shipped`, `p5c-2-s1-shipped`, `p5c-2-s1-commit-e32eadf`, `p5c-2-s2-shipped`, `p5c-2-s2-commit-d8ee10b`, `p5c-2-s2-amended-post-review`, `p5c-2-s2-claude-approve`, `p5c-2-s2-codex-approve-with-nits`, `p5c-2-s3-next`, `p5b-1-opened`, `p5b-1-cmux-terminal`, `p5d-opened`, `p5d-cmux-control`
+- Summary: **P5c-2-S1 (pasteText) + P5c-2-S2 (waitForWindow) SHIPPED** on branch `feat/p5c-2-foundations` (PR #109). S1 is commit `e32eadf`; S2 is commit `d8ee10b` (cherry-picked from `5f2ffeb` on the cmux branch — same content, different hash). **S2 originally committed as `214f888`, then amended to `5f2ffeb`** after a Claude + Codex code review via tmux found two real blockers (both fixed): `lastChangeAt` null-initialization + reset-to-null-on-change (enforces "not on first repeat" uniformly across stable-from-start and stable-after-change runs); caller RegExp always copied via `new RegExp(source, flags)` to avoid stateful `lastIndex` leakage. Both reviewers final verdict: `approve-with-nits`. **Tests**: 18 `waitForWindow` unit tests + 12 real-tmux smoke steps total (4 new in this PR) + 2 Path A bracketed-paste marker checks + REQ-13/REQ-17 guards all green. **Next: P5c-2-S3 (pressEnterCount surface)** — ~15 LOC + 2 unit tests, touches `lib/send.ts` + `lib/index.ts` only (seam already in `send.ts` since S1). **P5b-1 cmux-terminal + P5d cmux-control still OPENED** (scaffold only, macOS-only, waiting for cmux dev machine; P5b-1/P5d status notes are carried forward from prior cmux-branch commits and are unchanged by this PR).
 
 ### Completed tracks
 - P6 Intent Routing (7 slices, PRs #50, #58, #59, #60, #61)
@@ -29,19 +29,57 @@ P4 Background Agents (P4R + P4-2..P4-7) and P5 Pluggable Terminal Backend are me
 - P4-6 Status line (PR #96)
 - P4-7 Integration tests (PR #97, commit bea9eb0)
 - P5 Pluggable Terminal Backend (tmux-terminal extension, PR #98, commit f3b247c)
+- P5c tmux-control v0.1 (PR #106, commit 4cc5232)
+- **P5c-2-S1 pasteText (commit e32eadf on feat/p5c-2-foundations; originally 68c27d7 on feat/cmux-control-and-p5b-cmux-terminal)**
+- **P5c-2-S2 waitForWindow (commit d8ee10b on feat/p5c-2-foundations; originally 5f2ffeb on feat/cmux-control-and-p5b-cmux-terminal, amended post-review)**
 
 ### Next
-(none currently open)
+- **P5c-2-S3 (TOP PRIORITY)** — `pressEnterCount` surface for `tmux_send` (seam already in `send.ts` since S1). ~15 LOC + 2 unit tests.
+- P5c-2-S4 (parallel-safe) — `checkExtendedKeys` warn-only at `session_start`. New file `lib/keyscheck.ts`.
+- P5c-2-S5 (after S3) — `mode: "literal" | "keys"` surface for `tmux_send` (seam already in `send.ts` since S1). ~15 LOC + 4 unit tests.
+- P5c-2-S6 (last) — `tmux_drive_claude` composite tool (uses S1 + S2; must buffer across stdin reads per S6 design note in S1).
+
+### Next (open)
+
+#### P5c-2-S3 (TOP PRIORITY)
+- Exposes the existing `pressEnterCount` param on `tmux_send` (seam already in `send.ts` since S1).
+- Touches `lib/send.ts` and `lib/index.ts` only — no `lib/wait.ts` overlap. ~15 LOC + 2 unit tests.
+
+#### P5c-2-S4 (parallel-safe)
+- `checkExtendedKeys` warn-only at `session_start` (sync handler + fire-and-forget).
+- New file `lib/keyscheck.ts`. ~120 LOC + 6 unit tests.
+- Parses `tmux -V` + `tmux show-option -gv extended-keys-format`.
+- `session_start` calls `checkExtendedKeys()` fire-and-forget; warn-only (no throw, no state mutation).
+- Tests: csi-u, xterm, old tmux, parse-fail, session_start warn, no-socket noop.
+
+#### P5c-2-S6 tmux_drive_claude composite
+- New file `lib/drive.ts`. Composite of S1 + S2 + readiness detection.
+- **MUST buffer across stdin reads** (S6 design note in S1 commit; Path A test verified >1KB paste fragments into 4 reads but markers appear once at true start/end).
+- Target identification: claude/codex = raw-mode TUI with DECSET 2004; requires readiness-gating.
+
+#### P5b-1 cmux-terminal (OPENED, scaffold only)
+- 5-slice ladder. macOS-only. Still scaffold-only — not started.
+- Wait for cmux installed on dev machine.
+
+#### P5d cmux-control (OPENED, scaffold only)
+- 5-slice ladder. macOS-only. Still scaffold-only — not started.
+- Same prerequisite as P5b-1.
 
 ### Deferred
 - P4R-PROJ Project Background Agents (requires disk-backed trust reader)
-- Alternative terminal backends: zellij-terminal, wezterm-terminal, headless-backend
-- Multiple-backend selection via --backend flag (deferred until 2+ backends ship)
+- P5b-2 zellij-terminal, P5b-3 wezterm-terminal, P5b-4 headless-backend
+- Multiple-backend selection via `--backend` flag (until 2+ backends ship)
+- **NEW from S1**: Buffer-name TOCTOU — PASTE_BUFFER_NAME is fixed constant; concurrent pasteText races. Per-call unique buffer name is the fix but >3 LOC, out of scope.
+- **NEW from S1**: S6 must document buffer-across-reads requirement (already added to S1 commit body).
 
 ### Active design docs
 
 - `agents/docs/P4_REMEDIATION_PLAN.md` — v3 GO consensus. 6 remediation slices + deferred project-agents slice. All edit `agents/lib/bg-state.ts`.
 - `agents/docs/P4_BACKGROUND_AGENTS_PLAN.md` — parent plan (to be corrected in P4R-6).
 - `agents/docs/P5_PLUGGABLE_TERMINAL_BACKEND.md` — parallel track.
+- `agents/docs/P5C2_TMUX_CONTROL_TUI_AUTOMATION_PLAN.md` — 482 lines, 19 sections, 19 REQ rows, 29 unit tests + 3 smoke planned in the catalog (S1 + S2 actually shipped with 18 `waitForWindow` unit + 12 real-tmux smoke steps total + 2 Path A marker checks; S3-S6 OPEN).
+- `agents/docs/P5C2_TMUX_CONTROL_TUI_AUTOMATION_ADVERSARIAL_REVIEW.md` — pass-2 review.
+- `agents/docs/P5C2_TMUX_CONTROL_TUI_AUTOMATION_REVIEW.md` — pass-4 re-review (APPROVED after applying 4 fixes + OD-1).
+- `TMUX_TUI_AUTOMATION.md` — research grounding (in repo root).
 
 To update it, revise/supersede the episodic memory entry instead of editing this file.

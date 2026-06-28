@@ -17,6 +17,8 @@ import assert from "node:assert/strict";
 import { listAgentWindows } from "../lib/list.ts";
 import { captureWindow } from "../lib/capture.ts";
 import { sendText } from "../lib/send.ts";
+import { pasteText } from "../lib/paste.ts";
+import { waitForWindow } from "../lib/wait.ts";
 import { launchSession } from "../lib/launch.ts";
 import { resolveRunId } from "../lib/resolve.ts";
 import { defaultTmuxExecutor } from "../lib/exec.ts";
@@ -123,6 +125,65 @@ async function main() {
 			assert.equal(r.window.windowName, "pi-agent-bg-run-1");
 			assert.ok(["prefix-match", "backend"].includes(r.window.source), `unexpected source: ${r.window.source}`);
 			assert.equal(r.window.sessionName, "smoke", "session filled in by prefix-match path");
+		});
+
+		await step("pasteText delivers multi-line text to live pane (bracketed paste, no premature submit)", async () => {
+			const marker = `paste-${Date.now()}`;
+			// Use comment lines so even if prematurely submitted, the shell
+			// wouldn't error — but with paste-buffer -p, the text lands as ONE
+			// bracketed-paste event in the prompt without any submission.
+			const prompt = `# ${marker} line A\n# ${marker} line B\n# ${marker} line C`;
+			const r = await pasteText(executor, SOCK, listedTarget, prompt, { pressEnter: false });
+			assert.equal(r.ok, true, `paste failed: ${r.error ?? "?"}`);
+			await new Promise((r) => setTimeout(r, 500));
+			const cap = await captureWindow(executor, SOCK, listedTarget, { lines: 100 });
+			assert.equal(cap.ok, true, `capture failed: ${cap.error ?? "?"}`);
+			const output = cap.output ?? "";
+			assert.ok(output.includes(`${marker} line A`), `line A missing in pane`);
+			assert.ok(output.includes(`${marker} line B`), `line B missing in pane`);
+			assert.ok(output.includes(`${marker} line C`), `line C missing in pane`);
+		});
+
+		await step("pasteText with pressEnter:true executes multi-line script (single paste + Enter)", async () => {
+			const marker = `paste-exec-${Date.now()}`;
+			// printf with literal newlines — shell interprets each line as a
+			// separate command. Premature submission (send-keys -l with \n)
+			// would break this; bracketed paste keeps it intact.
+			const prompt = `printf '${marker}-A\\n${marker}-B\\n${marker}-C\\n'`;
+			const r = await pasteText(executor, SOCK, listedTarget, prompt, { pressEnter: true });
+			assert.equal(r.ok, true, `paste failed: ${r.error ?? "?"}`);
+			await new Promise((r) => setTimeout(r, 1000));
+			const cap = await captureWindow(executor, SOCK, listedTarget, { lines: 100 });
+			assert.equal(cap.ok, true);
+			const output = cap.output ?? "";
+			assert.ok(output.includes(`${marker}-A`), `expected ${marker}-A in pane output`);
+			assert.ok(output.includes(`${marker}-B`), `expected ${marker}-B in pane output`);
+			assert.ok(output.includes(`${marker}-C`), `expected ${marker}-C in pane output`);
+		});
+
+		await step("waitForWindow regex detection against live pane (REQ-5 smoke)", async () => {
+			const marker = `wait-marker-${Date.now()}`;
+			// Send a command that prints the marker. The shell prompt will
+			// echo the marker line, which our regex should detect on the next
+			// poll. Use a short interval to keep the test fast (~200ms total).
+			const r = await sendText(executor, SOCK, listedTarget, `echo ${marker}`);
+			assert.equal(r.ok, true, `sendText failed: ${r.error ?? "?"}`);
+			const wait = await waitForWindow(executor, SOCK, listedTarget,
+				{ regex: marker, timeoutMs: 5000, intervalMs: 200, lines: 100 });
+			assert.equal(wait.ok, true, `waitForWindow failed: ${JSON.stringify(wait)}`);
+			assert.equal(wait.matched, "regex", `expected regex match, got: ${wait.matched}`);
+			assert.match(wait.output, new RegExp(marker));
+			assert.ok(wait.polls >= 1 && wait.polls <= 10, `polls ${wait.polls} out of expected range`);
+		});
+
+		await step("waitForWindow timeout against live pane (REQ-6 smoke)", async () => {
+			// Use a marker that will NEVER appear, so we hit timeoutMs cleanly.
+			const wait = await waitForWindow(executor, SOCK, listedTarget,
+				{ regex: `NEVER-APPEARS-${Date.now()}`, timeoutMs: 1500, intervalMs: 300, lines: 50 });
+			assert.equal(wait.ok, false);
+			assert.equal(wait.reason, "timeout");
+			// polls should be bounded: ceil(1500/300)+1 = 6
+			assert.ok(wait.polls <= 6, `polls ${wait.polls} exceeds bound 6`);
 		});
 
 		await step("resolveRunId returns error for unknown runId", async () => {
