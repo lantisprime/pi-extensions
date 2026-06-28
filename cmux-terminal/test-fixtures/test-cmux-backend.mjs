@@ -4,6 +4,12 @@
 //   manifestPath outside bgStateDir, spaces in workerPath, metacharacters
 //   in manifestPath), kill (1), isAlive (1), list (1).
 // Each test is independent and uses a fresh backend + temp bgStateDir.
+//
+// cmux 0.64.17 command surface asserted by these tests:
+//   isAvailable  → `cmux version`
+//   launch       → `cmux workspace create --name --cwd --command --focus`
+//   kill         → `cmux close-window --window <id>`
+//   isAlive/list → `cmux workspace list --json`
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -30,17 +36,17 @@ const SAMPLE_WORKSPACE_NAME = "pi-cmux-bg-1719432000000-a3f9c2b1e8f4d2b6";
 const SAMPLE_MANIFEST = "/var/folders/abc/T/pi-bg-state-xyz/bg-1719432000000-a3f9c2b1e8f4d2b6/manifest.json";
 const SAMPLE_CWD = "/Users/me/project";
 
-// Test 1: isAvailable — macOS + identify succeeds → true
+// Test 1: isAvailable — macOS + version succeeds → true
 {
 	const { executor, backend } = freshBackend();
-	executor.setDefaultResponse({ ok: true, stdout: JSON.stringify({ server: "cmux-0.64.17" }), stderr: "", exitCode: 0 });
+	executor.setDefaultResponse({ ok: true, stdout: "cmux 0.64.17", stderr: "", exitCode: 0 });
 	const prevPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 	Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
 	try {
 		const result = await backend.isAvailable();
-		assert.equal(result, true, "isAvailable must be true on darwin when identify succeeds with non-empty stdout");
-		assert.ok(executor.calls.length >= 1, "isAvailable must call cmux identify");
-		assert.deepEqual(executor.calls[0].args, ["identify", "--json"]);
+		assert.equal(result, true, "isAvailable must be true on darwin when version succeeds");
+		assert.ok(executor.calls.length >= 1, "isAvailable must call cmux version");
+		assert.deepEqual(executor.calls[0].args, ["version"]);
 	} finally {
 		if (prevPlatform) Object.defineProperty(process, "platform", prevPlatform);
 	}
@@ -60,7 +66,7 @@ const SAMPLE_CWD = "/Users/me/project";
 	}
 }
 
-// Test 3: isAvailable — identify fails → false
+// Test 3: isAvailable — version fails → false
 {
 	const { executor, backend } = freshBackend();
 	executor.setDefaultResponse({ ok: false, stderr: "Socket not found at /Users/me/.local/state/cmux/cmux.sock", exitCode: 1 });
@@ -68,7 +74,7 @@ const SAMPLE_CWD = "/Users/me/project";
 	Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
 	try {
 		const result = await backend.isAvailable();
-		assert.equal(result, false, "isAvailable must be false when identify fails (no cmux server running)");
+		assert.equal(result, false, "isAvailable must be false when version fails (no cmux server running)");
 	} finally {
 		if (prevPlatform) Object.defineProperty(process, "platform", prevPlatform);
 	}
@@ -82,12 +88,12 @@ const SAMPLE_CWD = "/Users/me/project";
 	fs.writeFileSync(manifestPath, "{}");
 	const result = await backend.launch({ agentName: "scout", runId: SAMPLE_RUN_ID, manifestPath, cwd: SAMPLE_CWD });
 	assert.equal(result.status, "ok", "launch must succeed with valid inputs");
-	assert.equal(result.windowId, SAMPLE_WORKSPACE_NAME, "windowId MUST equal pi-cmux-<runId>");
-	const launchCall = executor.calls.find(function _c(c) { return c.args[0] === "new-workspace"; });
-	assert.ok(launchCall, "new-workspace argv must be present");
+	assert.equal(result.windowId, SAMPLE_WORKSPACE_NAME, "windowId MUST equal pi-cmux-<runId> (falls back to title when stdout is empty)");
+	const launchCall = executor.calls.find(function _c(c) { return c.args[0] === "workspace" && c.args[1] === "create"; });
+	assert.ok(launchCall, "workspace create argv must be present");
 	const escape = function _e(s) { return "'" + s.replace(/'/g, "'\\''") + "'"; };
 	assert.deepEqual(launchCall.args, [
-		"new-workspace",
+		"workspace", "create",
 		"--name", SAMPLE_WORKSPACE_NAME,
 		"--cwd", SAMPLE_CWD,
 		"--command", "node " + escape(workerPath) + " " + escape(manifestPath),
@@ -107,17 +113,17 @@ const SAMPLE_CWD = "/Users/me/project";
 	assert.equal(executor.calls.length, 0, "cmux MUST NOT be invoked when cwd is invalid");
 }
 
-// Test 6: kill — close-workspace with workspace ID
+// Test 6: kill — close-window with window ID
 {
 	const { executor, backend } = freshBackend();
 	executor.enqueueResponse({ ok: true });
 	const result = await backend.kill(SAMPLE_WORKSPACE_NAME);
 	assert.equal(result.status, "ok", "kill must succeed on a live workspace");
-	const killCall = executor.calls.find(function _c(c) { return c.args[0] === "close-workspace"; });
-	assert.deepEqual(killCall.args, ["close-workspace", "--workspace", SAMPLE_WORKSPACE_NAME], "kill MUST use close-workspace --workspace <name>");
+	const killCall = executor.calls.find(function _c(c) { return c.args[0] === "close-window"; });
+	assert.deepEqual(killCall.args, ["close-window", "--window", SAMPLE_WORKSPACE_NAME], "kill MUST use close-window --window <name>");
 }
 
-// Test 7: isAlive — list-workspaces JSON parse, match found → true
+// Test 7: isAlive — workspace list JSON parse, match found → true
 {
 	const { executor, backend } = freshBackend();
 	const listJson = JSON.stringify({
@@ -129,9 +135,9 @@ const SAMPLE_CWD = "/Users/me/project";
 	});
 	executor.setDefaultResponse({ ok: true, stdout: listJson, stderr: "", exitCode: 0 });
 	const alive = await backend.isAlive(SAMPLE_WORKSPACE_NAME);
-	assert.equal(alive, true, "isAlive must be true when workspace name is found in list-workspaces output");
-	const listCall = executor.calls.find(function _c(c) { return c.args[0] === "list-workspaces"; });
-	assert.deepEqual(listCall.args, ["list-workspaces", "--json"]);
+	assert.equal(alive, true, "isAlive must be true when workspace name is found in workspace list output");
+	const listCall = executor.calls.find(function _c(c) { return c.args[0] === "workspace" && c.args[1] === "list"; });
+	assert.deepEqual(listCall.args, ["workspace", "list", "--json"]);
 }
 
 // Test 8: list — filters by prefix, extracts runId
@@ -200,8 +206,8 @@ const SAMPLE_CWD = "/Users/me/project";
 		cwd: SAMPLE_CWD,
 	});
 	assert.equal(result.status, "ok", "launch must succeed with spaces in workerPath");
-	const launchCall = executor.calls.find(function _c(c) { return c.args[0] === "new-workspace"; });
-	assert.ok(launchCall, "new-workspace argv must be present");
+	const launchCall = executor.calls.find(function _c(c) { return c.args[0] === "workspace" && c.args[1] === "create"; });
+	assert.ok(launchCall, "workspace create argv must be present");
 	const cmdIdx = launchCall.args.indexOf("--command");
 	assert.ok(cmdIdx >= 0, "argv MUST contain --command");
 	const cmdPayload = launchCall.args[cmdIdx + 1];
@@ -227,8 +233,8 @@ const SAMPLE_CWD = "/Users/me/project";
 		cwd: SAMPLE_CWD,
 	});
 	assert.equal(result.status, "ok", "launch must succeed with metacharacters in manifestPath");
-	const launchCall = executor.calls.find(function _c(c) { return c.args[0] === "new-workspace"; });
-	assert.ok(launchCall, "new-workspace argv must be present");
+	const launchCall = executor.calls.find(function _c(c) { return c.args[0] === "workspace" && c.args[1] === "create"; });
+	assert.ok(launchCall, "workspace create argv must be present");
 	const cmdIdx = launchCall.args.indexOf("--command");
 	const cmdPayload = launchCall.args[cmdIdx + 1];
 	// Path must be wrapped in single quotes — the entire metachar-containing
