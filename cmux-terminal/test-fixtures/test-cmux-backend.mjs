@@ -8,7 +8,7 @@
 // cmux 0.64.17 command surface asserted by these tests:
 //   isAvailable  → `cmux version`
 //   launch       → `cmux workspace create --name --cwd --command --focus`
-//   kill         → `cmux close-window --window <id>`
+//   kill         → `cmux close-workspace --workspace <id>`
 //   isAlive/list → `cmux workspace list --json`
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -113,14 +113,14 @@ const SAMPLE_CWD = "/Users/me/project";
 	assert.equal(executor.calls.length, 0, "cmux MUST NOT be invoked when cwd is invalid");
 }
 
-// Test 6: kill — close-window with window ID
+// Test 6: kill — close-workspace with workspace ID
 {
 	const { executor, backend } = freshBackend();
 	executor.enqueueResponse({ ok: true });
 	const result = await backend.kill(SAMPLE_WORKSPACE_NAME);
 	assert.equal(result.status, "ok", "kill must succeed on a live workspace");
-	const killCall = executor.calls.find(function _c(c) { return c.args[0] === "close-window"; });
-	assert.deepEqual(killCall.args, ["close-window", "--window", SAMPLE_WORKSPACE_NAME], "kill MUST use close-window --window <name>");
+	const killCall = executor.calls.find(function _c(c) { return c.args[0] === "close-workspace"; });
+	assert.deepEqual(killCall.args, ["close-workspace", "--workspace", SAMPLE_WORKSPACE_NAME], "kill MUST use close-workspace --workspace <name> (NOT close-window, which kills the whole window and other workspaces inside it)");
 }
 
 // Test 7: isAlive — workspace list JSON parse, match found → true

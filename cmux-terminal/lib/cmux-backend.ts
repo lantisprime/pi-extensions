@@ -15,7 +15,9 @@
 //                                 we use as windowId when non-empty
 //   - `cmux workspace list --json` — list workspaces in the current window
 //                                 (JSON shape: { workspaces: [{id,title,...}] })
-//   - `cmux close-window --window <id>` — close a window by handle
+//   - `cmux close-workspace --workspace <id>` — close one workspace by handle
+//                                 (NOT `close-window`, which would close the
+//                                 whole window and any other workspaces inside it)
 //
 // Security invariants (carried over from tmux-backend.ts):
 //  - workspace create argv contains ONLY workerPath + manifestPath (no
@@ -119,22 +121,30 @@ export function createCmuxBackend(opts: CreateCmuxBackendOpts): TermBgBackend {
 			// Intentionally no-op: keep the launch contract symmetric with the
 			// tmux backend, but skip the call since cmux has no equivalent.
 
-			// cmux 0.64.17 `workspace create` writes the workspace's opaque
-			// handle (e.g. `workspace:3`, or a UUID with `--id-format uuids`) to
-			// stdout. That handle is what `close-window`/`workspace list` accept,
-			// so we prefer it over the human-facing title. If cmux prints nothing
-			// (older builds, or the call short-circuited), fall back to the title
-			// we just set via `--name` — `isAlive`/`list` still match on title.
-			const handle = createResult.stdout.trim();
+			// cmux 0.64.17 `workspace create` writes `OK <handle>` to stdout,
+			// where `<handle>` is the workspace's opaque ref (e.g.
+			// `workspace:3`, or a UUID with `--id-format uuids`). The leading
+			// `OK ` token is a status prefix — cmux prints it on every
+			// mutating command (also `workspace close`, `rename`, etc.) and
+			// it is NOT accepted by subsequent cmux commands. Strip it so the
+			// returned windowId is reusable as a handle for `close-workspace`/
+			// `workspace list`. If cmux prints something we don't recognize
+			// (older builds, or the call short-circuited), fall back to the
+			// title we just set via `--name` — `isAlive`/`list` still match
+			// on title.
+			let handle = createResult.stdout.trim();
+			const okPrefixMatch = handle.match(/^OK\s+(\S+)\s*$/);
+			if (okPrefixMatch) handle = okPrefixMatch[1];
 			return { status: "ok", windowId: handle || workspaceName };
 		},
 
 		async kill(windowId: string): Promise<TermBgResult> {
-			// cmux 0.64.17 has no `close-workspace`; the canonical kill is
-			// `close-window --window <id|ref|index>`. The flag is `--window`
-			// (not `--workspace`).
+			// cmux 0.64.17: use `close-workspace --workspace <id|ref|index>` to
+			// kill a SINGLE workspace. `close-window --window <id>` would close
+			// the ENTIRE window (and all workspaces inside it), which is the
+			// wrong scope when several pi agents live in the same window.
 			try {
-				const result = await executor.exec(["close-window", "--window", windowId], { timeoutMs: 5_000 });
+				const result = await executor.exec(["close-workspace", "--workspace", windowId], { timeoutMs: 5_000 });
 				if (!result.ok) {
 					const stderr = result.stderr ?? "";
 					// Idempotent: closing a missing window is not an error.
@@ -166,12 +176,18 @@ export function createCmuxBackend(opts: CreateCmuxBackendOpts): TermBgBackend {
 					return false;
 				}
 				const workspaces = Array.isArray(parsed?.workspaces) ? parsed.workspaces : (Array.isArray(parsed) ? parsed : []);
-				// cmux JSON shape: { workspaces: [{ id, title, ... }, ...] }.
-				// We match on `title` (the display title, which is the --name we
-				// passed to `workspace create`). Exact-match semantics — never
-				// substring match (REQ: bg-terminal.ts interface).
+				// cmux JSON shape: { workspaces: [{ ref, title, ... }, ...] }.
+				// We match against BOTH `ref` (the opaque handle that launch()
+				// returns when `workspace create` prints `OK <ref>` to stdout) and
+				// `title` (the --name we passed; the only thing we have when
+				// stdout is empty and launch() falls back to the title as
+				// windowId). Exact-match semantics — never substring match (REQ:
+				// bg-terminal.ts interface).
 				return workspaces.some(function _m(ws: any) {
-					return ws && typeof ws.title === "string" && ws.title === windowId;
+					if (!ws) return false;
+					if (typeof ws.ref === "string" && ws.ref === windowId) return true;
+					if (typeof ws.title === "string" && ws.title === windowId) return true;
+					return false;
 				});
 			} catch {
 				return false;
