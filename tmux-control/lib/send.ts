@@ -74,6 +74,26 @@ export async function sendText(
 
 	const t = `${target.sessionName}:${target.windowIndex}`;
 
+	// Keys-mode send (P5c-2-S5): each whitespace-separated token in `text` is
+	// treated as a tmux key NAME (no `-l`), so callers can drive chords like
+	// "C-c", "Up", "Enter". Multi-line routing is already skipped above, so a
+	// token like "Enter" only fires here (no implicit Enter loop afterwards —
+	// callers wanting a trailing Enter append "Enter" as a final token).
+	if (opts?.mode === "keys") {
+		const tokens = text.split(/\s+/).filter((tok) => tok.length > 0);
+		if (tokens.length === 0) {
+			return { ok: false, error: "keys mode requires at least one key token" };
+		}
+		const r1 = await executor.exec(
+			[...socketPrefix, "send-keys", "-t", t, ...tokens],
+			{ timeoutMs: TMUX_INVOCATION_TIMEOUT_MS },
+		);
+		if (!r1.ok) {
+			return { ok: false, error: r1.stderr || `send-keys failed (exit ${r1.exitCode})` };
+		}
+		return { ok: true, sentBytes: text.length, effectiveEnterCount: 0 };
+	}
+
 	// Literal-mode send (`-l`): every char in `text` is treated as a literal
 	// key press, NOT a tmux key name. Without `-l`, words like "Up" or "C-x"
 	// would be interpreted as key names.

@@ -11,9 +11,11 @@ the source of truth; older entries in the chain are `superseded`.
 
 ## Active implementation (P5c-2-S1 + S2 + S3 MERGED into main + P5b/P5d still OPEN)
 
-**P5c-2-S1 (pasteText), S2 (waitForWindow), and S3 (pressEnterCount surface) are MERGED into main via PRs #109 and #111. P5c-2-S4 (checkExtendedKeys warn-only at session_start) is the next slice.**
+**P5c-2-S1 (pasteText), S2 (waitForWindow), S3 (pressEnterCount), and S4 (checkExtendedKeys) are MERGED into main via PRs #109, #111, and #112. P5c-2-S5 (mode: literal|keys) is next.**
 
-- Current episode ID: `20260628-075646-post-s3-merge-p5c-2-s3-pressentercount-s-c2a4`
+- Current episode ID: `20260628-090329-p5c-2-s4-checkextendedkeys-merged-into-m-3bc5`
+- Tags include: `canonical-workplan`, `workplan`, `p5c-2-s1-s2-s3-s4-merged`, `p5c-2-s5-next`, `p5c-2-s5-mode-keys`, `p5b-1-opened`, `p5d-opened`
+- Summary: **Post-S4-merge chain head revision.** PR #112 (P5c-2-S4 checkExtendedKeys) MERGED into main at `2dbf93a`; S5 mode:literal|keys is NEXT.
 - Tags include: `canonical-workplan`, `workplan`, `p5c-2-s1-s2-merged`, `p5c-2-s3-merged`, `p5c-2-pr-109-merged`, `p5c-2-pr-110-merged`, `p5c-2-pr-108-merged-user-manual`, `p5c-2-pr-111-merged-pressenter-count`, `p5c-2-merge-commit-ac59f5b`, `p5c-2-sync-commit-9d8986c`, `p5c-2-user-manual-commit-a030c5d`, `p5c-2-pressenter-commit-c4dbf61`, `p5c-2-s4-next`, `p5c-2-s4-checkextended-keys`, `p5b-1-opened`, `p5b-1-cmux-terminal`, `p5d-opened`, `p5d-cmux-control`, `behind-then-update-branch-pattern`, `plan-vs-actual-delta-15-to-126`, `codex-0.142.3-quirks`
 - Summary: **Post-S3-merge chain head revision.** PR #111 (P5c-2-S3 pressEnterCount surface) MERGED into main at `c4dbf61` (2026-06-28T07:55:20Z), squash-commit from 2 branch commits (workplan sync + S3 implementation). S3 reality was **+126/-15 across 4 files + 7 new tests + 1 updated test**, NOT the headline "~15 LOC + 2 tests" estimate — the original plan only counted the public-surface work and missed the latent literal-mode Enter loop that needed wiring (`send.ts` had a `pressEnterCount?: number` seam since S1 but never used it). Codex review (3 rounds, READY-TO-MERGE) caught 2 MAJORs (display inconsistency with clamp + NaN propagation) and 1 NIT (comment accuracy), all fixed before commit. **Next: P5c-2-S4 (`checkExtendedKeys` warn-only at `session_start`)** — new file `lib/keyscheck.ts`, ~120 LOC + 6 unit tests, parses `tmux -V` + `tmux show-option -gv extended-keys-format`, fire-and-forget from session_start. Genuinely parallel-safe with S5 (different files). **P5b-1 cmux-terminal + P5d cmux-control still OPENED** (scaffold only, macOS-only). Process lessons captured for codex 0.142.3 TUI quirks (Enter ×2 to submit, backticks corrupt messages, capture depth for multi-round) and sizing reality check (use 2-3x headline estimate as working budget).
 
@@ -32,21 +34,18 @@ the source of truth; older entries in the chain are `superseded`.
 - P5c tmux-control v0.1 (PR #106, commit 4cc5232)
 - **P5c-2-S1 pasteText (commit e32eadf on feat/p5c-2-foundations; originally 68c27d7 on feat/cmux-control-and-p5b-cmux-terminal)**
 - **P5c-2-S2 waitForWindow (commit d8ee10b on feat/p5c-2-foundations; originally 5f2ffeb on feat/cmux-control-and-p5b-cmux-terminal, amended post-review)**
-- **P5c-2-S3 pressEnterCount surface (PR #111, squash-commit c4dbf61 on main; originally 2 branch commits on feat/p5c-2-s3-pressenter-count — workplan sync + S3 implementation)**
+- **P5c-2-S4 checkExtendedKeys (PR #112, commit 2dbf93a)**
 
 ### Next
-- **P5c-2-S4 (TOP PRIORITY, parallel-safe)** — `checkExtendedKeys` warn-only at `session_start`. New file `lib/keyscheck.ts`. ~120 LOC + 6 unit tests.
-- P5c-2-S5 (after S4) — `mode: "literal" | "keys"` surface for `tmux_send` (seam already in `send.ts` since S1). ~15 LOC + 4 unit tests. Different files from S4 — could run in parallel.
-- P5c-2-S6 (last) — `tmux_drive_claude` composite tool (uses S1 + S2; must buffer across stdin reads per S6 design note in S1). Largest slice.
+- **P5c-2-S5 (TOP PRIORITY)** — `mode: "literal" | "keys"` surface for `tmux_send` (seam already in `send.ts` since S1). ~15 LOC + 4 unit tests. Ready to start. Files: `lib/send.ts`, `index.ts`, `test-exec.mjs`.
+- P5c-2-S6 (after S5) — `tmux_drive_claude` composite tool (uses S1 + S2; must buffer across stdin reads per S6 design note in S1). Largest slice.
 
 ### Next (open)
 
-#### P5c-2-S4 (TOP PRIORITY, parallel-safe)
-- `checkExtendedKeys` warn-only at `session_start` (sync handler + fire-and-forget).
-- New file `lib/keyscheck.ts`. ~120 LOC + 6 unit tests.
-- Parses `tmux -V` + `tmux show-option -gv extended-keys-format`.
-- `session_start` calls `checkExtendedKeys()` fire-and-forget; warn-only (no throw, no state mutation).
-- Tests: csi-u, xterm, old tmux, parse-fail, session_start warn, no-socket noop.
+#### P5c-2-S5 (TOP PRIORITY)
+- `mode: "literal" | "keys"` for `tmux_send` (seam already in `send.ts` since S1).
+- In keys mode: omits `-l`, splits tokens, defaults `pressEnter:false`.
+- ~15 LOC + 4 tests in `lib/send.ts`, `index.ts`, `test-exec.mjs`.
 
 #### P5c-2-S6 tmux_drive_claude composite
 - New file `lib/drive.ts`. Composite of S1 + S2 + readiness detection.

@@ -483,6 +483,76 @@ import { PASTE_BUFFER_NAME, BRACKET_START, BRACKET_END } from "../lib/constants.
 	assert.equal(fake.calls[0].args[1], "-l");
 }
 
+// ── sendText keys mode (P5c-2-S5) ──────────────────────────────────────────
+
+// testSendKeysMode: mode:"keys" splits whitespace tokens into individual key args,
+// sends them in ONE send-keys call with NO `-l`, and fires NO trailing Enter.
+{
+	const fake = createFakeTmux();
+	fake.program([okResult("")]);  // single send-keys call, no Enter
+	const r = await sendText(fake, [], { sessionName: "smoke", windowIndex: "2" },
+		"C-c", { mode: "keys" });
+	assert.equal(r.ok, true);
+	assert.equal(r.effectiveEnterCount, 0, `mode:"keys" must report effectiveEnterCount:0 (no trailing Enter), got ${r.effectiveEnterCount}`);
+	assert.equal(fake.calls.length, 1, `mode:"keys" must be a single send-keys call, got ${fake.calls.length}`);
+	const args = fake.calls[0].args;
+	assert.equal(args[0], "send-keys", "uses send-keys");
+	assert.equal(args[1], "-t", "argv is send-keys -t <target> <key1> [<key2>...]");
+	assert.ok(!args.includes("-l"), `mode:"keys" must NOT pass -l, got: ${args.join(" ")}`);
+	const targetIdx = args.indexOf("-t") + 1;
+	assert.equal(args[targetIdx], "smoke:2", "uses session:index target");
+	// Tokens must come AFTER the target.
+	const tokens = args.slice(targetIdx + 1);
+	assert.deepEqual(tokens, ["C-c"], `mode:"keys" tokens after target, got: ${tokens.join(" ")}`);
+	// No Enter was fired — count calls whose last arg is "Enter".
+	const enterCalls = fake.calls.filter((c) => c.args[c.args.length - 1] === "Enter").length;
+	assert.equal(enterCalls, 0, `mode:"keys" must NOT fire trailing Enter, got ${enterCalls}`);
+}
+
+// testSendLiteralDefault: mode omitted → literal `-l` path (back-compat regression guard).
+{
+	const fake = createFakeTmux();
+	fake.program([okResult(""), okResult("")]);  // send-keys -l + Enter
+	const r = await sendText(fake, [], { sessionName: "smoke", windowIndex: "2" },
+		"hello world");  // no opts.mode
+	assert.equal(r.ok, true);
+	assert.equal(fake.calls[0].args[0], "send-keys");
+	assert.equal(fake.calls[0].args[1], "-l", "omitted mode must use the literal (-l) path");
+	assert.equal(fake.calls[0].args[fake.calls[0].args.length - 1], "hello world", "text delivered as a single argv element");
+	assert.equal(fake.calls.length, 2, "send-keys + Enter (literal default)");
+}
+
+// testSendKeysEmpty: mode:"keys" with whitespace-only text → ok:false error, no tmux call.
+{
+	const fake = createFakeTmux();
+	// Whitespace-only: "   \t  \n  " — split on /\s+/ and filter empties yields no tokens.
+	const r = await sendText(fake, [], { sessionName: "smoke", windowIndex: "2" },
+		"   \t  \n  ", { mode: "keys" });
+	assert.equal(r.ok, false, `mode:"keys" with whitespace-only text must reject, got ${JSON.stringify(r)}`);
+	assert.match(r.error, /keys mode requires at least one key token/);
+	assert.equal(fake.calls.length, 0, "no tmux invocation on empty keys rejection");
+}
+
+// testSendKeysMultiWord: mode:"keys" with "C-c Enter Up" → exactly 3 key args in one call.
+{
+	const fake = createFakeTmux();
+	fake.program([okResult("")]);  // single send-keys call, no Enter
+	const r = await sendText(fake, [], { sessionName: "smoke", windowIndex: "2" },
+		"C-c Enter Up", { mode: "keys" });
+	assert.equal(r.ok, true);
+	assert.equal(fake.calls.length, 1, `multi-token mode:"keys" must be a single send-keys call, got ${fake.calls.length}`);
+	const args = fake.calls[0].args;
+	assert.equal(args[0], "send-keys");
+	assert.ok(!args.includes("-l"), `mode:"keys" must NOT pass -l, got: ${args.join(" ")}`);
+	const targetIdx = args.indexOf("-t") + 1;
+	assert.equal(args[targetIdx], "smoke:2");
+	const tokens = args.slice(targetIdx + 1);
+	assert.deepEqual(tokens, ["C-c", "Enter", "Up"], `expected 3 separate key args in argv order, got: ${tokens.join(" ")}`);
+	// No trailing Enter — only the Enter in the tokens list is sent.
+	const enterCalls = fake.calls.filter((c) => c.args[c.args.length - 1] === "Enter").length;
+	assert.equal(enterCalls, 0, `mode:"keys" trailing Enter is the caller's responsibility (not auto-fired), got ${enterCalls} standalone Enter calls`);
+}
+
 // ── waitForWindow (P5c-2-S2) ─────────────────────────────────────────────
 
 // waitForWindow REQ-5: RegExp regex matches on second poll → matched:"regex".
