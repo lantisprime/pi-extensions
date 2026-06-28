@@ -151,12 +151,12 @@ Completed and merged:
 
 | Slice | Objective | Primary files | Status | Commit | Parallel? |
 |---|---|---|---|---|---|
-| `P5c-2-S1` | `pasteText` via `set-buffer -b pictl-paste -- <text>` + `paste-buffer -p -d` (bracketed paste) + REQ-20 sanitization + Path A verification | new `lib/paste.ts`, `lib/send.ts` (multi-line routing), `index.ts`, `constants.ts` | **SHIPPED** | `68c27d7` | done |
+| `P5c-2-S1` | `pasteText` via `set-buffer -b pictl-paste -- <text>` + `paste-buffer -p -d` (bracketed paste) + REQ-20 sanitization + Path A verification | new `lib/paste.ts`, `lib/send.ts` (multi-line routing), `index.ts`, `constants.ts` | **SHIPPED** | `e32eadf` on `feat/p5c-2-foundations` (cherry-pick of `68c27d7` on cmux branch; same content, different hash) | done |
 | `P5c-2-S2` | `waitForWindow({regex?, stableMs?, timeoutMs})` w/ injectable clock; regex > stable > sleep > timeout; bounded polls; per-call 5s exec; null-init lastChangeAt + reset-to-null-on-change; RegExp always copied | new `lib/wait.ts`, `constants.ts` (DEFAULT_WAIT_LINES), tests | **SHIPPED + REVIEWED** | `d8ee10b` on `feat/p5c-2-foundations` (cherry-pick of `5f2ffeb` on cmux branch; same content, different hash) | done |
-| `P5c-2-S3` | `pressEnterCount` for `tmux_send` (surface seam already in `send.ts` since S1) | `lib/send.ts`, `index.ts` | OPEN (top priority) | — | batchable with S4 |
-| `P5c-2-S4` | `mode: "literal"\|"keys"` for `tmux_send` (surface seam already in `send.ts` since S1; keys mode defaults `pressEnter:false`) | `lib/send.ts`, `index.ts` | OPEN (top priority) | — | batchable with S3 |
-| `P5c-2-S5` | `checkExtendedKeys` warn-only at `session_start` (sync handler + fire-and-forget) | new `lib/keyscheck.ts`, `index.ts` | OPEN | — | parallel with S3+S4 |
-| `P5c-2-S6` | `tmux_drive_claude` composite tool (uses S1 + S2; must buffer across stdin reads per S6 design note in S1) | new `lib/drive.ts`, `index.ts` | OPEN | — | last (after S3+S4) |
+| `P5c-2-S3` | `pressEnterCount` for `tmux_send` (surface seam already in `send.ts` since S1) | `lib/send.ts`, `index.ts` | OPEN (top priority) | — | standalone |
+| `P5c-2-S4` | `checkExtendedKeys` warn-only at `session_start` (sync handler + fire-and-forget) | new `lib/keyscheck.ts`, `index.ts` | OPEN | — | parallel-safe (independent of S3) |
+| `P5c-2-S5` | `mode: "literal"\|"keys"` for `tmux_send` (surface seam already in `send.ts` since S1; keys mode defaults `pressEnter:false`) | `lib/send.ts`, `index.ts` | OPEN | — | after S3 (same file contention) |
+| `P5c-2-S6` | `tmux_drive_claude` composite tool (uses S1 + S2; must buffer across stdin reads per S6 design note in S1) | new `lib/drive.ts`, `index.ts` | OPEN | — | last (after S3 + S4 + S5) |
 
 - Hard-won design choices (preserve across slicing):
   1. **`paste-buffer -p` is required.** Without `-p`, tmux defaults to LF→CR conversion and reproduces the premature-submit bug S1 is meant to fix. REQ-1 asserts `args.includes("-p") && !args.includes("-r")`.
@@ -166,12 +166,12 @@ Completed and merged:
   5. **`set-buffer -b pictl-paste -- <text>` with `--` terminator.** The `TmuxExecutor` has no stdin channel (verified — `lib/exec.ts:9–11`), so the safer `load-buffer -` path is unavailable. Leading-dash payloads (`-rf danger`) need the `--` terminator or tmux misparses them as options. Tagged `UNGUARDED-IN-CI` in the Safety table.
   6. **`waitForWindow` long waits are polling, not long execs.** REQ-8: each capture is a separate `capture-pane` exec bounded by 5s; the long wait is achieved via bounded polls. `polls ≤ ceil(timeoutMs/intervalMs)+1`. Injectable `deps.now` / `deps.sleep` make the loop deterministic in tests.
   7. **S2 is internal, exposed only via S6.** `waitForWindow` is not added to a slash command or LLM tool — it's a library function consumed by `tmux_drive_claude` (S6). Import directly from `lib/wait.ts`.
-- Stats: 19 REQ rows, 29 unit tests + 3 smoke steps (14 unit + 2 smoke landed in S1; 17 unit + 2 smoke landed in S2 — 9 initial + 8 added after Claude + Codex review). Existing REQ-13 import-guard gets an additional argv-only static guard (REQ-17) with red-then-green self-check.
+- Stats: 19 REQ rows, 29 unit tests + 3 smoke steps (14 unit + 2 smoke landed in S1; **18** `waitForWindow` unit tests + 2 real-tmux smoke landed in S2 — 9 initial + 9 added after Claude + Codex review). 12 real-tmux smoke steps total in `test-real-tmux-smoke.mjs` (4 new in this PR) + 2 Path A bracketed-paste marker checks (separate `test-pathA.mjs` script). Existing REQ-13 import-guard gets an additional argv-only static guard (REQ-17) with red-then-green self-check.
 - **S2 review cycle (Claude + Codex via tmux, 3 rounds)**:
   - **Claude (Opus 4.8)**: R1 `approve-with-nits` (0 blockers, 5 missing tests, 3 nits — one matches Codex Blocker #1). R2 `approve` ("ship it").
   - **Codex (gpt-5.5 high)**: R1 `changes-requested` (2 BLOCKERS — `lastChangeAt` seeding, stateful RegExp; 3 missing tests). R2 `changes-requested` (still — first fix didn't reset on change). R3 `approve-with-nits` (one doc nit on `compileRegex` comment precision).
   - **Convergence**: both reviewers approved after two iterations. "Not on first repeat" semantics expanded to apply to every run of same-output captures, not just the initial capture.
-  - **Single-commit amendment**: S2 originally committed as `214f888`, amended to `5f2ffeb` post-review per project pattern (cf. S1 commit `68c27d7` which absorbed research-driven fixes). Original hash orphaned.
+  - **Single-commit amendment**: S2 originally committed as `214f888`, amended to `5f2ffeb` post-review per project pattern (cf. S1 commit `68c27d7` which absorbed research-driven fixes). Original hash orphaned. On `feat/p5c-2-foundations` (PR #109), the cherry-pick equivalent hash is `d8ee10b`.
 - S2 file conflict analysis (post-S2 commit `214f888`):
   - **S3** touches `lib/send.ts` + `lib/index.ts` only — no `lib/wait.ts` overlap.
   - **S4** touches `lib/send.ts` + `lib/index.ts` only — no `lib/wait.ts` overlap.

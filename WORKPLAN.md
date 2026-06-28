@@ -11,11 +11,11 @@ the source of truth; older entries in the chain are `superseded`.
 
 ## Active implementation (P5c-2-S1 + S2 shipped + P5b/P5d still OPEN)
 
-**P5c-2-S1 (pasteText) and S2 (waitForWindow) are shipped. P5c-2-S3 + S4 (batchable surface work) are the next slices.**
+**P5c-2-S1 (pasteText) and S2 (waitForWindow) are shipped. P5c-2-S3 (pressEnterCount surface) is the next slice.**
 
 - Current episode ID: `20260628-014530-p5c-2-s2-waitforwindow-shipped-commit-5f-7d8b`
-- Tags include: `canonical-workplan`, `workplan`, `p4r-complete`, `p5-merged`, `p5c-shipped`, `p5c-2-s1-shipped`, `p5c-2-s1-commit-68c27d7`, `p5c-2-s2-shipped`, `p5c-2-s2-commit-d8ee10b`, `p5c-2-s2-amended-post-review`, `p5c-2-s2-claude-approve`, `p5c-2-s2-codex-approve-with-nits`, `p5c-2-s3-s4-next`, `p5b-1-opened`, `p5b-1-cmux-terminal`, `p5d-opened`, `p5d-cmux-control`
-- Summary: **P5c-2-S1 (pasteText) + P5c-2-S2 (waitForWindow) SHIPPED** via commits `e32eadf` and `d8ee10b` on branch `feat/p5c-2-foundations` (this PR). The cmux-branch equivalent hashes are `68c27d7` and `5f2ffeb` (same content, different commit IDs because of cherry-pick). S2 originally committed as `214f888` on the cmux branch, then **amended to `5f2ffeb`** after a Claude + Codex code review via tmux found two real blockers (both fixed): `lastChangeAt` null-initialization + reset-to-null-on-change (enforces "not on first repeat" uniformly across stable-from-start and stable-after-change runs); caller RegExp always copied via `new RegExp(source, flags)` to avoid stateful `lastIndex` leakage. Both reviewers final verdict: `approve-with-nits` after fixes. 17 unit tests (9 initial + 8 post-review) + 2 real-tmux smoke + REQ-13/REQ-17 guards all green. **Next: P5c-2-S3 (pressEnterCount surface) + S4 (mode:"keys" surface)** — both batchable, ~30 LOC total + ~6 unit tests, touch `lib/send.ts` + `lib/index.ts` only (no wait.ts overlap). **P5b-1 cmux-terminal + P5d cmux-control still OPENED** (scaffold only, macOS-only, waiting for cmux dev machine).
+- Tags include: `canonical-workplan`, `workplan`, `p4r-complete`, `p5-merged`, `p5c-shipped`, `p5c-2-s1-shipped`, `p5c-2-s1-commit-e32eadf`, `p5c-2-s2-shipped`, `p5c-2-s2-commit-d8ee10b`, `p5c-2-s2-amended-post-review`, `p5c-2-s2-claude-approve`, `p5c-2-s2-codex-approve-with-nits`, `p5c-2-s3-next`, `p5b-1-opened`, `p5b-1-cmux-terminal`, `p5d-opened`, `p5d-cmux-control`
+- Summary: **P5c-2-S1 (pasteText) + P5c-2-S2 (waitForWindow) SHIPPED** on branch `feat/p5c-2-foundations` (PR #109). S1 is commit `e32eadf`; S2 is commit `d8ee10b` (cherry-picked from `5f2ffeb` on the cmux branch — same content, different hash). **S2 originally committed as `214f888`, then amended to `5f2ffeb`** after a Claude + Codex code review via tmux found two real blockers (both fixed): `lastChangeAt` null-initialization + reset-to-null-on-change (enforces "not on first repeat" uniformly across stable-from-start and stable-after-change runs); caller RegExp always copied via `new RegExp(source, flags)` to avoid stateful `lastIndex` leakage. Both reviewers final verdict: `approve-with-nits`. **Tests**: 18 `waitForWindow` unit tests + 12 real-tmux smoke steps total (4 new in this PR) + 2 Path A bracketed-paste marker checks + REQ-13/REQ-17 guards all green. **Next: P5c-2-S3 (pressEnterCount surface)** — ~15 LOC + 2 unit tests, touches `lib/send.ts` + `lib/index.ts` only (seam already in `send.ts` since S1). **P5b-1 cmux-terminal + P5d cmux-control still OPENED** (scaffold only, macOS-only, waiting for cmux dev machine; P5b-1/P5d status notes are carried forward from prior cmux-branch commits and are unchanged by this PR).
 
 ### Completed tracks
 - P6 Intent Routing (7 slices, PRs #50, #58, #59, #60, #61)
@@ -30,28 +30,24 @@ the source of truth; older entries in the chain are `superseded`.
 - P4-7 Integration tests (PR #97, commit bea9eb0)
 - P5 Pluggable Terminal Backend (tmux-terminal extension, PR #98, commit f3b247c)
 - P5c tmux-control v0.1 (PR #106, commit 4cc5232)
-- **P5c-2-S1 pasteText (commit 68c27d7, 2026-06-28)**
-- **P5c-2-S2 waitForWindow (commit 5f2ffeb, 2026-06-28; amended post-review)**
+- **P5c-2-S1 pasteText (commit e32eadf on feat/p5c-2-foundations; originally 68c27d7 on feat/cmux-control-and-p5b-cmux-terminal)**
+- **P5c-2-S2 waitForWindow (commit d8ee10b on feat/p5c-2-foundations; originally 5f2ffeb on feat/cmux-control-and-p5b-cmux-terminal, amended post-review)**
 
 ### Next
-- **P5c-2-S3 + S4 (BATCHABLE — pressEnterCount + mode:"keys" surface)** — top priority, ~30 LOC + 6 tests, no wait.ts overlap
-- P5c-2-S5 (extended-keys warn-only at session_start) — parallel-safe
-- P5c-2-S6 (tmux_drive_claude composite; must buffer across stdin reads per S6 design note in S1) — composes S1 + S2
+- **P5c-2-S3 (TOP PRIORITY)** — `pressEnterCount` surface for `tmux_send` (seam already in `send.ts` since S1). ~15 LOC + 2 unit tests.
+- P5c-2-S4 (parallel-safe) — `checkExtendedKeys` warn-only at `session_start`. New file `lib/keyscheck.ts`.
+- P5c-2-S5 (after S3) — `mode: "literal" | "keys"` surface for `tmux_send` (seam already in `send.ts` since S1). ~15 LOC + 4 unit tests.
+- P5c-2-S6 (last) — `tmux_drive_claude` composite tool (uses S1 + S2; must buffer across stdin reads per S6 design note in S1).
 
 ### Next (open)
 
-#### P5c-2-S3 + S4 (TOP PRIORITY — BATCHABLE)
-- S3 exposes the existing `pressEnterCount` param on `tmux_send` (seam already in `send.ts` since S1).
-- S4 exposes the existing `mode: "literal" | "keys"` param on `tmux_send` (seam already in `send.ts` since S1).
-- Both touch `lib/send.ts` and `lib/index.ts` only — no `lib/wait.ts` overlap. ~30 LOC total + ~6 unit tests.
-- Can ship as a single PR.
+#### P5c-2-S3 (TOP PRIORITY)
+- Exposes the existing `pressEnterCount` param on `tmux_send` (seam already in `send.ts` since S1).
+- Touches `lib/send.ts` and `lib/index.ts` only — no `lib/wait.ts` overlap. ~15 LOC + 2 unit tests.
 
-#### P5c-2-S3 + S4 (BATCHABLE — small surface work)
-- S3 exposes the existing `pressEnterCount` param on `tmux_send` (already in send.ts since S1).
-- S4 exposes the existing `mode: "literal" | "keys"` param on `tmux_send` (seam already in send.ts since S1).
-- Both touch `lib/send.ts` and `lib/index.ts`. ~30 LOC total + ~6 unit tests.
-
-#### P5c-2-S5 extended-keys warn-only at session_start
+#### P5c-2-S4 (parallel-safe)
+- `checkExtendedKeys` warn-only at `session_start` (sync handler + fire-and-forget).
+- New file `lib/keyscheck.ts`. ~120 LOC + 6 unit tests.
 - New file `lib/keyscheck.ts`.
 - Parses `tmux -V` + `tmux show-option -gv extended-keys-format`.
 - `session_start` calls `checkExtendedKeys()` fire-and-forget; warn-only (no throw, no state mutation).
