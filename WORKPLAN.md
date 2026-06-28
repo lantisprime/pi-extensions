@@ -48,7 +48,6 @@ the source of truth; older entries in the chain are `superseded`.
 #### P5c-2-S4 (parallel-safe)
 - `checkExtendedKeys` warn-only at `session_start` (sync handler + fire-and-forget).
 - New file `lib/keyscheck.ts`. ~120 LOC + 6 unit tests.
-- New file `lib/keyscheck.ts`.
 - Parses `tmux -V` + `tmux show-option -gv extended-keys-format`.
 - `session_start` calls `checkExtendedKeys()` fire-and-forget; warn-only (no throw, no state mutation).
 - Tests: csi-u, xterm, old tmux, parse-fail, session_start warn, no-socket noop.
@@ -78,7 +77,7 @@ the source of truth; older entries in the chain are `superseded`.
 - `agents/docs/P4_REMEDIATION_PLAN.md` — v3 GO consensus. 6 remediation slices + deferred project-agents slice. All edit `agents/lib/bg-state.ts`.
 - `agents/docs/P4_BACKGROUND_AGENTS_PLAN.md` — parent plan (to be corrected in P4R-6).
 - `agents/docs/P5_PLUGGABLE_TERMINAL_BACKEND.md` — parallel track.
-- `agents/docs/P5C2_TMUX_CONTROL_TUI_AUTOMATION_PLAN.md` — 482 lines, 19 sections, 19 REQ rows, 29 unit tests + 3 smoke (S1 + S2 SHIPPED + REVIEWED; S3-S6 OPEN).
+- `agents/docs/P5C2_TMUX_CONTROL_TUI_AUTOMATION_PLAN.md` — 482 lines, 19 sections, 19 REQ rows, 29 unit tests + 3 smoke planned in the catalog (S1 + S2 actually shipped with 18 `waitForWindow` unit + 12 real-tmux smoke steps total + 2 Path A marker checks; S3-S6 OPEN).
 - `agents/docs/P5C2_TMUX_CONTROL_TUI_AUTOMATION_ADVERSARIAL_REVIEW.md` — pass-2 review.
 - `agents/docs/P5C2_TMUX_CONTROL_TUI_AUTOMATION_REVIEW.md` — pass-4 re-review (APPROVED after applying 4 fixes + OD-1).
 - `TMUX_TUI_AUTOMATION.md` — research grounding (in repo root).
