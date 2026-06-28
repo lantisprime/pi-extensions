@@ -13,9 +13,9 @@ the source of truth; older entries in the chain are `superseded`.
 
 **P5c-2-S1 (pasteText) and S2 (waitForWindow) are shipped. P5c-2-S3 + S4 (batchable surface work) are the next slices.**
 
-- Current episode ID: `20260628-012643-p5c-2-s2-waitforwindow-shipped-commit-21-eed9`
-- Tags include: `canonical-workplan`, `workplan`, `p4r-complete`, `p5-merged`, `p5c-shipped`, `p5c-2-s1-shipped`, `p5c-2-s1-commit-68c27d7`, `p5c-2-s2-shipped`, `p5c-2-s2-commit-214f888`, `p5c-2-s3-s4-next`, `p5b-1-opened`, `p5b-1-cmux-terminal`, `p5d-opened`, `p5d-cmux-control`
-- Summary: **P5c-2-S1 (pasteText) + P5c-2-S2 (waitForWindow) SHIPPED** via commits `68c27d7` and `214f888` on branch `feat/cmux-control-and-p5b-cmux-terminal`. S2: new `lib/wait.ts` (181 LOC) — bounded-polling primitive `waitForWindow({regex}|{stableMs}, timeoutMs, intervalMs)` with injectable clock for deterministic tests. Regex takes precedence over stable; capture-pane errors return immediately (no spin); every capture is a separate `capture-pane` exec (REQ-8 — polling, not long exec). 9 new unit tests (all REQs + edge cases) + 2 real-tmux smoke steps. All tests green (11/11 real-tmux smoke + 2/2 Path A + 9 S2 unit + 14 S1 unit). **Next: P5c-2-S3 (pressEnterCount surface) + S4 (mode:"keys" surface)** — both batchable, ~30 LOC total + ~6 unit tests, touch `lib/send.ts` + `lib/index.ts` only (no wait.ts overlap). **P5b-1 cmux-terminal + P5d cmux-control still OPENED** (scaffold only, macOS-only, waiting for cmux dev machine).
+- Current episode ID: `20260628-014530-p5c-2-s2-waitforwindow-shipped-commit-5f-7d8b`
+- Tags include: `canonical-workplan`, `workplan`, `p4r-complete`, `p5-merged`, `p5c-shipped`, `p5c-2-s1-shipped`, `p5c-2-s1-commit-68c27d7`, `p5c-2-s2-shipped`, `p5c-2-s2-commit-d8ee10b`, `p5c-2-s2-amended-post-review`, `p5c-2-s2-claude-approve`, `p5c-2-s2-codex-approve-with-nits`, `p5c-2-s3-s4-next`, `p5b-1-opened`, `p5b-1-cmux-terminal`, `p5d-opened`, `p5d-cmux-control`
+- Summary: **P5c-2-S1 (pasteText) + P5c-2-S2 (waitForWindow) SHIPPED** via commits `e32eadf` and `d8ee10b` on branch `feat/p5c-2-foundations` (this PR). The cmux-branch equivalent hashes are `68c27d7` and `5f2ffeb` (same content, different commit IDs because of cherry-pick). S2 originally committed as `214f888` on the cmux branch, then **amended to `5f2ffeb`** after a Claude + Codex code review via tmux found two real blockers (both fixed): `lastChangeAt` null-initialization + reset-to-null-on-change (enforces "not on first repeat" uniformly across stable-from-start and stable-after-change runs); caller RegExp always copied via `new RegExp(source, flags)` to avoid stateful `lastIndex` leakage. Both reviewers final verdict: `approve-with-nits` after fixes. 17 unit tests (9 initial + 8 post-review) + 2 real-tmux smoke + REQ-13/REQ-17 guards all green. **Next: P5c-2-S3 (pressEnterCount surface) + S4 (mode:"keys" surface)** — both batchable, ~30 LOC total + ~6 unit tests, touch `lib/send.ts` + `lib/index.ts` only (no wait.ts overlap). **P5b-1 cmux-terminal + P5d cmux-control still OPENED** (scaffold only, macOS-only, waiting for cmux dev machine).
 
 ### Completed tracks
 - P6 Intent Routing (7 slices, PRs #50, #58, #59, #60, #61)
@@ -31,7 +31,7 @@ the source of truth; older entries in the chain are `superseded`.
 - P5 Pluggable Terminal Backend (tmux-terminal extension, PR #98, commit f3b247c)
 - P5c tmux-control v0.1 (PR #106, commit 4cc5232)
 - **P5c-2-S1 pasteText (commit 68c27d7, 2026-06-28)**
-- **P5c-2-S2 waitForWindow (commit 214f888, 2026-06-28)**
+- **P5c-2-S2 waitForWindow (commit 5f2ffeb, 2026-06-28; amended post-review)**
 
 ### Next
 - **P5c-2-S3 + S4 (BATCHABLE — pressEnterCount + mode:"keys" surface)** — top priority, ~30 LOC + 6 tests, no wait.ts overlap
@@ -82,7 +82,7 @@ the source of truth; older entries in the chain are `superseded`.
 - `agents/docs/P4_REMEDIATION_PLAN.md` — v3 GO consensus. 6 remediation slices + deferred project-agents slice. All edit `agents/lib/bg-state.ts`.
 - `agents/docs/P4_BACKGROUND_AGENTS_PLAN.md` — parent plan (to be corrected in P4R-6).
 - `agents/docs/P5_PLUGGABLE_TERMINAL_BACKEND.md` — parallel track.
-- `agents/docs/P5C2_TMUX_CONTROL_TUI_AUTOMATION_PLAN.md` — 482 lines, 19 sections, 19 REQ rows, 29 unit tests + 3 smoke (S1 + S2 SHIPPED; S3-S6 OPEN).
+- `agents/docs/P5C2_TMUX_CONTROL_TUI_AUTOMATION_PLAN.md` — 482 lines, 19 sections, 19 REQ rows, 29 unit tests + 3 smoke (S1 + S2 SHIPPED + REVIEWED; S3-S6 OPEN).
 - `agents/docs/P5C2_TMUX_CONTROL_TUI_AUTOMATION_ADVERSARIAL_REVIEW.md` — pass-2 review.
 - `agents/docs/P5C2_TMUX_CONTROL_TUI_AUTOMATION_REVIEW.md` — pass-4 re-review (APPROVED after applying 4 fixes + OD-1).
 - `TMUX_TUI_AUTOMATION.md` — research grounding (in repo root).
