@@ -12,6 +12,13 @@ export const PASTE_BUFFER_NAME = "pictl-paste";
 // Max Enter invocations in a single sendText/pressEnterCount (P5c-2-S3 seam;
 // pasted here so pasteText can clamp it without circular deps).
 export const MAX_ENTER_COUNT = 10;
+// Default poll cadence for waitForWindow (P5c-2-S2).
+export const DEFAULT_WAIT_INTERVAL_MS = 1_000;
+// Default capture depth for waitForWindow (P5c-2-S2). Tighter than the
+// LLM-tool default (DEFAULT_CAPTURE_LINES) because we're polling for a marker
+// in the recent prompt area, not the full scrollback. Smaller captures are
+// faster and reduce false-positive matches against historical output.
+export const DEFAULT_WAIT_LINES = 50;
 // Bracketed-paste markers (P5c-2-S1, REQ-20). tmux does NOT escape these bytes
 // when emitting paste-buffer content, so a payload containing a literal
 // \e[200~ / \e[201~ would open/close the bracket from the receiving TUI's

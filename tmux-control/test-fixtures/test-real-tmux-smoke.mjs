@@ -18,6 +18,7 @@ import { listAgentWindows } from "../lib/list.ts";
 import { captureWindow } from "../lib/capture.ts";
 import { sendText } from "../lib/send.ts";
 import { pasteText } from "../lib/paste.ts";
+import { waitForWindow } from "../lib/wait.ts";
 import { launchSession } from "../lib/launch.ts";
 import { resolveRunId } from "../lib/resolve.ts";
 import { defaultTmuxExecutor } from "../lib/exec.ts";
@@ -158,6 +159,31 @@ async function main() {
 			assert.ok(output.includes(`${marker}-A`), `expected ${marker}-A in pane output`);
 			assert.ok(output.includes(`${marker}-B`), `expected ${marker}-B in pane output`);
 			assert.ok(output.includes(`${marker}-C`), `expected ${marker}-C in pane output`);
+		});
+
+		await step("waitForWindow regex detection against live pane (REQ-5 smoke)", async () => {
+			const marker = `wait-marker-${Date.now()}`;
+			// Send a command that prints the marker. The shell prompt will
+			// echo the marker line, which our regex should detect on the next
+			// poll. Use a short interval to keep the test fast (~200ms total).
+			const r = await sendText(executor, SOCK, listedTarget, `echo ${marker}`);
+			assert.equal(r.ok, true, `sendText failed: ${r.error ?? "?"}`);
+			const wait = await waitForWindow(executor, SOCK, listedTarget,
+				{ regex: marker, timeoutMs: 5000, intervalMs: 200, lines: 100 });
+			assert.equal(wait.ok, true, `waitForWindow failed: ${JSON.stringify(wait)}`);
+			assert.equal(wait.matched, "regex", `expected regex match, got: ${wait.matched}`);
+			assert.match(wait.output, new RegExp(marker));
+			assert.ok(wait.polls >= 1 && wait.polls <= 10, `polls ${wait.polls} out of expected range`);
+		});
+
+		await step("waitForWindow timeout against live pane (REQ-6 smoke)", async () => {
+			// Use a marker that will NEVER appear, so we hit timeoutMs cleanly.
+			const wait = await waitForWindow(executor, SOCK, listedTarget,
+				{ regex: `NEVER-APPEARS-${Date.now()}`, timeoutMs: 1500, intervalMs: 300, lines: 50 });
+			assert.equal(wait.ok, false);
+			assert.equal(wait.reason, "timeout");
+			// polls should be bounded: ceil(1500/300)+1 = 6
+			assert.ok(wait.polls <= 6, `polls ${wait.polls} exceeds bound 6`);
 		});
 
 		await step("resolveRunId returns error for unknown runId", async () => {
