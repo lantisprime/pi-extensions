@@ -27,6 +27,7 @@
 // so launch currently does no agentName side-effect — only the workspace name
 // is persisted, and it carries runId alone.
 import { CMUX_WINDOW_PREFIX, CMUX_BACKEND_NAME } from "./constants.ts";
+import { shellEscape } from "./shell-escape.ts";
 import { redactError } from "./redact-error.ts";
 import { isAbsoluteNoDotDot, isUnderDir } from "./path-validate.ts";
 import type { CmuxExecutor } from "./exec.ts";
@@ -65,11 +66,12 @@ export function createCmuxBackend(opts: CreateCmuxBackendOpts): TermBgBackend {
 			const workspaceName = CMUX_WINDOW_PREFIX + config.runId;
 			// cmux's new-workspace --command takes a single shell-string payload.
 			// We use `node <workerPath> <manifestPath>` (analogous to the tmux
-			// `node + workerPath + manifestPath` argv), with absolute paths so
-			// argv-splitting inside the cmux command parser can't inject extra
-			// tokens. cmux sends the text+Enter to the new workspace's terminal
-			// surface after creation, which then runs `node bg-worker.ts <manifest>`.
-			const commandString = "node " + workerPath + " " + config.manifestPath;
+			// `node + workerPath + manifestPath` argv), with each path POSIX-
+			// shell-escaped via single-quote wrapping so spaces, quotes, and
+			// shell metacharacters inside the path can't inject extra tokens
+			// when cmux sends the text+Enter to the new workspace's terminal
+			// surface after creation.
+			const commandString = `node ${shellEscape(workerPath)} ${shellEscape(config.manifestPath)}`;
 			const newWorkspaceArgv = [
 				"new-workspace",
 				"--name", workspaceName,

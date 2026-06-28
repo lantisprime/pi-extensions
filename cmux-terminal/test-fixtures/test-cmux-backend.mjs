@@ -1,7 +1,9 @@
-// P5b-1 test-cmux-backend.mjs — 8 unit tests (the 8 specified in the task).
-// Verifies cmux-backend.ts: isAvailable probe (3 tests), launch (2 tests),
-// kill (1), isAlive (1), list (1). Each test is independent and uses a fresh
-// backend + temp bgStateDir.
+// P5b-1 test-cmux-backend.mjs — 12 unit tests.
+// Verifies cmux-backend.ts: isAvailable probe (3 tests), launch (6 tests:
+//   correct argv with shell-escaping, invalid cwd, invalid manifestPath,
+//   manifestPath outside bgStateDir, spaces in workerPath, metacharacters
+//   in manifestPath), kill (1), isAlive (1), list (1).
+// Each test is independent and uses a fresh backend + temp bgStateDir.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -83,13 +85,14 @@ const SAMPLE_CWD = "/Users/me/project";
 	assert.equal(result.windowId, SAMPLE_WORKSPACE_NAME, "windowId MUST equal pi-cmux-<runId>");
 	const launchCall = executor.calls.find(function _c(c) { return c.args[0] === "new-workspace"; });
 	assert.ok(launchCall, "new-workspace argv must be present");
+	const escape = function _e(s) { return "'" + s.replace(/'/g, "'\\''") + "'"; };
 	assert.deepEqual(launchCall.args, [
 		"new-workspace",
 		"--name", SAMPLE_WORKSPACE_NAME,
 		"--cwd", SAMPLE_CWD,
-		"--command", "node " + workerPath + " " + manifestPath,
+		"--command", "node " + escape(workerPath) + " " + escape(manifestPath),
 		"--focus", "false",
-	], "argv MUST match spec exactly");
+	], "argv MUST match spec exactly (--command payload MUST shell-escape workerPath + manifestPath)");
 }
 
 // Test 5: launch — invalid cwd → failed, no cmux call
@@ -150,6 +153,91 @@ const SAMPLE_CWD = "/Users/me/project";
 	assert.equal(entries[0].agentName, undefined, "agentName MUST be undefined (cmux limitation: no user-options equivalent)");
 	assert.equal(entries[1].windowId, "pi-cmux-bg-other-runid-x7y8");
 	assert.equal(entries[1].runId, "bg-other-runid-x7y8");
+}
+
+// Test 9: launch — invalid manifestPath (relative) → failed, 0 cmux calls
+{
+	const { executor, backend } = freshBackend();
+	const result = await backend.launch({
+		agentName: "scout",
+		runId: SAMPLE_RUN_ID,
+		manifestPath: "relative/manifest.json",
+		cwd: SAMPLE_CWD,
+	});
+	assert.equal(result.status, "failed", "relative manifestPath MUST be rejected");
+	assert.equal(result.error, "invalid manifest path", "error MUST be 'invalid manifest path'");
+	assert.equal(executor.calls.length, 0, "cmux MUST NOT be invoked when manifestPath is relative");
+}
+
+// Test 10: launch — manifestPath outside bgStateDir → failed, 0 cmux calls
+{
+	const { executor, backend } = freshBackend();
+	// /etc/passwd is absolute and has no `..` segments, so isAbsoluteNoDotDot passes,
+	// but isUnderDir fails because /etc is not under the random tmp bgStateDir.
+	const outsidePath = "/etc/passwd";
+	const result = await backend.launch({
+		agentName: "scout",
+		runId: SAMPLE_RUN_ID,
+		manifestPath: outsidePath,
+		cwd: SAMPLE_CWD,
+	});
+	assert.equal(result.status, "failed", "manifestPath outside bgStateDir MUST be rejected");
+	assert.equal(result.error, "invalid manifest path", "error MUST be 'invalid manifest path'");
+	assert.equal(executor.calls.length, 0, "cmux MUST NOT be invoked when manifestPath is outside bgStateDir");
+}
+
+// Test 11: launch — spaces in workerPath → correctly escaped in --command argv
+{
+	const spaceWorkerPath = "/abs/agents/lib with space/bg-worker.ts";
+	const { executor, backend, bgStateDir } = freshBackend({ workerPath: spaceWorkerPath });
+	const manifestPath = path.join(bgStateDir, SAMPLE_RUN_ID, "manifest.json");
+	fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
+	fs.writeFileSync(manifestPath, "{}");
+	const result = await backend.launch({
+		agentName: "scout",
+		runId: SAMPLE_RUN_ID,
+		manifestPath,
+		cwd: SAMPLE_CWD,
+	});
+	assert.equal(result.status, "ok", "launch must succeed with spaces in workerPath");
+	const launchCall = executor.calls.find(function _c(c) { return c.args[0] === "new-workspace"; });
+	assert.ok(launchCall, "new-workspace argv must be present");
+	const cmdIdx = launchCall.args.indexOf("--command");
+	assert.ok(cmdIdx >= 0, "argv MUST contain --command");
+	const cmdPayload = launchCall.args[cmdIdx + 1];
+	assert.ok(cmdPayload.includes("'" + spaceWorkerPath + "'"), "workerPath with spaces MUST be POSIX-shell-escaped inside --command payload (got: " + cmdPayload + ")");
+	// No unquoted spaces: the path appears wrapped in single quotes so the shell
+	// treats it as one token, even though the path itself contains a space.
+	const unquotedSpace = cmdPayload.indexOf(" " + spaceWorkerPath);
+	assert.equal(unquotedSpace, -1, "workerPath MUST NOT appear unquoted in --command payload (would split on space)");
+}
+
+// Test 12: launch — metacharacters in manifestPath → escaped in --command argv
+{
+	const { executor, backend, bgStateDir } = freshBackend();
+	// Build a path with shell metacharacters that would, if unquoted, inject extra tokens.
+	const evilDir = path.join(bgStateDir, "dir; touch /tmp/pwned; #");
+	fs.mkdirSync(evilDir, { recursive: true });
+	const manifestPath = path.join(evilDir, "manifest.json");
+	fs.writeFileSync(manifestPath, "{}");
+	const result = await backend.launch({
+		agentName: "scout",
+		runId: SAMPLE_RUN_ID,
+		manifestPath,
+		cwd: SAMPLE_CWD,
+	});
+	assert.equal(result.status, "ok", "launch must succeed with metacharacters in manifestPath");
+	const launchCall = executor.calls.find(function _c(c) { return c.args[0] === "new-workspace"; });
+	assert.ok(launchCall, "new-workspace argv must be present");
+	const cmdIdx = launchCall.args.indexOf("--command");
+	const cmdPayload = launchCall.args[cmdIdx + 1];
+	// Path must be wrapped in single quotes — the entire metachar-containing
+	// segment is one quoted token, not a sequence of `;`-separated commands.
+	assert.ok(cmdPayload.includes("'" + manifestPath + "'"), "manifestPath with metacharacters MUST be POSIX-shell-escaped (single-quote wrapped) inside --command payload (got: " + cmdPayload + ")");
+	// The whole quoted path must be a contiguous substring — no `;` outside the quotes.
+	const beforeQuote = cmdPayload.indexOf("'" + manifestPath + "'");
+	const surrounding = cmdPayload.slice(Math.max(0, beforeQuote - 1), beforeQuote + manifestPath.length + 3);
+	assert.ok(!surrounding.startsWith(";"), "manifestPath with metacharacters MUST NOT appear unquoted (would inject commands) in --command payload (got: " + cmdPayload + ")");
 }
 
 console.log("P5b-1 cmux-backend tests passed");
