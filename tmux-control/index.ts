@@ -16,6 +16,7 @@ import { discoverMainServerPrefix } from "./lib/socket.ts";
 import { listAgentWindows } from "./lib/list.ts";
 import { captureWindow } from "./lib/capture.ts";
 import { sendText } from "./lib/send.ts";
+import { pasteText } from "./lib/paste.ts";
 import { launchSession } from "./lib/launch.ts";
 import { resolveRunId } from "./lib/resolve.ts";
 import { resolveTarget } from "./lib/safety.ts";
@@ -176,6 +177,34 @@ function registerCommands(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerCommand("tmux-paste", {
+		description: "Paste multi-line text into a window via bracketed paste (no premature submit).",
+		handler: async (args, ctx) => {
+			const sock = getSocketPrefix();
+			if (!sock) return ctx.ui.notify(notConfiguredMsg(), "warning");
+			const trimmed = args.trim();
+			if (!trimmed) return ctx.ui.notify("Usage: /tmux-paste <window-or-runId> <multi-line-text>", "warning");
+			const firstSpace = trimmed.indexOf(" ");
+			if (firstSpace < 0) return ctx.ui.notify("Usage: /tmux-paste <window-or-runId> <multi-line-text>", "warning");
+			const id = trimmed.slice(0, firstSpace);
+			const text = trimmed.slice(firstSpace + 1);
+
+			const wins = await listAgentWindows(executor, sock, currentPrefix);
+			const resolved = resolveTarget(id, wins, { prefix: currentPrefix });
+			if ("error" in resolved) return ctx.ui.notify(resolved.error, "warning");
+
+			const confirmed = await ctx.ui.confirm(
+				`Paste ${text.length} bytes into "${resolved.target.windowName}"?`,
+				`Preview:\n${text.slice(0, 400)}${text.length > 400 ? "\n…(truncated)" : ""}`,
+			);
+			if (!confirmed) return;
+
+			const result = await pasteText(executor, sock, resolved.target, text, { pressEnter: true });
+			if (!result.ok) return ctx.ui.notify(`paste failed: ${result.error}`, "warning");
+			ctx.ui.notify(`Pasted ${result.sentBytes} bytes + Enter into "${resolved.target.windowName}".`, "info");
+		},
+	});
+
 	pi.registerCommand("tmux-config", {
 		description: "Configure tmux-control. Currently: 'prefix <value>' (session-only).",
 		handler: async (args, ctx) => {
@@ -230,10 +259,10 @@ function registerTools(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "tmux_send",
 		label: "Tmux send text",
-		description: "Send literal text (+ Enter by default) to a tmux window. Refuses non-prefixed windows.",
+		description: "Send literal text (+ Enter by default) to a tmux window. Refuses non-prefixed windows. Multi-line text is auto-routed via bracketed paste.",
 		parameters: Type.Object({
 			window: Type.String({ description: "Window name or runId" }),
-			text: Type.String({ description: "Text to send (max 4000 bytes)" }),
+			text: Type.String({ description: "Text to send (max 4000 bytes). Multi-line is delivered as one bracketed paste event." }),
 			pressEnter: Type.Optional(Type.Boolean({ description: "Send Enter after text (default true)" })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, _ctx) {
@@ -244,7 +273,28 @@ function registerTools(pi: ExtensionAPI): void {
 			if ("error" in resolved) return { content: [{ type: "text", text: resolved.error }], details: { ok: false } };
 			const r = await sendText(executor, sock, resolved.target, params.text, { pressEnter: params.pressEnter });
 			if (!r.ok) return { content: [{ type: "text", text: `send failed: ${r.error}` }], details: { ok: false } };
-			return { content: [{ type: "text", text: `Sent ${r.sentBytes} bytes${params.pressEnter !== false ? " + Enter" : ""} to "${resolved.target.windowName}".` }], details: { ok: true, target: `${resolved.target.sessionName}:${resolved.target.windowIndex}`, sentBytes: r.sentBytes } };
+			return { content: [{ type: "text", text: `Sent ${r.sentBytes} bytes${params.pressEnter !== false ? " + Enter" : ""} to "${resolved.target.windowName}"${r.routedViaPaste ? " (via bracketed paste)" : ""}.` }], details: { ok: true, target: `${resolved.target.sessionName}:${resolved.target.windowIndex}`, sentBytes: r.sentBytes, routedViaPaste: r.routedViaPaste ?? false } };
+		},
+	});
+
+	pi.registerTool({
+		name: "tmux_paste",
+		label: "Tmux paste multi-line text",
+		description: "Deliver multi-line text via bracketed paste (single paste event, no premature submit). Use for code blocks, heredocs, or any prompt containing newlines. Refuses non-prefixed windows.",
+		parameters: Type.Object({
+			window: Type.String({ description: "Window name or runId" }),
+			text: Type.String({ description: "Multi-line text to paste (max 4000 bytes)" }),
+			pressEnter: Type.Optional(Type.Boolean({ description: "Send Enter after paste (default true)" })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, _ctx) {
+			const sock = getSocketPrefix();
+			if (!sock) return { content: [{ type: "text", text: notConfiguredMsg() }], details: { ok: false } };
+			const wins = await listAgentWindows(executor, sock, currentPrefix);
+			const resolved = resolveTarget(params.window, wins, { prefix: currentPrefix });
+			if ("error" in resolved) return { content: [{ type: "text", text: resolved.error }], details: { ok: false } };
+			const r = await pasteText(executor, sock, resolved.target, params.text, { pressEnter: params.pressEnter });
+			if (!r.ok) return { content: [{ type: "text", text: `paste failed: ${r.error}` }], details: { ok: false } };
+			return { content: [{ type: "text", text: `Pasted ${r.sentBytes} bytes${params.pressEnter !== false ? " + Enter" : ""} into "${resolved.target.windowName}" (bracketed paste).` }], details: { ok: true, target: `${resolved.target.sessionName}:${resolved.target.windowIndex}`, sentBytes: r.sentBytes } };
 		},
 	});
 
