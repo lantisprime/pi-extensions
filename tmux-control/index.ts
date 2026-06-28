@@ -270,6 +270,10 @@ function registerTools(pi: ExtensionAPI): void {
 				minimum: 0,
 				maximum: 10,
 			})),
+			mode: Type.Optional(Type.String({
+				description: "Send mode. \"literal\" (default) treats `text` as a literal string sent with `send-keys -l`; multi-line auto-routes through bracketed paste. \"keys\" treats whitespace-separated tokens in `text` as tmux key names (e.g. \"C-c Enter Up\"), skips multi-line routing, and never fires a trailing Enter.",
+				enum: ["literal", "keys"],
+			})),
 		}),
 		async execute(_id, params, _signal, _onUpdate, _ctx) {
 			const sock = getSocketPrefix();
@@ -277,7 +281,7 @@ function registerTools(pi: ExtensionAPI): void {
 			const wins = await listAgentWindows(executor, sock, currentPrefix);
 			const resolved = resolveTarget(params.window, wins, { prefix: currentPrefix });
 			if ("error" in resolved) return { content: [{ type: "text", text: resolved.error }], details: { ok: false } };
-			const r = await sendText(executor, sock, resolved.target, params.text, { pressEnter: params.pressEnter, pressEnterCount: params.pressEnterCount });
+			const r = await sendText(executor, sock, resolved.target, params.text, { pressEnter: params.pressEnter, pressEnterCount: params.pressEnterCount, mode: params.mode as "literal" | "keys" | undefined });
 			if (!r.ok) return { content: [{ type: "text", text: `send failed: ${r.error}` }], details: { ok: false } };
 			// Use sendText's reported effective count (post-clamp) for the displayed message;
 			// falls back to params-based inference if the field is missing (defensive, e.g. older sendText).
