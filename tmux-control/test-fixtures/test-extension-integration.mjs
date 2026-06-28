@@ -55,7 +55,7 @@ for (const [name, def] of registeredCommands) {
 
 // ── Tools ────────────────────────────────────────────────────────────
 
-const expectedTools = ["tmux_list", "tmux_capture", "tmux_send", "tmux_paste", "tmux_launch"];
+const expectedTools = ["tmux_list", "tmux_capture", "tmux_send", "tmux_paste", "tmux_launch", "tmux_drive_claude"];
 for (const name of expectedTools) {
 	assert.ok(registeredTools.has(name), `tool ${name} registered`);
 	assert.ok(typeof registeredTools.get(name).execute === "function", `${name}: has execute`);

@@ -29,3 +29,23 @@ export const DEFAULT_WAIT_LINES = 50;
 // is no uppercase marker variant.)
 export const BRACKET_START = "\x1b[200~";
 export const BRACKET_END = "\x1b[201~";
+// driveClaude orchestrator defaults (P5c-2-S6).
+// Default regex that signals a Claude/Codex TUI prompt is ready to accept
+// input (the `❯` chevron Claude Code renders below its input box).
+export const DEFAULT_DRIVE_READY_REGEX = "❯";
+// Default regex that signals Claude has finished producing output.
+// Matches Claude Code's "Cooked for Ns" / "Baked for Ns" status lines
+// AND the generic ✻ spinner glyph used during streaming.
+export const DEFAULT_DRIVE_DONE_REGEX = "Cooked for|Baked for|✻";
+// Max ms to wait for the ready marker before declaring the window stuck.
+// 30s is generous for TUIs that are mid-render; shorter timeouts would
+// cause spurious failures during normal startup.
+export const DEFAULT_DRIVE_READY_TIMEOUT_MS = 30_000;
+// Max ms to wait for the done marker after pasting. Claude can take
+// several minutes for long prompts; 120s is the upper bound for typical
+// interactive work.
+export const DEFAULT_DRIVE_DONE_TIMEOUT_MS = 120_000;
+// Capture depth for the orchestrator's final captureWindow — wider than
+// waitForWindow's poll depth (DEFAULT_WAIT_LINES=50) because we want the
+// full response, not just the trailing prompt area.
+export const DEFAULT_DRIVE_LINES = 200;

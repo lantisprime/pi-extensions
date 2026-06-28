@@ -1,4 +1,4 @@
-// Tests for lib/exec.ts, lib/list.ts, lib/capture.ts, lib/send.ts, lib/launch.ts, lib/paste.ts.
+// Tests for lib/exec.ts, lib/list.ts, lib/capture.ts, lib/send.ts, lib/launch.ts, lib/paste.ts, lib/drive.ts.
 // Uses fake-tmux.ts to drive executor behavior deterministically.
 import assert from "node:assert/strict";
 import { createFakeTmux, okResult, errResult } from "./fake-tmux.ts";
@@ -9,6 +9,7 @@ import { launchSession } from "../lib/launch.ts";
 import { pasteText } from "../lib/paste.ts";
 import { waitForWindow } from "../lib/wait.ts";
 import { checkExtendedKeys } from "../lib/keyscheck.ts";
+import { driveClaude } from "../lib/drive.ts";
 import { PASTE_BUFFER_NAME, BRACKET_START, BRACKET_END } from "../lib/constants.ts";
 
 // ── listAgentWindows ──────────────────────────────────────────────────
@@ -1018,6 +1019,151 @@ import { PASTE_BUFFER_NAME, BRACKET_START, BRACKET_END } from "../lib/constants.
 	assert.equal(r.ok, false);
 	assert.equal(r.version, "tmux 3.6");
 	assert.match(String(r.warning), /show-option exec threw/);
+}
+
+// ── driveClaude (P5c-2-S6) ────────────────────────────────────────────────────
+
+// testDriveRefusesUnprefixed: non-prefixed target → phase:"resolve", error, 0 tmux calls.
+// Phase 0 (resolveTarget) is pure — no executor.exec() calls fire when the
+// prefix-gate rejects the identifier. This is the safety invariant: the
+// orchestrator MUST short-circuit before any tmux exec if the window is
+// unsafe, so a hostile LLM can't probe tmux state via driveClaude.
+{
+	const fake = createFakeTmux();
+	const windows = [
+		{ sessionName: "smoke", windowIndex: "1", windowName: "zsh" }, // NOT prefixed
+	];
+	const r = await driveClaude(fake, [], windows, "pi-agent-", {
+		window: "zsh",
+		prompt: "hi",
+	});
+	assert.equal(r.ok, false, `unprefixed target must refuse, got ${JSON.stringify(r)}`);
+	assert.equal(r.phase, "resolve", `unprefixed → phase:"resolve", got ${r.phase}`);
+	assert.match(r.error ?? "", /does not match prefix/, "error mentions prefix mismatch");
+	assert.equal(fake.calls.length, 0, `phase:resolve must NOT fire any tmux exec, got ${fake.calls.length}`);
+}
+
+// testDriveHappyPath: all 4 phases succeed → phase:"capture" with output.
+// Call sequence (8 tmux execs total):
+//   1. capture-pane  (ready poll 1 — no match)
+//   2. capture-pane  (ready poll 2 — "❯" hits DEFAULT_DRIVE_READY_REGEX)
+//   3. set-buffer    (pasteText: S1 argv-only delivery)
+//   4. paste-buffer  (pasteText: bracketed paste + delete)
+//   5. send-keys     (pasteText: trailing Enter, default pressEnterCount:1)
+//   6. capture-pane  (done poll 1 — no match)
+//   7. capture-pane  (done poll 2 — "Cooked for" hits DEFAULT_DRIVE_DONE_REGEX)
+//   8. capture-pane  (final captureWindow — returned to LLM)
+{
+	const fake = createFakeTmux();
+	fake.program([
+		okResult("loading...\n"),      // ready poll 1: no match
+		okResult("ready ❯\n"),         // ready poll 2: regex hit
+		okResult(""),                  // set-buffer
+		okResult(""),                  // paste-buffer -d -p
+		okResult(""),                  // send-keys Enter
+		okResult("thinking...\n"),     // done poll 1: no match
+		okResult("Cooked for 5s\n"),   // done poll 2: regex hit
+		okResult("Cooked for 5s\n❯\n"), // final capture: returned verbatim
+	]);
+	const windows = [
+		{ sessionName: "smoke", windowIndex: "1", windowName: "pi-agent-bg-abc" },
+	];
+	const r = await driveClaude(fake, [], windows, "pi-agent-", {
+		window: "pi-agent-bg-abc",
+		prompt: "what is the meaning of life",
+	});
+	assert.equal(r.ok, true, `happy path must succeed, got ${JSON.stringify(r)}`);
+	assert.equal(r.phase, "capture", `happy path ends at phase:"capture", got ${r.phase}`);
+	assert.equal(r.target, "smoke:1", "target = sessionName:windowIndex");
+	assert.equal(r.output, "Cooked for 5s\n❯\n", "final capture returned verbatim");
+	assert.equal(fake.calls.length, 8, `happy path = 8 tmux execs (2+3+2+1), got ${fake.calls.length}`);
+	// Call-shape verification — every phase lands where it should.
+	assert.equal(fake.calls[0].args[0], "capture-pane", "call 0: ready poll 1");
+	assert.equal(fake.calls[1].args[0], "capture-pane", "call 1: ready poll 2");
+	assert.equal(fake.calls[2].args[0], "set-buffer", "call 2: pasteText set-buffer");
+	assert.equal(fake.calls[3].args[0], "paste-buffer", "call 3: pasteText paste-buffer -p");
+	assert.equal(fake.calls[4].args[0], "send-keys", "call 4: pasteText trailing Enter");
+	assert.equal(fake.calls[5].args[0], "capture-pane", "call 5: done poll 1");
+	assert.equal(fake.calls[6].args[0], "capture-pane", "call 6: done poll 2");
+	assert.equal(fake.calls[7].args[0], "capture-pane", "call 7: final captureWindow");
+	// Paste target uses session:index format (paste-buffer -t smoke:1).
+	const pasteCall = fake.calls[3].args;
+	const pasteTargetIdx = pasteCall.indexOf("-t") + 1;
+	assert.equal(pasteCall[pasteTargetIdx], "smoke:1", "paste-buffer targets smoke:1");
+	// Enter key arg must be exactly "Enter".
+	assert.equal(fake.calls[4].args[fake.calls[4].args.length - 1], "Enter", "send-keys fires Enter");
+}
+
+// testDriveReadyTimeout: ready wait times out → phase:"ready", 0 paste/final-capture calls.
+// Uses a short readyTimeoutMs (2000) so the test completes in ~2-3 seconds.
+// readyTimeoutMs < DEFAULT_DRIVE_READY_TIMEOUT_MS (30s) so this is a fast test.
+{
+	const fake = createFakeTmux();
+	// Always-returning "loading" — never matches the default ready regex (❯).
+	fake.program(Array(10).fill(okResult("loading\n")));
+	const windows = [
+		{ sessionName: "smoke", windowIndex: "1", windowName: "pi-agent-bg-abc" },
+	];
+	const start = Date.now();
+	const r = await driveClaude(fake, [], windows, "pi-agent-", {
+		window: "pi-agent-bg-abc",
+		prompt: "hi",
+		readyTimeoutMs: 2000,
+	});
+	const elapsed = Date.now() - start;
+	assert.equal(r.ok, false, `ready timeout must fail, got ${JSON.stringify(r)}`);
+	assert.equal(r.phase, "ready", `ready timeout → phase:"ready", got ${r.phase}`);
+	assert.equal(r.target, "smoke:1", "target still set on ready-phase failure");
+	assert.match(r.error ?? "", /(timeout|after)/, "error mentions wait reason");
+	assert.ok(elapsed < 6000, `ready timeout (2000ms + slack) should be fast, took ${elapsed}ms`);
+	// Critical: pasteText and final capture MUST NOT have fired.
+	// All fake.calls are capture-pane from the ready wait loop.
+	for (let i = 0; i < fake.calls.length; i++) {
+		assert.equal(fake.calls[i].args[0], "capture-pane", `call ${i} must be capture-pane (ready wait only), got ${fake.calls[i].args[0]}`);
+	}
+}
+
+// testDriveDoneTimeoutPartial: paste succeeds but done wait times out → phase:"done", partial output.
+// Drives the most useful failure mode: paste landed, TUI produced SOMETHING,
+// but never reached the "Cooked for" marker before doneTimeoutMs fired.
+// The orchestrator must return the partial output so the LLM can read it.
+{
+	const fake = createFakeTmux();
+	fake.program([
+		okResult("ready ❯\n"),         // ready poll 1: regex hits on first try
+		okResult(""),                  // set-buffer
+		okResult(""),                  // paste-buffer -d -p
+		okResult(""),                  // send-keys Enter
+		okResult("thinking step 1\n"), // done poll 1
+		okResult("thinking step 2\n"), // done poll 2
+		okResult("thinking step 3\n"), // done poll 3 — last capture before timeout
+	]);
+	const windows = [
+		{ sessionName: "smoke", windowIndex: "1", windowName: "pi-agent-bg-abc" },
+	];
+	const start = Date.now();
+	const r = await driveClaude(fake, [], windows, "pi-agent-", {
+		window: "pi-agent-bg-abc",
+		prompt: "hi",
+		doneTimeoutMs: 3000,
+	});
+	const elapsed = Date.now() - start;
+	assert.equal(r.ok, false, `done timeout must fail, got ${JSON.stringify(r)}`);
+	assert.equal(r.phase, "done", `done timeout → phase:"done", got ${r.phase}`);
+	assert.equal(r.target, "smoke:1", "target still set on done-phase failure");
+	// Partial output: the LAST capture from the done wait loop. With
+	// doneTimeoutMs=3000 + intervalMs=1000, only 3 done polls fire
+	// (iter 1 at t=0, iter 2 at t=1000, iter 3 at t=2000; then sleep to
+	// t=3000, then the while-check fires and we exit before a 4th poll).
+	assert.ok(r.output !== undefined, "partial output must be present on done timeout");
+	assert.equal(r.output, "thinking step 3\n", `partial output must be the LAST done-wait capture, got: ${JSON.stringify(r.output)}`);
+	// Error explains the reason.
+	assert.match(r.error ?? "", /(timeout|after)/, "error mentions wait reason");
+	assert.ok(elapsed < 8000, `done timeout (3000ms + ready + slack) should be bounded, took ${elapsed}ms`);
+	// Sanity: 1 ready capture + 3 paste calls + 3 done captures = 7.
+	assert.equal(fake.calls.length, 7, `done-timeout path = 1 ready + 3 paste + 3 done, got ${fake.calls.length}`);
+	// No final captureWindow fires on done timeout.
+	assert.equal(fake.calls[fake.calls.length - 1].args[0], "capture-pane", "last call is capture-pane (done-wait poll, not final capture)");
 }
 
 console.log("test-exec: all tests passed");
