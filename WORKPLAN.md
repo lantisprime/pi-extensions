@@ -9,13 +9,13 @@ The canonical `pi-extensions` workplan now lives in episodic memory.
 NOT hardcode an episode ID here — it drifts on every revision. The active head is
 the source of truth; older entries in the chain are `superseded`.
 
-## Active implementation (P5c-2-S1 + S2 + S3 MERGED into main + P5b/P5d still OPEN)
+## Active implementation (P5c-2 COMPLETE + P5b-1-S1 MERGED + P5b-1-S2 next)
 
-**P5c-2-S1 through S5 are MERGED into main via PRs #109, #111, #112, and #113. P5c-2-S6 (tmux_drive_claude) is the last slice.**
+**P5c-2 TUI automation is COMPLETE (all 6 slices shipped via PRs #109-#114). P5b-1-S1 cmux-terminal backend is MERGED via PR #115. P5b-1-S2 is next.**
 
-- Current episode ID: `20260628-091618-p5c-2-s5-mode-literal-keys-merged-into-m-0ef5`
-- Tags include: `canonical-workplan`, `workplan`, `p5c-2-s1-s2-s3-s4-merged`, `p5c-2-s5-next`, `p5c-2-s5-mode-keys`, `p5b-1-opened`, `p5d-opened`
-- Summary: **Post-S4-merge chain head revision.** PR #112 (P5c-2-S4 checkExtendedKeys) MERGED into main at `2dbf93a`; S5 mode:literal|keys is NEXT.
+- Current episode ID: `20260628-115014-p5b-1-s1-cmux-terminal-backend-merged-pr-32a6`
+- Tags include: `canonical-workplan`, `workplan`, `p5c-2-complete`, `p5b-1-s1-merged`, `p5b-1-s2-next`, `p5b-1-cmux-terminal`, `cmux-0.64.17-real-tested`
+- Summary: **P5b-1-S1 cmux-terminal backend MERGED (PR #115, fb55d57).** 13 files, +1234 LOC. Verified against real cmux 0.64.17 daemon (not proxy) — 8 smoke tests + 16 unit tests. Real testing caught 2 bugs the fake missed (close-window vs close-workspace, OK workspace:N parse). Key insight: cmux socket has ancestry check by default — set `CMUX_SOCKET_MODE=allowAll` when starting GUI for external CLI control. windowId must be opaque ref (`workspace:N`), not title. isAvailable uses `workspace list --json` socket-roundtrip (cmux version exits 0 even when socket broken). P5c-2 fully complete (S1-S6 via PRs #109-#114).
 - Tags include: `canonical-workplan`, `workplan`, `p5c-2-s1-s2-merged`, `p5c-2-s3-merged`, `p5c-2-pr-109-merged`, `p5c-2-pr-110-merged`, `p5c-2-pr-108-merged-user-manual`, `p5c-2-pr-111-merged-pressenter-count`, `p5c-2-merge-commit-ac59f5b`, `p5c-2-sync-commit-9d8986c`, `p5c-2-user-manual-commit-a030c5d`, `p5c-2-pressenter-commit-c4dbf61`, `p5c-2-s4-next`, `p5c-2-s4-checkextended-keys`, `p5b-1-opened`, `p5b-1-cmux-terminal`, `p5d-opened`, `p5d-cmux-control`, `behind-then-update-branch-pattern`, `plan-vs-actual-delta-15-to-126`, `codex-0.142.3-quirks`
 - Summary: **Post-S3-merge chain head revision.** PR #111 (P5c-2-S3 pressEnterCount surface) MERGED into main at `c4dbf61` (2026-06-28T07:55:20Z), squash-commit from 2 branch commits (workplan sync + S3 implementation). S3 reality was **+126/-15 across 4 files + 7 new tests + 1 updated test**, NOT the headline "~15 LOC + 2 tests" estimate — the original plan only counted the public-surface work and missed the latent literal-mode Enter loop that needed wiring (`send.ts` had a `pressEnterCount?: number` seam since S1 but never used it). Codex review (3 rounds, READY-TO-MERGE) caught 2 MAJORs (display inconsistency with clamp + NaN propagation) and 1 NIT (comment accuracy), all fixed before commit. **Next: P5c-2-S4 (`checkExtendedKeys` warn-only at `session_start`)** — new file `lib/keyscheck.ts`, ~120 LOC + 6 unit tests, parses `tmux -V` + `tmux show-option -gv extended-keys-format`, fire-and-forget from session_start. Genuinely parallel-safe with S5 (different files). **P5b-1 cmux-terminal + P5d cmux-control still OPENED** (scaffold only, macOS-only). Process lessons captured for codex 0.142.3 TUI quirks (Enter ×2 to submit, backticks corrupt messages, capture depth for multi-round) and sizing reality check (use 2-3x headline estimate as working budget).
 

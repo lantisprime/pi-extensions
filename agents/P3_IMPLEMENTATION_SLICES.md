@@ -141,7 +141,7 @@ Completed and merged:
 - REQ-13 import guard: no `agents/lib` static imports outside `lib/resolve.ts` (which uses dynamic import via `import(url)`).
 - Stats: 21 files, 1819 insertions in PR #106; 1819 → 1850 with the dep-doc commit.
 
-### P5c-2 tmux-control TUI automation surface (S1 + S2 + S3 MERGED into main via PRs #109 + #111; S4-S6 OPEN)
+### P5c-2 tmux-control TUI automation surface (COMPLETE — all 6 slices MERGED via PRs #109-#114)
 - Extends `tmux-control` from "send literal text + capture" into a general-purpose TUI driver.
 - Plan: `agents/docs/P5C2_TMUX_CONTROL_TUI_AUTOMATION_PLAN.md` (482 lines, 19 sections, 19 REQ rows).
 - Review cycle:
@@ -154,9 +154,9 @@ Completed and merged:
 | `P5c-2-S1` | `pasteText` via `set-buffer -b pictl-paste -- <text>` + `paste-buffer -p -d` (bracketed paste) + REQ-20 sanitization + Path A verification | new `lib/paste.ts`, `lib/send.ts` (multi-line routing), `index.ts`, `constants.ts` | **MERGED (PR #109)** | `e32eadf` on PR #109 (merged `ac59f5b` into main 2026-06-28; cherry-pick of `68c27d7` on cmux branch) | done |
 | `P5c-2-S2` | `waitForWindow({regex?, stableMs?, timeoutMs})` w/ injectable clock; regex > stable > sleep > timeout; bounded polls; per-call 5s exec; null-init lastChangeAt + reset-to-null-on-change; RegExp always copied | new `lib/wait.ts`, `constants.ts` (DEFAULT_WAIT_LINES), tests | **MERGED (PR #109)** | `d8ee10b` on PR #109 (merged `ac59f5b` into main 2026-06-28; cherry-pick of `5f2ffeb` on cmux branch; amended post-review) | done |
 | `P5c-2-S3` | `pressEnterCount` for `tmux_send` (surface seam already in `send.ts` since S1; closed latent literal-mode Enter loop implementation gap) | `lib/send.ts`, `lib/paste.ts`, `index.ts` | **MERGED (PR #111)** | `c4dbf61` (squash) on main; originally 2 branch commits on `feat/p5c-2-s3-pressenter-count` | done |
-| `P5c-2-S4` | `checkExtendedKeys` warn-only at `session_start` (sync handler + fire-and-forget) | new `lib/keyscheck.ts`, `index.ts` | OPEN (top priority, next) | — | parallel-safe (independent of S5; S3 file contention resolved) |
+| `P5c-2-S4` | `checkExtendedKeys` warn-only at `session_start` (sync handler + fire-and-forget) | new `lib/keyscheck.ts`, `index.ts` | **MERGED (PR #112)** | `2dbf93a` (squash) on main | parallel-safe (independent of S5) |
 | `P5c-2-S5` | `mode: "literal"\|"keys"` for `tmux_send` (surface seam already in `send.ts` since S1; keys mode defaults `pressEnter:false`) | `lib/send.ts`, `index.ts` | **MERGED (PR #113)** | `ea6ff83` (squash) on main | done |
-| `P5c-2-S6` | `tmux_drive_claude` composite tool (uses S1 + S2; must buffer across stdin reads per S6 design note in S1) | new `lib/drive.ts`, `index.ts` | **OPEN (top priority, last P5c-2 slice)** | — | last (after S4 + S5) |
+| `P5c-2-S6` | `tmux_drive_claude` composite tool (uses S1 + S2; must buffer across stdin reads per S6 design note in S1) | new `lib/drive.ts`, `index.ts` | **MERGED (PR #114)** | `4e54a9a` (squash) on main | done |
 
 - Hard-won design choices (preserve across slicing):
   1. **`paste-buffer -p` is required.** Without `-p`, tmux defaults to LF→CR conversion and reproduces the premature-submit bug S1 is meant to fix. REQ-1 asserts `args.includes("-p") && !args.includes("-r")`.
@@ -192,14 +192,14 @@ Completed and merged:
   - **Implication for S4 specifically**: S4 is `checkExtendedKeys` warn-only — it's a NEW file with no pre-existing seam, so the headline ~120 LOC + 6 tests estimate is more likely accurate. But verify by reading `lib/keyscheck.ts` (the new file) and the `session_start` handler registration point in `index.ts` BEFORE committing to the estimate.
 - Research grounding: `TMUX_TUI_AUTOMATION.md` (repo root) — 12k-byte recipe for driving any TUI via tmux, including the timing/auth/bracketed-paste lessons that P5c-2's design depends on.
 
-### P5b-1 cmux-terminal (OPENED — scaffold on `feat/cmux-control-and-p5b-cmux-terminal`)
+### P5b-1 cmux-terminal (S1 MERGED via PR #115; S2-S5 OPEN)
 - New `cmux-terminal/` extension implementing the `TermBgBackend` interface for cmux (Ghostty-based macOS terminal multiplexer; https://github.com/manaflow-ai/cmux).
 - **Pattern**: mirrors `tmux-terminal/` 1:1 with cmux CLI swaps + cmux-specific adaptations.
 - **5-slice ladder**:
 
 | Slice | Objective | Primary files | Tests | Parallel? |
 |---|---|---|---|---|
-| `P5b-1-S1` | `createCmuxBackend()` factory: `isAvailable` (macOS gate + `cmux identify`), `launch` (`cmux new-workspace --name X --cwd P --command "..." --layout '{...}' --focus false`), `kill` (`cmux close-workspace --workspace ID`), `isAlive` (`cmux list-workspaces --json` parse), `list` (`cmux list-workspaces --json` filtered by `@pi_run_id`) | `cmux-terminal/lib/cmux-backend.ts` (new), `cmux-terminal/lib/exec.ts` (new) | 8 unit tests + 1 real-cmux smoke | top-level |
+| `P5b-1-S1` | `createCmuxBackend()` factory: `isAvailable` (macOS gate + socket-roundtrip `cmux workspace list --json`), `launch` (`cmux workspace create --name X --cwd P --command "..." --focus false`, parses `OK workspace:N`), `kill` (`cmux close-workspace --workspace ID`), `isAlive` + `list` (parse `cmux workspace list --json` returns `ws.ref` as windowId) | `cmux-terminal/lib/cmux-backend.ts` (new), `cmux-terminal/lib/exec.ts` (new), helpers (path-validate, redact-error, shell-escape, resolve-worker-path, constants) | **MERGED (PR #115)** — 16 unit tests + 8 real-cmux smoke tests | fb55d57 (squash) on main; S1 cherry-picked cmux 0.64.17 canonical API; 4 review rounds (codex via tmux) | done |
 | `P5b-1-S2` | `resolve-worker-path.ts` — D7 lesson: walk UP from `import.meta.url` to find `agents/lib/bg-worker.{ts,mjs,js}` even when symlinked | `cmux-terminal/lib/resolve-worker-path.ts` (new), `cmux-terminal/test-fixtures/test-helpers.mjs` (new) | 2 tests (realpath + precedence) | parallel with S1 |
 | `P5b-1-S3` | `path-validate.ts`, `redact-error.ts`, `shell-escape.ts`, `constants.ts` — copy tmux-terminal equivalents with cmux constants (`CMUX_WINDOW_PREFIX = "pi-cmux-"`, etc.) | `cmux-terminal/lib/{path-validate, redact-error, shell-escape, constants}.ts` (new) | 3 tests | parallel with S1, S2 |
 | `P5b-1-S4` | `cmux-terminal/index.ts` — extension entry; registers backend on `session_start`, same shape as `tmux-terminal/index.ts` | `cmux-terminal/index.ts` (new) | 1 extension-integration test | serial after S1 |
