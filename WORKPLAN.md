@@ -9,13 +9,13 @@ The canonical `pi-extensions` workplan now lives in episodic memory.
 NOT hardcode an episode ID here — it drifts on every revision. The active head is
 the source of truth; older entries in the chain are `superseded`.
 
-## Active implementation (P5c-2-S1 + S2 MERGED into main + P5b/P5d still OPEN)
+## Active implementation (P5c-2-S1 + S2 + S3 MERGED into main + P5b/P5d still OPEN)
 
-**P5c-2-S1 (pasteText) and S2 (waitForWindow) are MERGED into main via PR #109. P5c-2-S3 (pressEnterCount surface) is the next slice.**
+**P5c-2-S1 (pasteText), S2 (waitForWindow), and S3 (pressEnterCount surface) are MERGED into main via PRs #109 and #111. P5c-2-S4 (checkExtendedKeys warn-only at session_start) is the next slice.**
 
-- Current episode ID: `20260628-064329-post-pr-108-pr-110-sweep-chain-head-now--2c32`
-- Tags include: `canonical-workplan`, `workplan`, `p5c-2-s1-s2-merged`, `p5c-2-pr-109-merged`, `p5c-2-pr-110-merged`, `p5c-2-pr-108-merged-user-manual`, `p5c-2-merge-commit-ac59f5b`, `p5c-2-sync-commit-9d8986c`, `p5c-2-user-manual-commit-a030c5d`, `p5c-2-s3-next`, `p5c-2-s3-pressenter-count`, `p5c-2-s3-test-plan-expanded`, `p5b-1-opened`, `p5b-1-cmux-terminal`, `p5d-opened`, `p5d-cmux-control`, `behind-then-update-branch-pattern`
-- Summary: **Chain head sweep after PR #110 (workplan sync) + PR #108 (USER_MANUAL background-agents section) both MERGED into main at `a030c5d`.** PR #109 (P5c-2 S1+S2) is the substantive implementation merge; PR #110 is the workplan-pointer sync to match; PR #108 is the user-manual docs gap closer (lateral addition, no new tracked track). All three merges preserve S3 readiness: the `pressEnterCount` seam is still at `lib/send.ts:43`, schema at `tmux-control/index.ts:263-267`, single-line + multi-line paths both testable. **Next: P5c-2-S3 (pressEnterCount surface)** — ~15 LOC + 4 unit tests (expanded from handoff's minimum-2 to cover single-line direct path + NaN fail-safe parity with pasteText's existing 4 pressEnterCount tests). Touches `lib/send.ts` (no-op, seam already there) + `lib/index.ts` (schema + execute thread) + `test-fixtures/test-exec.mjs` (4 tests). **P5b-1 cmux-terminal + P5d cmux-control still OPENED** (scaffold only, macOS-only). Resolution pattern from PR #108: docs-only PRs that go BEHIND main resolve cleanly via GitHub UI "Update branch" → squash merge.
+- Current episode ID: `20260628-075646-post-s3-merge-p5c-2-s3-pressentercount-s-c2a4`
+- Tags include: `canonical-workplan`, `workplan`, `p5c-2-s1-s2-merged`, `p5c-2-s3-merged`, `p5c-2-pr-109-merged`, `p5c-2-pr-110-merged`, `p5c-2-pr-108-merged-user-manual`, `p5c-2-pr-111-merged-pressenter-count`, `p5c-2-merge-commit-ac59f5b`, `p5c-2-sync-commit-9d8986c`, `p5c-2-user-manual-commit-a030c5d`, `p5c-2-pressenter-commit-c4dbf61`, `p5c-2-s4-next`, `p5c-2-s4-checkextended-keys`, `p5b-1-opened`, `p5b-1-cmux-terminal`, `p5d-opened`, `p5d-cmux-control`, `behind-then-update-branch-pattern`, `plan-vs-actual-delta-15-to-126`, `codex-0.142.3-quirks`
+- Summary: **Post-S3-merge chain head revision.** PR #111 (P5c-2-S3 pressEnterCount surface) MERGED into main at `c4dbf61` (2026-06-28T07:55:20Z), squash-commit from 2 branch commits (workplan sync + S3 implementation). S3 reality was **+126/-15 across 4 files + 7 new tests + 1 updated test**, NOT the headline "~15 LOC + 2 tests" estimate — the original plan only counted the public-surface work and missed the latent literal-mode Enter loop that needed wiring (`send.ts` had a `pressEnterCount?: number` seam since S1 but never used it). Codex review (3 rounds, READY-TO-MERGE) caught 2 MAJORs (display inconsistency with clamp + NaN propagation) and 1 NIT (comment accuracy), all fixed before commit. **Next: P5c-2-S4 (`checkExtendedKeys` warn-only at `session_start`)** — new file `lib/keyscheck.ts`, ~120 LOC + 6 unit tests, parses `tmux -V` + `tmux show-option -gv extended-keys-format`, fire-and-forget from session_start. Genuinely parallel-safe with S5 (different files). **P5b-1 cmux-terminal + P5d cmux-control still OPENED** (scaffold only, macOS-only). Process lessons captured for codex 0.142.3 TUI quirks (Enter ×2 to submit, backticks corrupt messages, capture depth for multi-round) and sizing reality check (use 2-3x headline estimate as working budget).
 
 ### Completed tracks
 - P6 Intent Routing (7 slices, PRs #50, #58, #59, #60, #61)
@@ -32,20 +32,16 @@ the source of truth; older entries in the chain are `superseded`.
 - P5c tmux-control v0.1 (PR #106, commit 4cc5232)
 - **P5c-2-S1 pasteText (commit e32eadf on feat/p5c-2-foundations; originally 68c27d7 on feat/cmux-control-and-p5b-cmux-terminal)**
 - **P5c-2-S2 waitForWindow (commit d8ee10b on feat/p5c-2-foundations; originally 5f2ffeb on feat/cmux-control-and-p5b-cmux-terminal, amended post-review)**
+- **P5c-2-S3 pressEnterCount surface (PR #111, squash-commit c4dbf61 on main; originally 2 branch commits on feat/p5c-2-s3-pressenter-count — workplan sync + S3 implementation)**
 
 ### Next
-- **P5c-2-S3 (TOP PRIORITY)** — `pressEnterCount` surface for `tmux_send` (seam already in `send.ts` since S1). ~15 LOC + 2 unit tests.
-- P5c-2-S4 (parallel-safe) — `checkExtendedKeys` warn-only at `session_start`. New file `lib/keyscheck.ts`.
-- P5c-2-S5 (after S3) — `mode: "literal" | "keys"` surface for `tmux_send` (seam already in `send.ts` since S1). ~15 LOC + 4 unit tests.
-- P5c-2-S6 (last) — `tmux_drive_claude` composite tool (uses S1 + S2; must buffer across stdin reads per S6 design note in S1).
+- **P5c-2-S4 (TOP PRIORITY, parallel-safe)** — `checkExtendedKeys` warn-only at `session_start`. New file `lib/keyscheck.ts`. ~120 LOC + 6 unit tests.
+- P5c-2-S5 (after S4) — `mode: "literal" | "keys"` surface for `tmux_send` (seam already in `send.ts` since S1). ~15 LOC + 4 unit tests. Different files from S4 — could run in parallel.
+- P5c-2-S6 (last) — `tmux_drive_claude` composite tool (uses S1 + S2; must buffer across stdin reads per S6 design note in S1). Largest slice.
 
 ### Next (open)
 
-#### P5c-2-S3 (TOP PRIORITY)
-- Exposes the existing `pressEnterCount` param on `tmux_send` (seam already in `send.ts` since S1).
-- Touches `lib/send.ts` and `lib/index.ts` only — no `lib/wait.ts` overlap. ~15 LOC + 2 unit tests.
-
-#### P5c-2-S4 (parallel-safe)
+#### P5c-2-S4 (TOP PRIORITY, parallel-safe)
 - `checkExtendedKeys` warn-only at `session_start` (sync handler + fire-and-forget).
 - New file `lib/keyscheck.ts`. ~120 LOC + 6 unit tests.
 - Parses `tmux -V` + `tmux show-option -gv extended-keys-format`.

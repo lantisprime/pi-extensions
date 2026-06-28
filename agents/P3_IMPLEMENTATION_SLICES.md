@@ -141,7 +141,7 @@ Completed and merged:
 - REQ-13 import guard: no `agents/lib` static imports outside `lib/resolve.ts` (which uses dynamic import via `import(url)`).
 - Stats: 21 files, 1819 insertions in PR #106; 1819 → 1850 with the dep-doc commit.
 
-### P5c-2 tmux-control TUI automation surface (S1 + S2 MERGED into main via PR #109; S3-S6 OPEN)
+### P5c-2 tmux-control TUI automation surface (S1 + S2 + S3 MERGED into main via PRs #109 + #111; S4-S6 OPEN)
 - Extends `tmux-control` from "send literal text + capture" into a general-purpose TUI driver.
 - Plan: `agents/docs/P5C2_TMUX_CONTROL_TUI_AUTOMATION_PLAN.md` (482 lines, 19 sections, 19 REQ rows).
 - Review cycle:
@@ -153,10 +153,10 @@ Completed and merged:
 |---|---|---|---|---|---|
 | `P5c-2-S1` | `pasteText` via `set-buffer -b pictl-paste -- <text>` + `paste-buffer -p -d` (bracketed paste) + REQ-20 sanitization + Path A verification | new `lib/paste.ts`, `lib/send.ts` (multi-line routing), `index.ts`, `constants.ts` | **MERGED (PR #109)** | `e32eadf` on PR #109 (merged `ac59f5b` into main 2026-06-28; cherry-pick of `68c27d7` on cmux branch) | done |
 | `P5c-2-S2` | `waitForWindow({regex?, stableMs?, timeoutMs})` w/ injectable clock; regex > stable > sleep > timeout; bounded polls; per-call 5s exec; null-init lastChangeAt + reset-to-null-on-change; RegExp always copied | new `lib/wait.ts`, `constants.ts` (DEFAULT_WAIT_LINES), tests | **MERGED (PR #109)** | `d8ee10b` on PR #109 (merged `ac59f5b` into main 2026-06-28; cherry-pick of `5f2ffeb` on cmux branch; amended post-review) | done |
-| `P5c-2-S3` | `pressEnterCount` for `tmux_send` (surface seam already in `send.ts` since S1) | `lib/send.ts`, `index.ts` | OPEN (top priority) | — | standalone |
-| `P5c-2-S4` | `checkExtendedKeys` warn-only at `session_start` (sync handler + fire-and-forget) | new `lib/keyscheck.ts`, `index.ts` | OPEN | — | parallel-safe (independent of S3) |
-| `P5c-2-S5` | `mode: "literal"\|"keys"` for `tmux_send` (surface seam already in `send.ts` since S1; keys mode defaults `pressEnter:false`) | `lib/send.ts`, `index.ts` | OPEN | — | after S3 (same file contention) |
-| `P5c-2-S6` | `tmux_drive_claude` composite tool (uses S1 + S2; must buffer across stdin reads per S6 design note in S1) | new `lib/drive.ts`, `index.ts` | OPEN | — | last (after S3 + S4 + S5) |
+| `P5c-2-S3` | `pressEnterCount` for `tmux_send` (surface seam already in `send.ts` since S1; closed latent literal-mode Enter loop implementation gap) | `lib/send.ts`, `lib/paste.ts`, `index.ts` | **MERGED (PR #111)** | `c4dbf61` (squash) on main; originally 2 branch commits on `feat/p5c-2-s3-pressenter-count` | done |
+| `P5c-2-S4` | `checkExtendedKeys` warn-only at `session_start` (sync handler + fire-and-forget) | new `lib/keyscheck.ts`, `index.ts` | OPEN (top priority, next) | — | parallel-safe (independent of S5; S3 file contention resolved) |
+| `P5c-2-S5` | `mode: "literal"\|"keys"` for `tmux_send` (surface seam already in `send.ts` since S1; keys mode defaults `pressEnter:false`) | `lib/send.ts`, `index.ts` | OPEN | — | parallel-safe with S4 (different files); could run simultaneously |
+| `P5c-2-S6` | `tmux_drive_claude` composite tool (uses S1 + S2; must buffer across stdin reads per S6 design note in S1) | new `lib/drive.ts`, `index.ts` | OPEN | — | last (after S4 + S5) |
 
 - Hard-won design choices (preserve across slicing):
   1. **`paste-buffer -p` is required.** Without `-p`, tmux defaults to LF→CR conversion and reproduces the premature-submit bug S1 is meant to fix. REQ-1 asserts `args.includes("-p") && !args.includes("-r")`.
@@ -173,10 +173,23 @@ Completed and merged:
   - **Convergence**: both reviewers approved after two iterations. "Not on first repeat" semantics expanded to apply to every run of same-output captures, not just the initial capture.
   - **Single-commit amendment**: S2 originally committed as `214f888`, amended to `5f2ffeb` post-review per project pattern (cf. S1 commit `68c27d7` which absorbed research-driven fixes). Original hash orphaned. On PR #109 (cherry-pick to `feat/p5c-2-foundations`), the equivalent hash is `d8ee10b`. PR #109 MERGED into main 2026-06-28 at `ac59f5b`.
 - S2 file conflict analysis (post-S2 commit `d8ee10b` on feat/p5c-2-foundations):
-  - **S3** touches `lib/send.ts` + `lib/index.ts` only — no `lib/wait.ts` overlap.
-  - **S4** is a new file `lib/keyscheck.ts` (parallel-safe with S3) — no overlap with S1 or S2.
-  - **S5** touches `lib/send.ts` + `lib/index.ts` only — no `lib/wait.ts` overlap (after S3).
-  - **S6** is a new file `lib/drive.ts` — imports both `pasteText` (S1) and `waitForWindow` (S2) directly. No overlap with S2 file (`wait.ts`).
+  - **S3 MERGED** via PR #111 — touched `lib/send.ts`, `lib/paste.ts`, `index.ts`, `test-exec.mjs`. Closed a real implementation gap on the literal-mode Enter loop (was hardcoded to 1 Enter despite the seam). Total diff +126/-15 with 7 new tests + 1 updated test (not the original "~15 LOC + 2 tests" estimate — see plan-vs-actual lesson below).
+  - **S4** is a new file `lib/keyscheck.ts` + small `index.ts` session_start handler registration. No overlap with S1/S2/S3. Parallel-safe with S5 (different files).
+  - **S5** touches `lib/send.ts` + `lib/index.ts` only — no `lib/wait.ts` overlap (after S3/S4). Parallel-safe with S4 (different files).
+  - **S6** is a new file `lib/drive.ts` — imports both `pasteText` (S1) and `waitForWindow` (S2) directly. No overlap with S2 file (`wait.ts`). Serial after S5 (composite of S1+S2+S4+S5).
+- **S3 review cycle (Codex 0.142.3 via tmux, 3 rounds)**:
+  - **R1**: `NEEDS-CHANGES-BEFORE-MERGE` (1 MAJOR: success suffix computed from raw `params.pressEnterCount` — displayed `+ 100x Enter` while 10 fired).
+  - **R1 fix**: `sendText`/`pasteText` now return `effectiveEnterCount` (post-clamp count); `index.ts` consumes it. 3 new tests verify effectiveEnterCount.
+  - **R2**: `NEEDS-CHANGES-BEFORE-MERGE` (1 MAJOR: `effectiveEnterCount` could be NaN when `pressEnterCount:NaN` passed — `Math.min(Math.max(NaN, 0), 10) === NaN`).
+  - **R2 fix**: `Number.isFinite()` normalization after the clamp; both NaN fail-safe tests updated to assert `effectiveEnterCount === 0`.
+  - **R3**: `READY-TO-MERGE` (1 NIT: comment claimed Infinity → 0 but actual behavior is Infinity → MAX_ENTER_COUNT).
+  - **R3 fix**: Updated comment to reflect accurate semantics. Single commit after R3 READY-TO-MERGE.
+  - **Convergence**: codex approved after 3 iterations. Process discipline held — no commit while verdict was `needs-changes-before-merge`.
+- **Plan-vs-actual lesson (S3)**:
+  - Original plan: "~15 LOC + 2 unit tests". Reality: +126 LOC + 7 new tests + 1 updated test across 4 files.
+  - Reason: plan counted only the public-surface work (schema addition); missed the latent literal-mode Enter loop in `send.ts` (the `pressEnterCount?: number` seam existed since S1 but was never wired).
+  - **Implication for S4-S6**: when a "surface" slice depends on an existing seam, treat the seam verification as a separate step. If the seam isn't actually wired, the slice is a real implementation, not just surface work. Use 2-3x the headline LOC estimate as a working budget until the seam is verified.
+  - **Implication for S4 specifically**: S4 is `checkExtendedKeys` warn-only — it's a NEW file with no pre-existing seam, so the headline ~120 LOC + 6 tests estimate is more likely accurate. But verify by reading `lib/keyscheck.ts` (the new file) and the `session_start` handler registration point in `index.ts` BEFORE committing to the estimate.
 - Research grounding: `TMUX_TUI_AUTOMATION.md` (repo root) — 12k-byte recipe for driving any TUI via tmux, including the timing/auth/bracketed-paste lessons that P5c-2's design depends on.
 
 ### P5b-1 cmux-terminal (OPENED — scaffold on `feat/cmux-control-and-p5b-cmux-terminal`)
