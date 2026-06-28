@@ -1,9 +1,10 @@
 // tmux-control: pi extension entry.
 //
 // Registers:
-//   - 6 slash commands: /tmux-list, /tmux-capture, /tmux-send, /tmux-tail,
-//                        /tmux-launch, /tmux-config
-//   - 4 LLM-callable tools: tmux_list, tmux_capture, tmux_send, tmux_launch
+//   - 7 slash commands: /tmux-list, /tmux-capture, /tmux-send, /tmux-tail,
+//                        /tmux-launch, /tmux-paste, /tmux-config
+//   - 6 LLM-callable tools: tmux_list, tmux_capture, tmux_send, tmux_paste,
+//                            tmux_launch, tmux_drive_claude
 //   - 1 input hook for NL activation (consume NL like "tail bg-abc123")
 //
 // All tmux operations use argv-only execFile (never a shell), are bounded
@@ -22,11 +23,17 @@ import { launchSession } from "./lib/launch.ts";
 import { resolveRunId } from "./lib/resolve.ts";
 import { resolveTarget } from "./lib/safety.ts";
 import { matchNlp } from "./lib/nlp.ts";
+import { driveClaude } from "./lib/drive.ts";
 import {
 	DEFAULT_WINDOW_PREFIX,
 	DEFAULT_CAPTURE_LINES,
 	MAX_CAPTURE_LINES,
 	MAX_ERROR_STDERR_LEN,
+	DEFAULT_DRIVE_READY_REGEX,
+	DEFAULT_DRIVE_DONE_REGEX,
+	DEFAULT_DRIVE_READY_TIMEOUT_MS,
+	DEFAULT_DRIVE_DONE_TIMEOUT_MS,
+	DEFAULT_DRIVE_LINES,
 } from "./lib/constants.ts";
 
 function truncate(s: string, n: number): string {
@@ -326,6 +333,45 @@ function registerTools(pi: ExtensionAPI): void {
 			const r = await launchSession(executor, sock, params.name, params.command);
 			if (!r.ok) return { content: [{ type: "text", text: `launch failed: ${r.error}` }], details: { ok: false } };
 			return { content: [{ type: "text", text: `Spawned tmux session "${r.sessionName}"${params.command ? ` running: ${params.command}` : ""}.` }], details: { ok: true, sessionName: r.sessionName } };
+		},
+	});
+
+	pi.registerTool({
+		name: "tmux_drive_claude",
+		label: "Drive Claude via tmux",
+		description: "Send a prompt to a claude/codex TUI in a tmux window and capture the response. Composes wait-for-ready → paste → wait-for-done → capture.",
+		parameters: Type.Object({
+			window: Type.String({ description: "Window name (e.g. pi-agent-bg-abc) or runId (e.g. bg-abc)" }),
+			prompt: Type.String({ description: "Prompt text (max 4000 bytes)" }),
+			readyRegex: Type.Optional(Type.String({ description: `Regex (string pattern) matched against the pane to confirm the TUI is ready for input. Default: ${DEFAULT_DRIVE_READY_REGEX}` })),
+			doneRegex: Type.Optional(Type.String({ description: `OPT-IN regex (string pattern) matched against the pane to confirm the TUI has finished its response. Default: stability-based (output unchanged for ~2s). Pass a non-empty string to override with a single-poll regex trigger — e.g. "${DEFAULT_DRIVE_DONE_REGEX}" matches Claude Code's "Cooked for Ns"/"Baked for Ns" lines and the ✻ spinner glyph. See tmux-control/lib/drive.ts for the rationale (stale-match and streaming-✻ correctness hazards of regex-based detection).` })),
+			readyTimeoutMs: Type.Optional(Type.Integer({ description: `Max ms to wait for the ready marker. Default ${DEFAULT_DRIVE_READY_TIMEOUT_MS}.`, minimum: 1000, maximum: 300000 })),
+			doneTimeoutMs: Type.Optional(Type.Integer({ description: `Max ms to wait for the done marker. Default ${DEFAULT_DRIVE_DONE_TIMEOUT_MS}.`, minimum: 1000, maximum: 600000 })),
+			pressEnterCount: Type.Optional(Type.Integer({ description: "Number of separate Enter invocations fired after the paste (default 1, clamped 0..10)", minimum: 0, maximum: 10 })),
+			lines: Type.Optional(Type.Integer({ description: `Number of lines to capture (1..${MAX_CAPTURE_LINES}). Default ${DEFAULT_DRIVE_LINES}.`, minimum: 1, maximum: MAX_CAPTURE_LINES })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, _ctx) {
+			const sock = getSocketPrefix();
+			if (!sock) return { content: [{ type: "text", text: notConfiguredMsg() }], details: { ok: false } };
+			const wins = await listAgentWindows(executor, sock, currentPrefix);
+			const r = await driveClaude(executor, sock, wins, currentPrefix, params);
+			if (!r.ok) {
+				// On failure, return both the error AND any partial output the
+				// orchestrator captured (notably the phase:"done" timeout path).
+				// The LLM can then decide whether to retry, capture more, or
+				// proceed with whatever the TUI produced before the timeout.
+				const body = r.output
+					? `${r.error}\n\nPartial output:\n${truncate(r.output, 8000)}`
+					: r.error ?? "drive failed";
+				return {
+					content: [{ type: "text", text: `drive failed at ${r.phase}: ${body}` }],
+					details: { ok: false, phase: r.phase, target: r.target },
+				};
+			}
+			return {
+				content: [{ type: "text", text: r.output ?? "" }],
+				details: { ok: true, phase: r.phase, target: r.target },
+			};
 		},
 	});
 }

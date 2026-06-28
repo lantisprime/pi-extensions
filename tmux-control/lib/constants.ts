@@ -29,3 +29,35 @@ export const DEFAULT_WAIT_LINES = 50;
 // is no uppercase marker variant.)
 export const BRACKET_START = "\x1b[200~";
 export const BRACKET_END = "\x1b[201~";
+// driveClaude orchestrator defaults (P5c-2-S6).
+// Default regex that signals a Claude/Codex TUI prompt is ready to accept
+// input (the `❯` chevron Claude Code renders below its input box).
+export const DEFAULT_DRIVE_READY_REGEX = "❯";
+// Suggested regex for callers who explicitly opt in to regex-based done
+// detection via the `doneRegex` parameter on tmux_drive_claude. Matches
+// Claude Code's "Cooked for Ns" / "Baked for Ns" status lines AND the
+// generic ✻ spinner glyph used during streaming.
+//
+// IMPORTANT: this is no longer the DEFAULT detection mechanism for
+// tmux_drive_claude (P5c-2-S6 follow-up). The orchestrator now uses
+// stability-based detection (output unchanged for ~2s) by default to
+// avoid two codex-flagged correctness hazards:
+//   a) Stale match — a prior "Cooked for 5s" line still in scrollback
+//      matches before the new prompt even starts.
+//   b) Streaming ✻ — the glyph appears while the TUI is still working;
+//      regex would match on the first poll while the answer is incomplete.
+// Callers who specifically want single-poll regex triggers (and accept
+// the documented hazards) can pass this constant as `doneRegex`.
+export const DEFAULT_DRIVE_DONE_REGEX = "Cooked for|Baked for|✻";
+// Max ms to wait for the ready marker before declaring the window stuck.
+// 30s is generous for TUIs that are mid-render; shorter timeouts would
+// cause spurious failures during normal startup.
+export const DEFAULT_DRIVE_READY_TIMEOUT_MS = 30_000;
+// Max ms to wait for the done marker after pasting. Claude can take
+// several minutes for long prompts; 120s is the upper bound for typical
+// interactive work.
+export const DEFAULT_DRIVE_DONE_TIMEOUT_MS = 120_000;
+// Capture depth for the orchestrator's final captureWindow — wider than
+// waitForWindow's poll depth (DEFAULT_WAIT_LINES=50) because we want the
+// full response, not just the trailing prompt area.
+export const DEFAULT_DRIVE_LINES = 200;
