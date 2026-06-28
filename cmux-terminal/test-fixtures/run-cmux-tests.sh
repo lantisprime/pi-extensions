@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P5b-1 cmux-terminal test runner. Runs the 8 unit tests in test-cmux-backend.mjs
+# P5b-1 cmux-terminal test runner. Runs the 16 unit tests in test-cmux-backend.mjs
 # via Node 22+ `--experimental-strip-types`. Also runs the REQ-13 grep guard
 # (no agents/lib imports outside bg-terminal.ts) plus a second guard for the
 # helper-file verbatim-copy contract.

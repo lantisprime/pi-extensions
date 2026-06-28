@@ -1,12 +1,13 @@
-// P5b-1 test-cmux-backend.mjs — 12 unit tests.
-// Verifies cmux-backend.ts: isAvailable probe (3 tests), launch (6 tests:
+// P5b-1 test-cmux-backend.mjs — 16 unit tests.
+// Verifies cmux-backend.ts: isAvailable probe (4 tests), launch (6 tests:
 //   correct argv with shell-escaping, invalid cwd, invalid manifestPath,
 //   manifestPath outside bgStateDir, spaces in workerPath, metacharacters
-//   in manifestPath), kill (1), isAlive (1), list (1).
+//   in manifestPath), kill (1), isAlive (2), list (3 — incl. P1 list→kill
+//   round-trip and ref-missing fallback).
 // Each test is independent and uses a fresh backend + temp bgStateDir.
 //
 // cmux 0.64.17 command surface asserted by these tests:
-//   isAvailable  → `cmux version`
+//   isAvailable  → `cmux workspace list --json` (P2: real socket-roundtrip)
 //   launch       → `cmux workspace create --name --cwd --command --focus`
 //   kill         → `cmux close-workspace --workspace <id>`
 //   isAlive/list → `cmux workspace list --json`
@@ -36,17 +37,17 @@ const SAMPLE_WORKSPACE_NAME = "pi-cmux-bg-1719432000000-a3f9c2b1e8f4d2b6";
 const SAMPLE_MANIFEST = "/var/folders/abc/T/pi-bg-state-xyz/bg-1719432000000-a3f9c2b1e8f4d2b6/manifest.json";
 const SAMPLE_CWD = "/Users/me/project";
 
-// Test 1: isAvailable — macOS + version succeeds → true
+// Test 1: isAvailable — macOS + workspace list --json succeeds → true
 {
 	const { executor, backend } = freshBackend();
-	executor.setDefaultResponse({ ok: true, stdout: "cmux 0.64.17", stderr: "", exitCode: 0 });
+	executor.setDefaultResponse({ ok: true, stdout: JSON.stringify({ workspaces: [] }), stderr: "", exitCode: 0 });
 	const prevPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 	Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
 	try {
 		const result = await backend.isAvailable();
-		assert.equal(result, true, "isAvailable must be true on darwin when version succeeds");
-		assert.ok(executor.calls.length >= 1, "isAvailable must call cmux version");
-		assert.deepEqual(executor.calls[0].args, ["version"]);
+		assert.equal(result, true, "isAvailable must be true on darwin when workspace list --json succeeds (real socket-roundtrip)");
+		assert.ok(executor.calls.length >= 1, "isAvailable must call cmux");
+		assert.deepEqual(executor.calls[0].args, ["workspace", "list", "--json"], "P5b-1-S1 P2: isAvailable MUST probe via `cmux workspace list --json` (a real socket-roundtrip), NOT `cmux version` which exits 0 even when the socket is broken");
 	} finally {
 		if (prevPlatform) Object.defineProperty(process, "platform", prevPlatform);
 	}
@@ -66,7 +67,7 @@ const SAMPLE_CWD = "/Users/me/project";
 	}
 }
 
-// Test 3: isAvailable — version fails → false
+// Test 3: isAvailable — workspace list --json fails → false
 {
 	const { executor, backend } = freshBackend();
 	executor.setDefaultResponse({ ok: false, stderr: "Socket not found at /Users/me/.local/state/cmux/cmux.sock", exitCode: 1 });
@@ -74,7 +75,10 @@ const SAMPLE_CWD = "/Users/me/project";
 	Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
 	try {
 		const result = await backend.isAvailable();
-		assert.equal(result, false, "isAvailable must be false when version fails (no cmux server running)");
+		assert.equal(result, false, "isAvailable must be false when workspace list --json fails (socket unreachable)");
+		const probeCall = executor.calls.find(function _c(c) { return c.args[0] === "workspace" && c.args[1] === "list"; });
+		assert.ok(probeCall, "isAvailable MUST probe via workspace list --json (not version)");
+		assert.deepEqual(probeCall.args, ["workspace", "list", "--json"]);
 	} finally {
 		if (prevPlatform) Object.defineProperty(process, "platform", prevPlatform);
 	}
@@ -126,11 +130,13 @@ const SAMPLE_CWD = "/Users/me/project";
 // Test 7: isAlive — workspace list JSON parse, match found → true
 {
 	const { executor, backend } = freshBackend();
+	// cmux JSON shape uses `ref` (e.g. "workspace:3"), not `id`. Use realistic
+	// shape so the test data matches the production contract.
 	const listJson = JSON.stringify({
 		workspaces: [
-			{ id: "uuid-1", title: "vim" },
-			{ id: "uuid-2", title: SAMPLE_WORKSPACE_NAME },
-			{ id: "uuid-3", title: "bash" },
+			{ ref: "workspace:1", title: "vim" },
+			{ ref: "workspace:2", title: SAMPLE_WORKSPACE_NAME },
+			{ ref: "workspace:3", title: "bash" },
 		],
 	});
 	executor.setDefaultResponse({ ok: true, stdout: listJson, stderr: "", exitCode: 0 });
@@ -140,24 +146,42 @@ const SAMPLE_CWD = "/Users/me/project";
 	assert.deepEqual(listCall.args, ["workspace", "list", "--json"]);
 }
 
-// Test 8: list — filters by prefix, extracts runId
+// Test 7b: isAlive — match found by ref (NOT title) → true
+// Defends the symmetric path: after P1, list() returns the ref, so isAlive()
+// must accept it the same way kill() does.
 {
 	const { executor, backend } = freshBackend();
 	const listJson = JSON.stringify({
 		workspaces: [
-			{ id: "uuid-1", title: "vim" },
-			{ id: "uuid-2", title: SAMPLE_WORKSPACE_NAME },
-			{ id: "uuid-3", title: "pi-cmux-bg-other-runid-x7y8" },
-			{ id: "uuid-4", title: "bash" },
+			{ ref: "workspace:7", title: SAMPLE_WORKSPACE_NAME },
+		],
+	});
+	executor.setDefaultResponse({ ok: true, stdout: listJson, stderr: "", exitCode: 0 });
+	const alive = await backend.isAlive("workspace:7");
+	assert.equal(alive, true, "isAlive must be true when windowId matches ws.ref (the value list() now returns)");
+}
+
+// Test 8: list — filters by prefix, returns ws.ref as windowId (P1), extracts runId from title
+{
+	const { executor, backend } = freshBackend();
+	// cmux 0.64.17 JSON shape: { workspaces: [{ ref, title, ... }, ...] }.
+	// P5b-1-S1 P1: windowId MUST equal ws.ref (NOT title) so callers can feed it
+	// straight back into kill()/close-workspace which accepts id|ref|index.
+	const listJson = JSON.stringify({
+		workspaces: [
+			{ ref: "workspace:1", title: "vim" },
+			{ ref: "workspace:2", title: SAMPLE_WORKSPACE_NAME },
+			{ ref: "workspace:3", title: "pi-cmux-bg-other-runid-x7y8" },
+			{ ref: "workspace:4", title: "bash" },
 		],
 	});
 	executor.setDefaultResponse({ ok: true, stdout: listJson, stderr: "", exitCode: 0 });
 	const entries = await backend.list();
 	assert.equal(entries.length, 2, "list MUST filter to pi-cmux- prefix only (2 of 4)");
-	assert.equal(entries[0].windowId, SAMPLE_WORKSPACE_NAME, "first entry windowId MUST equal full workspace name");
-	assert.equal(entries[0].runId, SAMPLE_RUN_ID, "runId MUST be extracted by stripping pi-cmux- prefix");
+	assert.equal(entries[0].windowId, "workspace:2", "P1: windowId MUST equal ws.ref (close-workspace accepts id|ref|index, NOT title)");
+	assert.equal(entries[0].runId, SAMPLE_RUN_ID, "runId MUST be extracted by stripping pi-cmux- prefix from the title");
 	assert.equal(entries[0].agentName, undefined, "agentName MUST be undefined (cmux limitation: no user-options equivalent)");
-	assert.equal(entries[1].windowId, "pi-cmux-bg-other-runid-x7y8");
+	assert.equal(entries[1].windowId, "workspace:3", "P1: second entry windowId MUST also be the ref");
 	assert.equal(entries[1].runId, "bg-other-runid-x7y8");
 }
 
@@ -244,6 +268,98 @@ const SAMPLE_CWD = "/Users/me/project";
 	const beforeQuote = cmdPayload.indexOf("'" + manifestPath + "'");
 	const surrounding = cmdPayload.slice(Math.max(0, beforeQuote - 1), beforeQuote + manifestPath.length + 3);
 	assert.ok(!surrounding.startsWith(";"), "manifestPath with metacharacters MUST NOT appear unquoted (would inject commands) in --command payload (got: " + cmdPayload + ")");
+}
+
+// Test 13: list → kill round-trip (P5b-1-S1 P1 regression guard).
+// Spec: list() returns windowId === ws.ref so callers can feed it straight
+// into kill(). Verify the returned windowId is exactly what close-workspace
+// sees as `--workspace`, NOT the title.
+{
+	const { executor, backend } = freshBackend();
+	const listJson = JSON.stringify({
+		workspaces: [
+			{ ref: "workspace:42", title: SAMPLE_WORKSPACE_NAME },
+		],
+	});
+	executor.setDefaultResponse({ ok: true, stdout: listJson, stderr: "", exitCode: 0 });
+	const entries = await backend.list();
+	assert.equal(entries.length, 1);
+	assert.equal(entries[0].windowId, "workspace:42", "P1: list() windowId MUST be ws.ref so kill(entries[0].windowId) works");
+	// Reset call log so the next assertion sees only kill's call.
+	executor.reset();
+	executor.enqueueResponse({ ok: true, stdout: "", stderr: "", exitCode: 0 });
+	const killResult = await backend.kill(entries[0].windowId);
+	assert.equal(killResult.status, "ok", "kill(refFromList) must succeed");
+	const killCall = executor.calls[0];
+	assert.deepEqual(killCall.args, ["close-workspace", "--workspace", "workspace:42"], "kill MUST receive the ref from list() (NOT the title) so cmux's close-workspace accepts it");
+}
+
+// Test 14: list — falls back to title when ws.ref is missing (defensive).
+// P1 calls for returning ws.ref; if a workspace entry lacks a ref (older
+// cmux shape, partial JSON), list() should fall back to the title rather
+// than emit an unusable empty windowId, so the entry is still killable.
+{
+	const { executor, backend } = freshBackend();
+	const listJson = JSON.stringify({
+		workspaces: [
+			{ title: SAMPLE_WORKSPACE_NAME }, // no ref field at all
+		],
+	});
+	executor.setDefaultResponse({ ok: true, stdout: listJson, stderr: "", exitCode: 0 });
+	const entries = await backend.list();
+	assert.equal(entries.length, 1);
+	assert.equal(entries[0].windowId, SAMPLE_WORKSPACE_NAME, "list() MUST fall back to title when ws.ref is missing (defensive — entry must still be killable)");
+	assert.equal(entries[0].runId, SAMPLE_RUN_ID);
+}
+
+// Test 14b: list — skips entries with empty-string ref and falls back to title.
+// Some JSON variants may carry `ref: ""`. The defensive fallback must use the
+// title in that case too, not emit an unusable empty windowId.
+{
+	const { executor, backend } = freshBackend();
+	const listJson = JSON.stringify({
+		workspaces: [
+			{ ref: "", title: SAMPLE_WORKSPACE_NAME },
+		],
+	});
+	executor.setDefaultResponse({ ok: true, stdout: listJson, stderr: "", exitCode: 0 });
+	const entries = await backend.list();
+	assert.equal(entries.length, 1);
+	assert.equal(entries[0].windowId, SAMPLE_WORKSPACE_NAME, "list() MUST fall back to title when ws.ref is empty string");
+}
+
+// Test 15: isAvailable — executor throws (not just ok:false) → still returns false.
+// Guards the try/catch path: a runtime exception from the executor (e.g. ENOENT
+// translated by the defaultCmuxExecutor already, but a custom executor might
+// throw) MUST surface as `false`, not crash the caller.
+{
+	const { executor, backend } = freshBackend();
+	const prevPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+	Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+	executor.exec = async () => { throw new Error("exec blew up"); };
+	try {
+		const result = await backend.isAvailable();
+		assert.equal(result, false, "isAvailable MUST return false when executor throws (no crash)");
+	} finally {
+		if (prevPlatform) Object.defineProperty(process, "platform", prevPlatform);
+	}
+}
+
+// Test 16: isAvailable — list-OK but non-JSON stdout → still returns true.
+// The probe only needs to confirm the socket is reachable; whether the stdout
+// is parseable is a list()/isAlive() concern, not isAvailable()'s. (We don't
+// want isAvailable() to mask a real socket with a JSON-parser regression.)
+{
+	const { executor, backend } = freshBackend();
+	executor.setDefaultResponse({ ok: true, stdout: "not-json-but-ok", stderr: "", exitCode: 0 });
+	const prevPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+	Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+	try {
+		const result = await backend.isAvailable();
+		assert.equal(result, true, "isAvailable MUST return true when `workspace list --json` exits 0 (socket reachable), regardless of stdout shape");
+	} finally {
+		if (prevPlatform) Object.defineProperty(process, "platform", prevPlatform);
+	}
 }
 
 console.log("P5b-1 cmux-backend tests passed");

@@ -1,25 +1,27 @@
 // P5b-1-S1: real-cmux integration smoke test.
 //
 // Exercises cmux-backend.ts against a REAL cmux 0.64.17+ daemon via the default
-// CmuxExecutor (no fake). This is the integration counterpart to the 12 unit
+// CmuxExecutor (no fake). This is the integration counterpart to the 16 unit
 // tests in test-cmux-backend.mjs — those tests verify argv shape via a fake
 // executor; this test verifies the real cmux CLI accepts those args and the
-// workspace lifecycle (create → alive → close-workspace → dead) actually works.
+// workspace lifecycle (create → list → kill-by-list-windowId → dead) actually
+// works.
 //
-// What it verifies (per /tmp/p5b1s1-realfix.md spec):
+// What it verifies (per /tmp/p5b1s1-r3-fix.md spec):
 //   1. cmux 0.64.17+ is installed and on $PATH
 //   2. CMUX_SOCKET_MODE=allowAll is set (cmux has an ancestry check on its
 //      Unix socket — without this, sibling/unrelated processes get denied)
-//   3. `cmux version` succeeds against the running socket (sanity probe)
+//   3. `cmux workspace list --json` succeeds against the running socket
+//      (sanity probe; P2 also relies on this command as the isAvailable probe)
 //   4. createCmuxBackend end-to-end:
-//        a. isAvailable() → true
-//        b. launch()     → ok, returns a workspace:N handle
-//        c. isAlive()    → true (window appears in `workspace list --json`)
-//        d. kill()       → ok (via `close-workspace --workspace <id>`,
-//                          NOT `close-window` which would kill other
-//                          workspaces in the same window)
-//        e. isAlive()    → false after kill
-//   5. Best-effort cleanup (kills the workspace if anything fails mid-test)
+//        a. isAvailable() → true  (P2: socket-roundtrip probe)
+//        b. launch() x2   → ok, returns a workspace:N handle each
+//        c. list()        → returns both pi-cmux-* workspaces with windowId
+//                           === the ref returned by launch (P1: NOT the title)
+//        d. kill(windowId-from-list) → ok (P1: list() → kill() round-trip
+//                           actually works against a real cmux)
+//        e. isAlive()    → false for each, looked up by the same windowId
+//   5. Best-effort cleanup (kills any leftover workspaces if anything fails)
 //
 // Skips (exit 0) if cmux is not on $PATH or version is below 0.64.17.
 // FAILS HARD if CMUX_SOCKET_MODE is not allowAll — by spec, the test refuses
@@ -43,18 +45,19 @@ const execFileP = promisify(execFile);
 const MIN_CMUX_VERSION = "0.64.17";
 const TMPDIR_BASE = path.join(os.tmpdir(), `p5b1-cmux-smoke-${process.pid}`);
 
-let launchedHandle = null;
+let launchedHandles = [];
 let cleanedUp = false;
 async function cleanup() {
 	if (cleanedUp) return;
 	cleanedUp = true;
-	if (launchedHandle) {
+	for (const h of launchedHandles) {
 		try {
-			await execFileP("cmux", ["close-workspace", "--workspace", launchedHandle], { timeout: 3000 });
+			await execFileP("cmux", ["close-workspace", "--workspace", h], { timeout: 3000 });
 		} catch {
 			/* may already be gone */
 		}
 	}
+	launchedHandles = [];
 	try {
 		fs.rmSync(TMPDIR_BASE, { recursive: true, force: true });
 	} catch {
@@ -184,63 +187,115 @@ async function main() {
 
 	const bgStateDir = path.join(TMPDIR_BASE, "bg-state");
 	fs.mkdirSync(bgStateDir, { recursive: true });
-	const runId = `bg-${Date.now()}-cmux-smoke`;
-	const manifestPath = path.join(bgStateDir, runId, "manifest.json");
-	fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
-	fs.writeFileSync(manifestPath, JSON.stringify({ version: 1, runId }, null, 2));
+	// P5b-1-S1: create TWO workspaces so list() → kill() round-trip can be
+	// exercised against a non-empty result. Two distinct runIds keep the
+	// workspace titles unique so cmux doesn't deduplicate.
+	const runIdA = `bg-${Date.now()}-cmux-smoke-a`;
+	const runIdB = `bg-${Date.now()}-cmux-smoke-b`;
+	const manifestPathA = path.join(bgStateDir, runIdA, "manifest.json");
+	const manifestPathB = path.join(bgStateDir, runIdB, "manifest.json");
+	fs.mkdirSync(path.dirname(manifestPathA), { recursive: true });
+	fs.mkdirSync(path.dirname(manifestPathB), { recursive: true });
+	fs.writeFileSync(manifestPathA, JSON.stringify({ version: 1, runId: runIdA }, null, 2));
+	fs.writeFileSync(manifestPathB, JSON.stringify({ version: 1, runId: runIdB }, null, 2));
 
 	const executor = defaultCmuxExecutor();
 	const backend = createCmuxBackend({ executor, workerPath: resolvedWorkerPath, bgStateDir });
+
+	// Track every windowId we launch so cleanup() can sweep them all, even on
+	// mid-test failure. This list is the source of truth for both the test
+	// logic and cleanup.
+	const windowIds = [];
+	const runIds = [runIdA, runIdB];
 
 	try {
 		await step("backend.name === 'cmux'", async () => {
 			assert.equal(backend.name, "cmux");
 		});
 
-		await step("isAvailable() returns true against real cmux daemon", async () => {
+		await step("isAvailable() returns true against real cmux daemon (P2: socket-roundtrip probe)", async () => {
 			const result = await backend.isAvailable();
-			assert.equal(result, true, "isAvailable must be true when cmux is installed and socket is reachable");
+			assert.equal(result, true, "isAvailable must be true when cmux socket is reachable (probes via `workspace list --json`, not `version`)");
 		});
 
-		await step("launch() creates a workspace and returns workspace:N handle", async () => {
-			const r = await backend.launch({
-				agentName: "scout",
-				runId,
-				manifestPath,
-				cwd: os.homedir(),
+		// Launch both workspaces and capture the windowIds returned by cmux.
+		// We don't pre-judge whether launch() returns a workspace:N ref or
+		// falls back to the title — both are valid per the backend contract.
+		// The P1 assertion that matters is whether list() agrees with launch()
+		// on what the windowId is.
+		for (const [i, runId] of runIds.entries()) {
+			const stepName = `launch() #${i + 1} creates a workspace for runId=${runId}`;
+			await step(stepName, async () => {
+				const r = await backend.launch({
+					agentName: "scout",
+					runId,
+					manifestPath: i === 0 ? manifestPathA : manifestPathB,
+					cwd: os.homedir(),
+				});
+				assert.equal(r.status, "ok", `launch failed: ${JSON.stringify(r)}`);
+				assert.ok(r.windowId, "launch must return a non-empty windowId");
+				const looksLikeRef = /^workspace:\d+$/.test(r.windowId);
+				const looksLikeTitle = r.windowId === `pi-cmux-${runId}`;
+				assert.ok(looksLikeRef || looksLikeTitle,
+					`windowId must be either a workspace:N ref or the title 'pi-cmux-${runId}', got: ${r.windowId}`);
+				windowIds.push(r.windowId);
+				launchedHandles.push(r.windowId);
 			});
-			assert.equal(r.status, "ok", `launch failed: ${JSON.stringify(r)}`);
-			assert.ok(r.windowId, "launch must return a non-empty windowId");
-			// cmux 0.64.17 prints the workspace handle (e.g. "workspace:7") to
-			// stdout. Accept either the handle or a fallback to the workspace
-			// title — both are valid windowId values per the backend contract.
-			const looksLikeRef = /^workspace:\d+$/.test(r.windowId);
-			const looksLikeTitle = r.windowId === `pi-cmux-${runId}`;
-			assert.ok(looksLikeRef || looksLikeTitle,
-				`windowId must be either a workspace:N ref or the title 'pi-cmux-${runId}', got: ${r.windowId}`);
-			launchedHandle = r.windowId;
+		}
+
+		await step("list() returns both pi-cmux-* workspaces with windowId === launch's ref (P1)", async () => {
+			const entries = await backend.list();
+			// Filter to just the two we launched — there may be other pi-cmux-*
+			// workspaces from prior runs. We assert on the union, not the
+			// count, to stay robust against stale state.
+			const ours = entries.filter((e) => runIds.includes(e.runId));
+			assert.equal(ours.length, 2, `list() must return both our pi-cmux-* workspaces (got runs: ${ours.map((e) => e.runId).join(", ")})`);
+			for (const entry of ours) {
+				assert.ok(entry.windowId, `list() entry for runId=${entry.runId} must have a non-empty windowId`);
+				const looksLikeRef = /^workspace:\d+$/.test(entry.windowId);
+				const looksLikeTitle = entry.windowId.startsWith("pi-cmux-");
+				assert.ok(looksLikeRef || looksLikeTitle,
+					`P1: list() windowId must be either a workspace:N ref or a pi-cmux-* title, got: ${entry.windowId}`);
+				// P1: windowId from list() MUST round-trip into kill() — the
+				// whole point of the fix. It must be acceptable to cmux's
+				// `close-workspace --workspace` as id|ref|index.
+				assert.ok(!entry.windowId.startsWith("pi-cmux-"),
+					`P1: list() windowId must NOT be the title (close-workspace rejects titles); got: ${entry.windowId}`);
+				assert.equal(entry.runId === runIdA ? windowIds[0] : windowIds[1], entry.windowId,
+					`P1: list().windowId for runId=${entry.runId} must equal launch()'s windowId (ref)`);
+				assert.equal(entry.agentName, undefined, "agentName MUST be undefined (cmux has no user-options equivalent)");
+			}
 		});
 
-		await step("isAlive() returns true after launch", async () => {
-			const alive = await backend.isAlive(launchedHandle);
-			assert.equal(alive, true, `isAlive must be true immediately after launch (handle: ${launchedHandle})`);
+		// Snapshot the list-windowIds, then kill them via the IDs list() returned.
+		// P1 is validated by the fact that this works against a real daemon:
+		// the previous shape (title-as-windowId) would have caused cmux to
+		// reject `close-workspace --workspace pi-cmux-bg-...`.
+		const listWindowIds = (await backend.list())
+			.filter((e) => runIds.includes(e.runId))
+			.map((e) => e.windowId);
+
+		await step("kill(windowId-from-list) succeeds for each workspace (P1 round-trip)", async () => {
+			assert.equal(listWindowIds.length, 2, "expected 2 windowIds from list() before killing");
+			for (const [i, wid] of listWindowIds.entries()) {
+				const r = await backend.kill(wid);
+				assert.equal(r.status, "ok", `kill(windowId-from-list) failed for #${i + 1} (${wid}): ${JSON.stringify(r)}`);
+			}
 		});
 
-		await step("kill() succeeds via close-workspace (NOT close-window)", async () => {
-			const r = await backend.kill(launchedHandle);
-			assert.equal(r.status, "ok", `kill failed: ${JSON.stringify(r)}`);
-		});
-
-		await step("isAlive() returns false after kill", async () => {
-			// Give cmux a moment to actually remove the workspace from its list.
+		await step("isAlive(windowId-from-list) returns false for each after kill", async () => {
+			// Give cmux a moment to actually remove the workspaces from its list.
 			// The handle we got was a ref like workspace:7 — after close-workspace
-			// that index may either be gone or get reused. Either way, the title
-			// match against `pi-cmux-<runId>` (the backend's isAlive lookup) must
-			// fail because the workspace with that title no longer exists.
-			await new Promise((resolve) => setTimeout(resolve, 200));
-			const alive = await backend.isAlive(`pi-cmux-${runId}`);
-			assert.equal(alive, false, `isAlive must be false after kill (looked up by title 'pi-cmux-${runId}')`);
-			launchedHandle = null; // cleanup no longer needed
+			// that index may either be gone or get reused. Either way, isAlive
+			// against the same windowId MUST now report false.
+			await new Promise((resolve) => setTimeout(resolve, 250));
+			for (const wid of listWindowIds) {
+				const alive = await backend.isAlive(wid);
+				assert.equal(alive, false, `isAlive must be false after kill for windowId=${wid}`);
+			}
+			// Drop from cleanup list — they're dead.
+			launchedHandles = [];
+			windowIds.length = 0;
 		});
 
 		console.log("\n✅ ALL SMOKE TESTS PASSED");

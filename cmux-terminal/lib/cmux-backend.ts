@@ -8,16 +8,25 @@
 //      and accept that agentName is unrecoverable after launch.
 //
 // cmux 0.64.17 API surface used here:
-//   - `cmux version`            — socket/CLI liveness probe (no --json flag)
+//   - `cmux workspace list --json` — used BOTH as the isAvailable() liveness
+//                                 probe (a real socket-roundtrip; `cmux version`
+//                                 exits 0 even when the socket is broken, so
+//                                 we don't trust it as a probe) AND for isAlive()
+//                                 and list(). JSON shape:
+//                                 { workspaces: [{ ref, title, ... }, ...] }
+//                                 where `ref` is the opaque handle (e.g.
+//                                 `workspace:3`) that cmux's `close-workspace
+//                                 --workspace` accepts (NOT the title).
 //   - `cmux workspace create`   — create workspace (flags: --name, --cwd,
 //                                 --command, --focus); stdout is the opaque
 //                                 workspace handle (e.g. `workspace:3`) which
 //                                 we use as windowId when non-empty
-//   - `cmux workspace list --json` — list workspaces in the current window
-//                                 (JSON shape: { workspaces: [{id,title,...}] })
-//   - `cmux close-workspace --workspace <id>` — close one workspace by handle
-//                                 (NOT `close-window`, which would close the
-//                                 whole window and any other workspaces inside it)
+//   - `cmux close-workspace --workspace <id|ref|index>` — close one workspace
+//                                 by handle. `close-window --window <id>`
+//                                 would close the ENTIRE window (and all
+//                                 workspaces inside it), which is the wrong
+//                                 scope when several pi agents live in the
+//                                 same window.
 //
 // Security invariants (carried over from tmux-backend.ts):
 //  - workspace create argv contains ONLY workerPath + manifestPath (no
@@ -60,12 +69,14 @@ export function createCmuxBackend(opts: CreateCmuxBackendOpts): TermBgBackend {
 		async isAvailable(): Promise<boolean> {
 			// cmux is macOS-only (Ghostty-based macOS terminal multiplexer).
 			if (process.platform !== "darwin") return false;
-			// cmux 0.64.17: `identify --json` doesn't exist — `identify` has no
-			// --json flag. Use `cmux version` as a liveness probe: it returns
-			// ok only when the cmux CLI can talk to the running socket. On a
-			// missing/stale socket the exec resolves to { ok: false, ... }.
+			// P5b-1-S1 P2: `cmux version` exits 0 even when the socket is broken
+			// (the CLI can resolve its binary + read disk state but never round-
+			// trips through the daemon). Use `cmux workspace list --json` as the
+			// liveness probe — it only succeeds when the daemon is actually
+			// reachable and can answer a real query, which is the property we
+			// actually need for launch()/isAlive()/list().
 			try {
-				const result = await executor.exec(["version"], { timeoutMs: 1_000 });
+				const result = await executor.exec(["workspace", "list", "--json"], { timeoutMs: 1_000 });
 				return result.ok === true;
 			} catch {
 				return false;
@@ -213,8 +224,17 @@ export function createCmuxBackend(opts: CreateCmuxBackendOpts): TermBgBackend {
 					// title doesn't carry our prefix, skip rather than guess.
 					const runId = title.slice(CMUX_WINDOW_PREFIX.length);
 					if (!runId) continue;
+					// P5b-1-S1 P1: cmux's `close-workspace --workspace` accepts
+					// `<id|ref|index>` — NOT the workspace title. Returning the
+					// title here broke the list() → kill() recovery path used
+					// by /agents bg-stop. Return the opaque ref (e.g.
+					// `workspace:3`) so callers can feed it back to kill().
+					// Defensive fallback: if a workspace lacks a ref (older
+					// cmux shape, JSON variant, partial entry), fall back to
+					// the title so the entry is still killable as a last resort.
+					const windowId = (typeof ws.ref === "string" && ws.ref.length > 0) ? ws.ref : title;
 					entries.push({
-						windowId: title,
+						windowId,
 						runId,
 						// agentName is intentionally undefined: cmux limitation
 						// (no user-options equivalent) means we cannot recover
