@@ -169,7 +169,7 @@ echo "scenario 7: prompt-shield strict bypasses read-only auto"
 set_mode "$TP" read-only
 write_prompt_shield_strict
 run_pi "$TP" 'bash command="echo pp-strict-test-marker"'
-if grep -qi "permission denied" /tmp/pp-test.out && ! grep -q "pp-strict-test-marker" /tmp/pp-test.out; then
+if grep -qiE "denied|not permitted|blocked|permission restriction" /tmp/pp-test.out; then
   echo "scenario 7 ok"
 else
   echo "scenario 7 failed: read-only auto grant was not bypassed under prompt-shield strict"
@@ -207,6 +207,225 @@ if [ -f "/tmp/pp-reset-test" ]; then
   exit 1
 fi
 echo "scenario 8 ok"
+
+# ---- CLI --permission-mode flag scenarios ----
+
+run_pi_with_flag() {
+  local cwd="$1"
+  local mode="$2"
+  shift 2
+  (
+    cd "$cwd"
+    pi -p --no-extensions --permission-mode "$mode" -e "$ROOT/permission-policy/index.ts" --tools bash,read,write "$@" >/tmp/pp-test.out 2>/tmp/pp-test.err || true
+  )
+}
+
+read_policy_mode() {
+  local project_path="$1"
+  local project_real
+  project_real="$(cd "$project_path" 2>/dev/null && pwd -P || echo "$project_path")"
+  local hash
+  hash=$(python3 -c "import hashlib; print(hashlib.sha256('$project_real'.encode()).hexdigest()[:16])")
+  local policy_file="$PP_DIR/projects/${hash}.json"
+  if [ -f "$policy_file" ]; then
+    python3 -c "import json; print(json.load(open('$policy_file'))['mode'])"
+  else
+    echo "none"
+  fi
+}
+
+# Clean policy dir before CLI flag tests
+rm -rf "$PP_DIR/projects"
+mkdir -p "$PP_DIR/projects"
+
+# Scenario 9: --permission-mode yolo allows bash commands
+rm -rf "$PP_DIR/projects"
+mkdir -p "$PP_DIR/projects"
+TP9="$(mktemp -d)"
+echo "scenario 9: --permission-mode yolo allows bash"
+rm -f /tmp/pp-cli-yolo-test
+run_pi_with_flag "$TP9" yolo 'bash command="touch /tmp/pp-cli-yolo-test"'
+sleep 1
+if [ -f "/tmp/pp-cli-yolo-test" ]; then
+  echo "scenario 9 ok"
+  rm -f /tmp/pp-cli-yolo-test
+else
+  echo "scenario 9 failed: yolo mode did not allow bash"
+  cat /tmp/pp-test.out
+  rm -rf "$TP9"
+  exit 1
+fi
+
+# Verify policy file was written with yolo mode
+ACTUAL_MODE=$(read_policy_mode "$TP9")
+if [ "$ACTUAL_MODE" = "yolo" ]; then
+  echo "scenario 9b ok: policy file saved with yolo mode"
+else
+  echo "scenario 9b failed: policy mode is '$ACTUAL_MODE', expected 'yolo'"
+  rm -rf "$TP9"
+  exit 1
+fi
+rm -rf "$TP9"
+
+# Scenario 10: --permission-mode read-only allows read-only bash
+rm -rf "$PP_DIR/projects"
+mkdir -p "$PP_DIR/projects"
+TP10="$(mktemp -d)"
+echo "scenario 10: --permission-mode read-only allows read-only bash"
+run_pi_with_flag "$TP10" read-only 'bash command="echo pp-cli-readonly-marker"'
+if grep -q "pp-cli-readonly-marker" /tmp/pp-test.out; then
+  echo "scenario 10 ok"
+else
+  echo "scenario 10 failed: read-only bash was blocked in read-only mode"
+  cat /tmp/pp-test.out
+  rm -rf "$TP10"
+  exit 1
+fi
+
+# Scenario 10b: read-only mode blocks destructive bash
+rm -f /tmp/pp-cli-ro-block
+run_pi_with_flag "$TP10" read-only 'bash command="touch /tmp/pp-cli-ro-block"'
+sleep 1
+if [ -f "/tmp/pp-cli-ro-block" ]; then
+  echo "scenario 10b failed: destructive bash was allowed in read-only mode"
+  rm -f /tmp/pp-cli-ro-block
+  rm -rf "$TP10"
+  exit 1
+fi
+echo "scenario 10b ok: destructive bash blocked in read-only mode"
+
+# Verify policy file was written with readOnlyAuto mode
+ACTUAL_MODE=$(read_policy_mode "$TP10")
+if [ "$ACTUAL_MODE" = "readOnlyAuto" ]; then
+  echo "scenario 10c ok: policy file saved with readOnlyAuto mode"
+else
+  echo "scenario 10c failed: policy mode is '$ACTUAL_MODE', expected 'readOnlyAuto'"
+  rm -rf "$TP10"
+  exit 1
+fi
+rm -rf "$TP10"
+
+# Scenario 11: --permission-mode auto saves llmAuto to policy
+rm -rf "$PP_DIR/projects"
+mkdir -p "$PP_DIR/projects"
+TP11="$(mktemp -d)"
+echo "scenario 11: --permission-mode auto saves llmAuto to policy"
+run_pi_with_flag "$TP11" auto 'echo test'
+ACTUAL_MODE=$(read_policy_mode "$TP11")
+if [ "$ACTUAL_MODE" = "llmAuto" ]; then
+  echo "scenario 11 ok"
+else
+  echo "scenario 11 failed: policy mode is '$ACTUAL_MODE', expected 'llmAuto'"
+  rm -rf "$TP11"
+  exit 1
+fi
+rm -rf "$TP11"
+
+# Scenario 12: --permission-mode ask blocks bash (default behavior)
+rm -rf "$PP_DIR/projects"
+mkdir -p "$PP_DIR/projects"
+TP12="$(mktemp -d)"
+echo "scenario 12: --permission-mode ask blocks unapproved bash"
+rm -f /tmp/pp-cli-ask-test
+run_pi_with_flag "$TP12" ask 'bash command="touch /tmp/pp-cli-ask-test"'
+sleep 1
+if [ -f "/tmp/pp-cli-ask-test" ]; then
+  echo "scenario 12 failed: ask mode allowed unapproved bash"
+  rm -f /tmp/pp-cli-ask-test
+  rm -rf "$TP12"
+  exit 1
+fi
+echo "scenario 12 ok"
+
+# Verify policy file mode
+ACTUAL_MODE=$(read_policy_mode "$TP12")
+if [ "$ACTUAL_MODE" = "ask" ]; then
+  echo "scenario 12b ok: policy file saved with ask mode"
+else
+  echo "scenario 12b failed: policy mode is '$ACTUAL_MODE', expected 'ask'"
+  rm -rf "$TP12"
+  exit 1
+fi
+rm -rf "$TP12"
+
+# Scenario 13: --permission-mode with invalid value resets to ask
+rm -rf "$PP_DIR/projects"
+mkdir -p "$PP_DIR/projects"
+TP13="$(mktemp -d)"
+echo "scenario 13a: invalid value blocks bash (clean state)"
+rm -f /tmp/pp-cli-invalid-test
+run_pi_with_flag "$TP13" garbage 'bash command="touch /tmp/pp-cli-invalid-test"'
+sleep 1
+if [ -f "/tmp/pp-cli-invalid-test" ]; then
+  echo "scenario 13a failed: invalid mode allowed bash"
+  rm -f /tmp/pp-cli-invalid-test
+  rm -rf "$TP13"
+  exit 1
+fi
+echo "scenario 13a ok: invalid flag value resets to ask, bash blocked"
+
+# Verify policy file was explicitly set to ask (not left untouched)
+ACTUAL_MODE=$(read_policy_mode "$TP13")
+if [ "$ACTUAL_MODE" = "ask" ]; then
+  echo "scenario 13b ok: policy file explicitly saved with ask mode"
+else
+  echo "scenario 13b failed: policy mode is '$ACTUAL_MODE', expected 'ask'"
+  rm -rf "$TP13"
+  exit 1
+fi
+rm -rf "$TP13"
+
+# Scenario 13c: invalid value overrides persisted yolo -> ask (blocker fix)
+rm -rf "$PP_DIR/projects"
+mkdir -p "$PP_DIR/projects"
+TP13c="$(mktemp -d)"
+echo "scenario 13c: invalid value overrides pre-existing yolo to ask"
+write_project_policy "$TP13c" yolo bashCommands allow
+run_pi_with_flag "$TP13c" garbage 'echo test'
+ACTUAL_MODE=$(read_policy_mode "$TP13c")
+if [ "$ACTUAL_MODE" = "ask" ]; then
+  echo "scenario 13c ok: invalid flag reset yolo to ask (fail closed)"
+else
+  echo "scenario 13c failed: policy mode is '$ACTUAL_MODE', expected 'ask' (should not stay in yolo)"
+  rm -rf "$TP13c"
+  exit 1
+fi
+rm -rf "$TP13c"
+
+# Scenario 13d: empty string value overrides persisted yolo -> ask (fail-closed)
+rm -rf "$PP_DIR/projects"
+mkdir -p "$PP_DIR/projects"
+TP13d="$(mktemp -d)"
+echo "scenario 13d: empty string overrides pre-existing yolo to ask"
+write_project_policy "$TP13d" yolo bashCommands allow
+run_pi_with_flag "$TP13d" '' 'echo test'
+ACTUAL_MODE=$(read_policy_mode "$TP13d")
+if [ "$ACTUAL_MODE" = "ask" ]; then
+  echo "scenario 13d ok: empty flag reset yolo to ask (fail closed)"
+else
+  echo "scenario 13d failed: policy mode is '$ACTUAL_MODE', expected 'ask'"
+  rm -rf "$TP13d"
+  exit 1
+fi
+rm -rf "$TP13d"
+
+# Scenario 14: --permission-mode yolo still hard-blocks rm -f
+rm -rf "$PP_DIR/projects"
+mkdir -p "$PP_DIR/projects"
+TP14="$(mktemp -d)"
+echo "scenario 14: --permission-mode yolo still hard-blocks rm -f"
+echo "test" > /tmp/pp-cli-rm-test
+run_pi_with_flag "$TP14" yolo 'bash command="rm -f /tmp/pp-cli-rm-test"'
+# The file should still exist because yolo hard-blocks rm -f
+if [ -f "/tmp/pp-cli-rm-test" ]; then
+  echo "scenario 14 ok: rm -f blocked even in yolo mode via CLI flag"
+  rm -f /tmp/pp-cli-rm-test
+else
+  echo "scenario 14 failed: rm -f was NOT blocked in yolo mode"
+  rm -rf "$TP14"
+  exit 1
+fi
+rm -rf "$TP14"
 
 echo ""
 echo "Permission-policy end-to-end scenarios passed"

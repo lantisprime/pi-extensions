@@ -57,10 +57,37 @@ const PERMISSION_LABELS: Record<PermissionKey, string> = {
 };
 
 export default function (pi: ExtensionAPI) {
-	pi.on("session_start", async (_event, ctx) => {
+	pi.registerFlag("permission-mode", {
+		description: "Set permission mode: ask, read-only, auto, or yolo",
+		type: "string",
+	});
+
+	pi.on("session_start", async (event, ctx) => {
 		await updatePermissionStatus(ctx);
 		const projectPath = await getProjectPath(ctx.cwd);
 		const policy = await loadPolicy(projectPath);
+
+		// Apply CLI --permission-mode flag on initial startup
+		if (event.reason === "startup") {
+			const cliMode = pi.getFlag("permission-mode") as string | undefined;
+	if (cliMode !== undefined) {
+				const mode = parseMode(cliMode.trim().toLowerCase());
+				if (mode) {
+					if (mode === "yolo" && policy.mode !== "yolo") {
+						// Require confirmation in interactive mode; bypass in non-interactive
+						if (ctx.hasUI && !(await confirmYoloMode(ctx))) return;
+					}
+					policy.mode = mode;
+				} else {
+					// Invalid value: fail closed — explicitly reset to ask
+					policy.mode = "ask";
+				}
+				policy.updatedAt = new Date().toISOString();
+				await savePolicy(projectPath, policy);
+				await updatePermissionStatus(ctx);
+			}
+		}
+
 		if (policy.mode === "yolo" && ctx.hasUI) ctx.ui.notify(YOLO_WARNING, "warning");
 	});
 

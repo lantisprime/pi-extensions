@@ -287,5 +287,32 @@ check("YOLO blocks rmdir project root from subdir", isYoloHardDeniedBool("rmdir 
 check("YOLO blocks forced git worktree removal", isYoloHardDeniedBool("git worktree remove --force ../project", projectPath, cwd), true);
 check("YOLO allows non-forced git worktree removal by hard-deny scope", isYoloHardDeniedBool("git worktree remove ../project", projectPath, cwd), false);
 
+// parseMode (for CLI --permission-mode flag)
+type PermissionMode = "ask" | "readOnlyAuto" | "llmAuto" | "yolo";
+
+function parseMode(mode: string): PermissionMode | undefined {
+	if (mode === "ask" || mode === "manual") return "ask";
+	if (mode === "read-only" || mode === "readonly" || mode === "readOnlyAuto".toLowerCase()) return "readOnlyAuto";
+	if (mode === "auto" || mode === "llm" || mode === "llm-auto" || mode === "automatic") return "llmAuto";
+	if (mode === "yolo" || mode === "unsafe" || mode === "dangerous") return "yolo";
+	return undefined;
+}
+
+// parseMode tests
+check("parseMode ask", parseMode("ask"), "ask");
+check("parseMode manual", parseMode("manual"), "ask");
+check("parseMode read-only", parseMode("read-only"), "readOnlyAuto");
+check("parseMode readonly", parseMode("readonly"), "readOnlyAuto");
+check("parseMode readOnlyAuto", parseMode("readonlyauto"), "readOnlyAuto");
+check("parseMode auto", parseMode("auto"), "llmAuto");
+check("parseMode llm", parseMode("llm"), "llmAuto");
+check("parseMode llm-auto", parseMode("llm-auto"), "llmAuto");
+check("parseMode automatic", parseMode("automatic"), "llmAuto");
+check("parseMode yolo", parseMode("yolo"), "yolo");
+check("parseMode unsafe", parseMode("unsafe"), "yolo");
+check("parseMode dangerous", parseMode("dangerous"), "yolo");
+check("parseMode invalid", parseMode("garbage"), undefined);
+check("parseMode empty", parseMode(""), undefined);
+
 console.log(`\n${passed} passed, ${failed} failed out of ${scenario} scenarios`);
 if (failed > 0) process.exit(1);

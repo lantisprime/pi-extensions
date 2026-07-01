@@ -141,6 +141,14 @@ Commands:
 /permissions mode yolo
 ```
 
+CLI flag:
+
+```bash
+pi --permission-mode ask|read-only|auto|yolo
+```
+
+Set the permission mode from the command line at startup. Persists to the project policy file, same as `/permissions mode`.
+
 Status line:
 
 ```text
