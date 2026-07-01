@@ -139,6 +139,23 @@ Clears persistent and current-session permissions for the current project.
 
 Sets the current project's permission mode and updates the status line. Setting `yolo` requires confirmation and shows a danger warning.
 
+### CLI Flag
+
+```bash
+pi --permission-mode ask|read-only|auto|yolo
+```
+
+Set the permission mode from the command line at startup. The mode is persisted to the project policy file, same as `/permissions mode`. Accepts the same value aliases (`ask`/`manual`, `read-only`/`readonly`/`readonlyauto`, `auto`/`llm`/`llm-auto`/`automatic`, `yolo`/`unsafe`/`dangerous`). Invalid values are fail-closed: the policy is explicitly reset to `ask`.
+
+```bash
+# Examples
+pi --permission-mode yolo "Deploy the release"
+pi --permission-mode read-only -p "Review the codebase"
+pi --permission-mode auto "Refactor the auth module"
+```
+
+When `yolo` is set via CLI in non-interactive mode, the confirmation prompt is bypassed since there is no UI to confirm. Use yolo from CLI only in fully trusted or disposable workspaces.
+
 ## Tests
 
 Classification unit tests:
@@ -147,7 +164,7 @@ Classification unit tests:
 permission-policy/test-fixtures/run-all-tests.sh
 ```
 
-Runs 107 classification unit tests covering destructive detection, git detection, read-only command classification, outside-project detection, tool classification, read-only auto allowance logic, and YOLO hard-deny negative/adversarial scenarios.
+Runs classification unit tests covering destructive detection, git detection, read-only command classification, outside-project detection, tool classification, read-only auto allowance logic, YOLO hard-deny negative/adversarial scenarios, and parseMode for CLI flag values.
 
 End-to-end scenarios verified against a live Pi instance:
 
@@ -157,5 +174,11 @@ End-to-end scenarios verified against a live Pi instance:
 - Project permissions persist across Pi invocations
 - Prompt Shield strict mode bypasses readOnlyAuto grants
 - /permissions reset clears project permissions
+- --permission-mode yolo allows bash and persists mode to policy
+- --permission-mode read-only allows read-only bash, blocks destructive
+- --permission-mode auto saves llmAuto to policy
+- --permission-mode ask blocks unapproved bash
+- --permission-mode with invalid value is ignored (falls back to ask)
+- --permission-mode yolo still hard-blocks rm -f
 
 Note: Some e2e scenarios (outside-project read blocking) rely on the model calling the actual tool, which some models refuse to do. Classification logic for those cases is covered by unit tests.
