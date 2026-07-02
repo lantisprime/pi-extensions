@@ -1,12 +1,19 @@
 # P5b-1 cmux-terminal Plan — Phase 2 (Dispatch + Tools)
 
-> **Status:** DRAFT v2.1 (post codex R1 review). Supersedes v1 (`feat/cmux-control-and-p5b-cmux-terminal`
-> branch, 206 lines, never reviewed) AND v2.0 (`ddc0054`, 549 lines, codex verdict CHANGES-REQUESTED).
+> **Status:** DRAFT v2.2 (post codex R2 review). Supersedes v1 (`feat/cmux-control-and-p5b-cmux-terminal`
+> branch, 206 lines, never reviewed), v2.0 (`ddc0054`, 549 lines, codex R1 verdict CHANGES-REQUESTED),
+> AND v2.1 (`8135c0f`, 827 lines, codex R2 verdict CHANGES-REQUESTED).
 >
-> **v1's slices 1–5 were all bundled and shipped in PR #115** (commit `fb55d57`,
-> 13 files / +1234 LOC). This v2.1 plan covers the REMAINING work to make
-> cmux-terminal a first-class citizen of `/agents bg` on macOS — the work the
-> handoff episodes (`20260628-115014-...`, `20260628-115957-...`, `20260701-143307-...`)
+> **v1's slices 1–5 (the cmux-backend factory + helpers + extension entry per
+> the original `agents/docs/P5B1_CMUX_TERMINAL_PLAN.md` v1 ladder) were all
+> bundled and shipped in PR #115** (commit `fb55d57`,
+> 15 files / +1234 insertions per the merged commit `fb55d57`). **v1 slice
+> numbering is the OLD numbering from the unreviewed scaffold-branch plan.**
+> **The current P5b-1 ladder (this v2.2 plan) RELABELED those v1 slices 1–5 as
+> a single "S1"** (because they shipped together as one PR), and the next four
+> slices (S2, S2.5, S3, S4, S5) cover the REMAINING work to make cmux-terminal
+> a first-class citizen of `/agents bg` on macOS — the work the handoff
+> episodes (`20260628-115014-...`, `20260628-115957-...`, `20260701-143307-...`)
 > refer to as "P5b-1-S2 through S5."
 >
 > **v2.0 → v2.1 changes** (responding to codex R1 blockers, see `Review Consensus`):
@@ -20,6 +27,16 @@
 > 8. Internal count/wording inconsistencies fixed
 > 9. REQ-T2 marked as requiring an S4.0 CLI spike before S4 implementation (verifies `cmux send --surface` against live 0.64.17)
 > 10. REQ-D9 / State E unified on `console.debug` + continue-on-throw
+>
+> **v2.1 → v2.2 changes** (responding to codex R2 blockers):
+> 1. New step 2.18 — full executor-ready spec + test bodies for `agents/test-fixtures/test-bg-commands.mjs` (4 REQ-D10/D11 dispatch tests). R2 blocker #1.
+> 2. Step 2.9 verify fixed: `total: 4` → `total: 3` (post-step-2.8 the L617 callsite is replaced with `selectBgTerminalBackend()` directly). R2 blocker #2.
+> 3. Step 2.14 expanded: 5 → 11 net-new tests, now covers REQ-D1 (RegisterAppendsToList), REQ-D4 (ListBackendsReturnsSnapshot, ListBackendsIsolatedFromRegistry), REQ-D9 (SelectProbesEachBackendOnce), REQ-D2 State B (NoIsAvailableTreatedAsAvailable), State E (IsAvailableThrowTreatedAsUnavailable). R2 blocker #3.
+> 4. Step 2.16 augmented: also update stale first-wins/dropped-registration assertions in `tmux-terminal/test-fixtures/test-extension.mjs`. R2 blocker #4.
+> 5. New named constant `CMUX_BACKEND_PREFERENCE = 10` in `cmux-terminal/lib/constants.ts`; plumbed through steps 2.11/2.12. R2 non-blocker #1.
+> 6. REQ-D11 Notes rewritten: generic message, no per-backend reason (since `probed` shape is minimal). R2 non-blocker #2.
+> 7. Done Criteria + Test Catalog + status block: all count/path/stats inconsistencies fixed (27 vs 21 vs 18; 4 vs 3; `tmux-terminal/test-fixtures/test-extension.mjs` correct path; 15 files / +1234 insertions PR #115 stats; v1/S1 numbering clarified above). R2 non-blocker #3.
+> 8. S2.5 spike scope narrowed to send/send-key/read-screen flags only (CMUX_SOCKET_MODE remains S1's responsibility). R2 non-blocker #4.
 
 ## Episode Search Summary
 
@@ -81,7 +98,7 @@ rows are tagged explicitly with the covering manual step in Notes.
 | REQ-D8 | When the highest-preference backend's `isAvailable()` returns `false` (e.g., cmux daemon down on macOS), `selectBgTerminalBackend()` SHALL fall through to the next preferred backend. The user SHALL see a successful `/agents bg` (with the fallback backend's name) — not the "is not available" error. | `test-bg-terminal.mjs:SelectFallsThroughOnPrimaryUnavailable`, `UNGUARDED-IN-CI`: manual verification — kill cmux GUI on macOS dev box, run `/agents bg scout test`, verify tmux session is created. | MUST | This is the core bug fix. |
 | REQ-D9 | Each `selectBgTerminalBackend()` call SHALL call `isAvailable()` at most once per registered backend per call (no re-probing on retries within one call). State E (isAvailable throws) SHALL be caught and treated as unavailable; the function SHALL continue probing the next backend; the throw SHALL be logged at `console.debug` (not warn, not error — matches existing `first-wins` debug-log convention). | `test-bg-terminal.mjs:SelectProbesEachBackendOnce` (spy on `isAvailable` call counts), `test-bg-terminal.mjs:IsAvailableThrowTreatedAsUnavailable` (asserts console.debug was called AND next backend was probed) | SHOULD | R1 finding: State E was internally inconsistent across three lines (:255, :257, :379-381). Unified on debug-log + continue. |
 | REQ-D10 | `agents/index.ts` callers of `getBgTerminalBackend()` SHALL be updated to `await` the new async signature. `handleBgCommand` SHALL additionally call `selectBgTerminalBackend()` directly so it can emit the differentiated error messages from REQ-D11. | `test-bg-commands.mjs:BgCommandFallsThroughToTmux`, `test-bg-commands.mjs:BgCommandReportsNoneAvailable`, `test-bg-commands.mjs:BgCommandListsProbedBackendsWhenAllUnavailable` | MUST | The current "Terminal backend X is not available" message is misleading when multiple backends are registered. |
-| REQ-D11 | **(Promoted v2.0 SHOULD → v2.1 MUST.)** When `selectBgTerminalBackend()` returns `{ ok: false, reason: 'all-unavailable' }`, `agents/index.ts` SHALL report the **backend names** that were probed, so the user can debug (e.g., "Terminal backends registered but unavailable: cmux (socket unreachable), tmux (not installed)"). When `selectBgTerminalBackend()` returns `{ ok: false, reason: 'none-registered' }`, the message SHALL be "No terminal backend installed. Load tmux-terminal or equivalent to use background agents." | `test-bg-commands.mjs:BgCommandListsProbedBackendsWhenAllUnavailable`, `test-bg-commands.mjs:BgCommandReportsNoneAvailable` | MUST | Promoted from SHOULD because REQ-D10 alone cannot satisfy the two-message requirement; the discriminated union REQ-D2 only enables this distinction if it's wired into the user-visible error path. |
+| REQ-D11 | **(Promoted v2.0 SHOULD → v2.1 MUST.)** When `selectBgTerminalBackend()` returns `{ ok: false, reason: 'all-unavailable' }`, `agents/index.ts` SHALL report the **backend names** that were probed, so the user can debug (e.g., "Terminal backends registered but unavailable: cmux, tmux"). When `selectBgTerminalBackend()` returns `{ ok: false, reason: 'none-registered' }`, the message SHALL be "No terminal backend installed. Load tmux-terminal or equivalent to use background agents." | `test-bg-commands.mjs:BgCommandListsProbedBackendsWhenAllUnavailable`, `test-bg-commands.mjs:BgCommandReportsNoneAvailable` | MUST | Promoted from SHOULD because REQ-D10 alone cannot satisfy the two-message requirement; the discriminated union REQ-D2 only enables this distinction if it's wired into the user-visible error path. The per-backend reason (socket unreachable, not installed) is intentionally NOT carried in the `probed` array — the minimal `{name, ok: false}` shape avoids leaking probe-failure internals (e.g., unredacted stderr) into user-visible messages. |
 | REQ-T1 | A new `cmux-terminal/lib/tools.ts` SHALL export `cmuxPaste(opts)`, `cmuxWaitFor(opts)`, `cmuxSendKeys(opts)` mirroring `tmux-control/lib/{paste,wait,send}.ts` 1:1 with cmux CLI swaps. | `test-cmux-tools.mjs:PasteCallsSendText` (FakeCmux argv capture), `test-cmux-tools.mjs:WaitForPollsReadScreen`, `test-cmux-tools.mjs:SendKeysSplitsTokens` | MUST | Mirroring the tmux-control tool surface lets the rest of the system stay backend-agnostic. |
 | REQ-T1a | **S4.0 CLI spike (REQUIRED before S4 implementation begins).** Verify the exact cmux ≥0.64.17 CLI flag surface used by REQ-T2 / REQ-T3 / REQ-T4 by running the live commands on a macOS dev box and capturing the observed output. Concretely: `cmux send --surface <ref> 'hello'`, `cmux send-key --surface <ref> enter`, `cmux read-screen --surface <ref> --lines 100` against a real cmux workspace. The captured stdout/stderr/exit codes become the contract REQ-T2..T4 commit to. | Manual spike; captured output committed to `cmux-terminal/docs/cli-spike-output.txt` | MUST | R1 finding: REQ-T2 assumed `cmux send --surface <ref> '<text>'` without verification. cmux CLI evolves; pinning the exact flags to observed output is the same discipline as the P5c-2 `waitForWindow` S1 design (capture stdin-read buffer behavior). |
 | REQ-T2 | `cmuxPaste` SHALL send the literal text via `cmux send --surface <ref> '<text>'` (NOT `send-keys`, which interprets tokens as key names), using the EXACT flag shape captured in the S4.0 spike. Returns `{ ok: true }` on success; `{ ok: false, error }` on cmux failure. | `test-cmux-tools.mjs:PasteUsesSendNotSendKeys` (assert argv starts with `["send", "--surface", ...]`, not `["send-keys", ...]`), `test-cmux-tools.mjs:PasteShellescapes` | MUST | cmux has both `send` (literal text) and `send-keys` (key tokens). The S4.0 spike pins which is which against live 0.64.17. |
@@ -379,10 +396,10 @@ public API for backward compatibility. Callers MUST `await` the result.
 ## Test Case Catalog
 
 Total: 35+ tests across 6 files (S2: 18 new unit + 1 dual-instance extension + 4
-callsite updates; S3: 3 manual-or-scripted; S4: 9 unit; S5: 4 grep guards).
+callsite updates; S3: 3 manual-or-scripted + 1 UNGUARDED-IN-CI; S4: 9 unit; S5: 4 grep guards).
 
 ```text
-Group 1: Dispatch selection (agents/test-fixtures/test-bg-terminal.mjs) — 18 tests (NEW + existing updated to await)
+Group 1: Dispatch selection (agents/test-fixtures/test-bg-terminal.mjs) — 27 tests (16 existing updated to await + 11 net-new)
   SelectReturnsFirstAvailable
   SelectFallsThroughOnUnavailable
   SelectNullWhenNoneRegistered
@@ -414,7 +431,7 @@ Group 3: Consumer callsite updates (test-bg-commands.mjs extensions) — 4 tests
   BgCommandListsProbedBackendsWhenAllUnavailable
   BgBeforeSessionStart
 
-Group 4: Real-cmux end-to-end (cmux-terminal/test-fixtures/test-real-cmux-e2e.mjs) — 3 manual-or-scripted (UNGUARDED-IN-CI)
+Group 4: Real-cmux end-to-end (cmux-terminal/test-fixtures/test-real-cmux-e2e.mjs) — 4 tests total (3 manual-or-scripted per REQ-R2 + 1 UNGUARDED-IN-CI FallbackWhenCmuxDown per REQ-R3)
   LaunchCreatesWorkspace
   StatusListsRun
   StopClosesWorkspace
@@ -497,16 +514,16 @@ REQ-T1a, REQ-T2–T4, REQ-R1, REQ-R2 passing = done.
 
 Specifically:
 
-- `agents/test-fixtures/test-bg-terminal.mjs` — **all 21 tests green** (16
-  existing updated to `await` + 18 new minus the 13 that overlap with the
-  updated existing tests; precise count: 16 updated + 5 net-new = 21). The gate
+- `agents/test-fixtures/test-bg-terminal.mjs` — **all 27 tests green** (16
+  existing updated to `await` + 11 net-new per step 2.14). The gate
   is **zero failing tests**.
 - `agents/test-fixtures/test-bg-terminal-dual-instance.mjs` — **4 tests green**
   (3 existing updated to `await` + 1 new `SharedAcrossInstancesWithSelect`).
 - `agents/test-fixtures/test-bg-commands.mjs` — all existing tests green + 4
-  new fall-through tests.
-- `agents/test-fixtures/test-extension.mjs` (tmux-terminal) — existing tests
-  green (the 1 missed async callsite is updated).
+  new REQ-D10/D11 dispatch tests per step 2.18.
+- `tmux-terminal/test-fixtures/test-extension.mjs` — existing tests green after
+  the `await` update AND the first-wins/dropped-registration assertions removed
+  (R2 blocker #4).
 - `tmux-control/lib/resolve.ts` — verified by existing tests going green with
   the new `await`.
 - `cmux-terminal/docs/cli-spike-output.txt` (S2.5) — captured stdout/stderr/exit
@@ -525,7 +542,8 @@ Specifically:
 | Pass | Reviewer | Model | Blocker count | Verdict |
 |---|---|---|---|---|
 | 1 | codex (gpt-5.5 high) via tmux | gpt-5.5 high | 7 | CHANGES-REQUESTED |
-| 2 | codex (gpt-5.5 high) via cmux (per user preference) | gpt-5.5 high | TBD | TBD |
+| 2 | codex (gpt-5.5 high) via cmux (per user preference) | gpt-5.5 high | 4 | CHANGES-REQUESTED |
+| 3 | codex (gpt-5.5 high) via cmux | gpt-5.5 high | TBD | TBD (awaiting v2.2 re-review) |
 
 ### Resolved blockers (R1 → v2.1 fixes applied)
 
@@ -538,6 +556,15 @@ Specifically:
 | 5 | Appendix B S2 fails executor-ready gate (prose anchor, APPEND-then-duplicate, deferred test bodies, self-fulfilling greps) | Rewritten S2 steps with verbatim ANCHORs, REPLACE not APPEND, inline test bodies, capture-and-compare verifies |
 | 6 | REQ-R2 missing `UNGUARDED-IN-CI` tag | Tagged with explicit manual step named in Notes |
 | 7 | cmux `send --surface` CLI unverified | New REQ-T1a (MUST) + new S2.5 slice: CLI spike before S4 begins |
+
+### Resolved blockers (R2 → v2.2 fixes applied)
+
+| # | R2 Blocker | v2.2 Resolution |
+|---|---|---|
+| 1 | No executor-ready step or test bodies for `test-bg-commands.mjs` (REQ-D10/D11 being MUST) | New step 2.18 with full 4-test bodies (`BgCommandFallsThroughToTmux`, `BgCommandReportsNoneAvailable`, `BgCommandListsProbedBackendsWhenAllUnavailable`, `BgBeforeSessionStart`) using dynamic import of `agents/index.ts` |
+| 2 | Step 2.9 verify `total: 4` incorrect (post-2.8 only 3 callsites remain) | Fixed to `total: 3 awaited: 3` with explanatory comment about L617 being replaced by `selectBgTerminalBackend()` directly |
+| 3 | S2 test appendix only adds 5 net-new tests, doesn't satisfy REQ-D1/D2/D4/D6-D9 | Step 2.14 expanded: 5 → 11 net-new tests covering `RegisterAppendsToList`, `ListBackendsReturnsSnapshot`, `ListBackendsIsolatedFromRegistry`, `SelectProbesEachBackendOnce`, `NoIsAvailableTreatedAsAvailable`, `IsAvailableThrowTreatedAsUnavailable`. Final count: 16 existing updated + 11 net-new = 27 |
+| 4 | `tmux-terminal/test-fixtures/test-extension.mjs` has stale first-wins assertions | Step 2.16 augmented: search for `first-wins` or `already registered` and refactor to assert registration persistence |
 
 ## Appendix: Implementation Plan
 
@@ -558,9 +585,10 @@ Specifically:
 | `agents/lib/bg-terminal.ts` | (a) Add `SelectBgTerminalResult` discriminated union type after `TermBgWindowEntry`. (b) Add `preference?: number` field to `TermBgBackend` interface after `name`. (c) Replace `{ backend }` slot shape with `{ backends: [] }`. (d) Replace `registerBgTerminalBackend` first-wins body with append-only `.push(backend)`. (e) Replace `getBgTerminalBackend` sync body with `async` wrapper over `selectBgTerminalBackend().then(...)`. (f) Replace `__resetBgTerminalBackend` body to clear the array. (g) Add new exports `selectBgTerminalBackend`, `listBgTerminalBackends`. |
 | `agents/index.ts` | (a) Update `handleBgCommand` to use `selectBgTerminalBackend()` directly and switch on the discriminated result per the flow above; remove the redundant `isAvailable` re-check at L622–625. (b) Add `await` to the 3 other `getBgTerminalBackend()` callsites (L696, L725, L814). |
 | `tmux-control/lib/resolve.ts` | Update L40 `getBgTerminalBackend()` call to `await` (R1 finding — missed callsite). |
-| `agents/test-fixtures/test-bg-terminal.mjs` | (a) Update the 16 existing sync calls to `await`. (b) APPEND 5 net-new tests for the v2.1 additions (`SelectNullWhenNoneRegistered`, `SelectAllUnavailableHasReason`, `SelectPrefersHigherPreferenceRegardlessOfRegistrationOrder`, `PreferenceTiesBrokenByRegistrationOrder`, `AbsentPreferenceTreatedAsZero`). |
+| `agents/test-fixtures/test-bg-terminal.mjs` | (a) Update the 16 existing sync calls to `await`. (b) APPEND 11 net-new tests for the v2.1/v2.2 additions (`SelectNullWhenNoneRegistered`, `SelectAllUnavailableHasReason`, `SelectPrefersHigherPreferenceRegardlessOfRegistrationOrder`, `PreferenceTiesBrokenByRegistrationOrder`, `AbsentPreferenceTreatedAsZero`, `RegisterAppendsToList`, `ListBackendsReturnsSnapshot`, `ListBackendsIsolatedFromRegistry`, `SelectProbesEachBackendOnce`, `NoIsAvailableTreatedAsAvailable`, `IsAvailableThrowTreatedAsUnavailable`). |
 | `agents/test-fixtures/test-bg-terminal-dual-instance.mjs` | (a) Update the 3 existing sync calls to `await` inside `main()`. (b) APPEND `SharedAcrossInstancesWithSelect` test. |
-| `tmux-terminal/test-fixtures/test-extension.mjs` | Update any sync `getBgTerminalBackend()` call to `await` (R1 finding — verify exact lines during S2 impl). |
+| `agents/test-fixtures/test-bg-commands.mjs` | (a) Add the dynamic import of `agents/index.ts` for `handleBgCommand`. (b) APPEND 4 net-new REQ-D10/D11 dispatch tests per step 2.18. (R2 blocker #1.) |
+| `tmux-terminal/test-fixtures/test-extension.mjs` | (a) Update any sync `getBgTerminalBackend()` call to `await` (R1 finding). (b) Remove stale first-wins/dropped-registration assertions (R2 blocker #4 — search for `first-wins` or `already registered` and refactor to assert registration persistence). |
 | `agents/test-fixtures/test-bg-commands.mjs` | Add 4 fall-through tests (Group 3 in Test Catalog). |
 | `cmux-terminal/index.ts` | (a) Pass `preference: 10` when calling `registerBgTerminalBackend` (REQ-D2a). (b) Add `cmuxTerminalTools` named export per REQ-T5 (S4). |
 | `cmux-terminal/lib/cmux-backend.ts` | Add `preference: 10` to the returned backend object (REQ-D2a; alternative: set it at the `index.ts` wrapper — S2 first-review decides which is cleaner). |
@@ -574,7 +602,7 @@ Specifically:
 | 2 | S2 | Update `agents/index.ts` `handleBgCommand` to use `selectBgTerminalBackend()` + switch; update L696, L725, L814 to `await` | `node agents/test-fixtures/test-bg-commands.mjs` exits 0 |
 | 3 | S2 | Update `tmux-control/lib/resolve.ts:40` to `await` | `node tmux-terminal/test-fixtures/test-extension.mjs` exits 0 |
 | 4 | S2 | Update `cmux-terminal/index.ts` to pass `preference: 10` | existing tests still green |
-| 5 | S2 | Update `agents/test-fixtures/test-bg-terminal.mjs` to `await` existing calls + APPEND 5 net-new tests | `node agents/test-fixtures/test-bg-terminal.mjs` exits 0 with ≥21 tests passing |
+| 5 | S2 | Update `agents/test-fixtures/test-bg-terminal.mjs` to `await` existing calls + APPEND 11 net-new tests | `node agents/test-fixtures/test-bg-terminal.mjs` exits 0 with ≥27 tests passing |
 | 6 | S2 | Update `agents/test-fixtures/test-bg-terminal-dual-instance.mjs` to `await` + APPEND `SharedAcrossInstancesWithSelect` | `node agents/test-fixtures/test-bg-terminal-dual-instance.mjs` exits 0 |
 | 7 | S2.5 | Run live cmux ≥0.64.17 CLI commands against a real workspace; capture output to `cmux-terminal/docs/cli-spike-output.txt`; commit | `test -f cmux-terminal/docs/cli-spike-output.txt && wc -l cmux-terminal/docs/cli-spike-output.txt` ≥ 20 lines |
 | 8 | S3 | Author `test-real-cmux-e2e.mjs` + `run-real-cmux-e2e.sh` | Manual run on macOS dev box: 3 of 3 scripted tests pass; EC14 (cmux comes back) and EC15 (stop while still down) manually verified and recorded in `cmux-terminal/docs/e2e-verification.md` |
@@ -700,11 +728,12 @@ export function listBgTerminalBackends(): readonly TermBgBackend[] {
 | 2.6 | `agents/lib/bg-terminal.ts` | **EDIT** anchored. Add `preference?: number` to the `TermBgBackend` interface. `ANCHOR:` `export interface TermBgBackend {\n\t/** Human-readable backend name for status display. */\n\treadonly name: string;\n\n\t/** Optional pre-flight probe. Returns true if the terminal` → `REPLACE:` `export interface TermBgBackend {\n\t/** Human-readable backend name for status display. */\n\treadonly name: string;\n\n\t/** Optional. Selector preference (higher wins). Default 0 when absent.\n\t *  Backends with equal preference are probed in registration order. */\n\tpreference?: number;\n\n\t/** Optional pre-flight probe. Returns true if the terminal` | `node -e "import('./agents/lib/bg-terminal.ts').then(m => { const b = {name:'x', preference: 10, launch:async()=>({status:'ok'}), kill:async()=>({status:'ok'}), isAlive:async()=>true, list:async()=>[]}; m.registerBgTerminalBackend(b); const sorted = m.listBgTerminalBackends(); console.log(sorted[0].preference) })"` prints `10` |
 | 2.7 | `agents/index.ts` | **EDIT** anchored. Update the `getBgTerminalBackend` import to also import `selectBgTerminalBackend`. `ANCHOR:` `import { getBgTerminalBackend } from "./lib/bg-terminal.ts";` → `REPLACE:` `import { getBgTerminalBackend, selectBgTerminalBackend } from "./lib/bg-terminal.ts";` | `grep -nE "import \{[^}]*selectBgTerminalBackend[^}]*\} from \"\./lib/bg-terminal" agents/index.ts` returns 1 match |
 | 2.8 | `agents/index.ts` | **REPLACE** (NOT append) the `handleBgCommand` opening block. `ANCHOR:` `const backend = getBgTerminalBackend();\n\tif (!backend) {\n\t\tctx.ui.notify("No terminal backend installed. Load tmux-terminal or equivalent to use background agents.", "warning");\n\t\treturn;\n\t}\n\tif (typeof backend.isAvailable === "function" && !(await backend.isAvailable())) {\n\t\tctx.ui.notify(\`Terminal backend "${backend.name}" is not available.\`, "error");\n\t\treturn;\n\t}` → `REPLACE:` `const selection = await selectBgTerminalBackend();\n\tif (!selection.ok) {\n\t\tif (selection.reason === "none-registered") {\n\t\t\tctx.ui.notify("No terminal backend installed. Load tmux-terminal or equivalent to use background agents.", "warning");\n\t\t} else {\n\t\t\tconst probed = selection.probed.map((p) => p.name).join(", ");\n\t\t\tctx.ui.notify(\`Terminal backends registered but unavailable: ${probed}\`, "error");\n\t\t}\n\t\treturn;\n\t}\n\tconst backend = selection.backend;` | `grep -n "Terminal backend .* is not available" agents/index.ts` returns 0 matches (old message removed) AND `grep -n "Terminal backends registered but unavailable" agents/index.ts` returns ≥1 match (new message present) |
-| 2.9 | `agents/index.ts` | **EDIT** anchored at each of L696, L725, L814. `ANCHOR:` `const backend = getBgTerminalBackend();` → `REPLACE:` `const backend = await getBgTerminalBackend();` (3 occurrences) | `node -e "const fs=require('node:fs'); const src=fs.readFileSync('agents/index.ts','utf8'); const t=src.match(/const backend = (await )?getBgTerminalBackend/g)||[]; const a=src.match(/const backend = await getBgTerminalBackend/g)||[]; console.log('total:',t.length,'awaited:',a.length)"` prints `total: 4 awaited: 4` |
+| 2.9 | `agents/index.ts` | **EDIT** anchored at each of L696, L725, L814. `ANCHOR:` `const backend = getBgTerminalBackend();` → `REPLACE:` `const backend = await getBgTerminalBackend();` (3 occurrences — note: step 2.8 replaces the L617 callsite with `selectBgTerminalBackend()` directly, so it does NOT add `await getBgTerminalBackend` at L617; the 3 remaining callsites are L696/L725/L814) | `node -e "const fs=require('node:fs'); const src=fs.readFileSync('agents/index.ts','utf8'); const t=src.match(/const backend = (await )?getBgTerminalBackend/g)||[]; const a=src.match(/const backend = await getBgTerminalBackend/g)||[]; console.log('total:',t.length,'awaited:',a.length)"` prints `total: 3 awaited: 3` (post-step-2.8) |
 | 2.10 | `tmux-control/lib/resolve.ts` | **EDIT** anchored. Update the missed async callsite. The executor MUST `grep -n "getBgTerminalBackend" tmux-control/lib/resolve.ts` to locate the exact line, then add `await` before the call. (Line number may shift; the change pattern is identical: `const backend = getBgTerminalBackend()` → `const backend = await getBgTerminalBackend()`.) The file is small (~50 lines); the executor MUST read the whole file first to confirm the call is in a sync function (if it is, the executor must refactor that function to `async` — a one-line change at the function declaration) or already inside an `async` function. | `node -e "const fs=require('node:fs'); const src=fs.readFileSync('tmux-control/lib/resolve.ts','utf8'); console.log(/await getBgTerminalBackend/.test(src))"` prints `true` |
-| 2.11 | `cmux-terminal/index.ts` | **EDIT** anchored. Pass `preference: 10` to `registerBgTerminalBackend`. `ANCHOR:` `registerBgTerminalBackend(createCmuxBackend({\n\t\texecutor: defaultCmuxExecutor(),\n\t\tworkerPath,\n\t\tbgStateDir,\n\t}));` → `REPLACE:` `registerBgTerminalBackend(createCmuxBackend({\n\t\texecutor: defaultCmuxExecutor(),\n\t\tworkerPath,\n\t\tbgStateDir,\n\t\tpreference: 10,\n\t}));` | `grep -nE "preference: 10" cmux-terminal/index.ts` returns 1 match |
-| 2.12 | `cmux-terminal/lib/cmux-backend.ts` | **EDIT** anchored (TWO edits in one file, ordered). Edit (a) — add to the options interface: `ANCHOR:` `export interface CreateCmuxBackendOpts {\n\texecutor: CmuxExecutor;\n\tworkerPath: string;\n\tbgStateDir: string;\n}` → `REPLACE:` `export interface CreateCmuxBackendOpts {\n\texecutor: CmuxExecutor;\n\tworkerPath: string;\n\tbgStateDir: string;\n\tpreference?: number;\n}`. Edit (b) — add to the returned object: `ANCHOR:` `return {\n\t\tname: CMUX_BACKEND_NAME,` → `REPLACE:` `return {\n\t\tname: CMUX_BACKEND_NAME,\n\t\t...(opts.preference !== undefined ? { preference: opts.preference } : {}),` | `node -e "const fs=require('node:fs'); const src=fs.readFileSync('cmux-terminal/lib/cmux-backend.ts','utf8'); console.log(/preference\\?: number/.test(src), /opts\\.preference !== undefined \\? \\{ preference: opts\\.preference \\} : \\{\\}/.test(src))"` prints `true true` |
-| 2.13 | `agents/test-fixtures/test-bg-terminal.mjs` | **EDIT** anchored + **APPEND**. First, the executor MUST `grep -n "getBgTerminalBackend" agents/test-fixtures/test-bg-terminal.mjs` to find all 16 sync call sites and update each to `await getBgTerminalBackend()`. Existing tests that wrap blocks in `{ ... }` (non-async IIFEs) MUST be refactored: the surrounding block becomes `await (async () => { ... })()`. The `fakeBackend()` helper itself does NOT change. Then **APPEND** the 5 net-new tests at the end of the file (before the final `console.log`). Full verbatim test bodies (in order): `
+| 2.11 | `cmux-terminal/lib/constants.ts` | **EDIT** anchored. Add the named preference constant. `ANCHOR:` `export const CMUX_BACKEND_NAME = "cmux";\nexport const CMUX_WINDOW_PREFIX = "pi-cmux-";` → `REPLACE:` `export const CMUX_BACKEND_NAME = "cmux";\nexport const CMUX_WINDOW_PREFIX = "pi-cmux-";\nexport const CMUX_BACKEND_PREFERENCE = 10;` (the 10 is the selector preference for this backend; higher wins over default-0 backends like tmux-terminal) | `grep -nE "export const CMUX_BACKEND_PREFERENCE = 10" cmux-terminal/lib/constants.ts` returns 1 match |
+| 2.12 | `cmux-terminal/index.ts` | **EDIT** anchored (TWO edits in one file, ordered). Edit (a) — update the import: `ANCHOR:` `import { CMUX_WINDOW_PREFIX, CMUX_BACKEND_NAME } from "./constants.ts";` → `REPLACE:` `import { CMUX_WINDOW_PREFIX, CMUX_BACKEND_NAME, CMUX_BACKEND_PREFERENCE } from "./constants.ts";`. Edit (b) — pass the constant: `ANCHOR:` `registerBgTerminalBackend(createCmuxBackend({\n\t\texecutor: defaultCmuxExecutor(),\n\t\tworkerPath,\n\t\tbgStateDir,\n\t}));` → `REPLACE:` `registerBgTerminalBackend(createCmuxBackend({\n\t\texecutor: defaultCmuxExecutor(),\n\t\tworkerPath,\n\t\tbgStateDir,\n\t\tpreference: CMUX_BACKEND_PREFERENCE,\n\t}));` | `grep -nE "preference: CMUX_BACKEND_PREFERENCE" cmux-terminal/index.ts` returns 1 match AND `grep -nE "import \{[^}]*CMUX_BACKEND_PREFERENCE[^}]*\} from \"\./constants" cmux-terminal/index.ts` returns 1 match |
+| 2.13 | `cmux-terminal/lib/cmux-backend.ts` | **EDIT** anchored (TWO edits in one file, ordered). Edit (a) — add to the options interface: `ANCHOR:` `export interface CreateCmuxBackendOpts {\n\texecutor: CmuxExecutor;\n\tworkerPath: string;\n\tbgStateDir: string;\n}` → `REPLACE:` `export interface CreateCmuxBackendOpts {\n\texecutor: CmuxExecutor;\n\tworkerPath: string;\n\tbgStateDir: string;\n\tpreference?: number;\n}`. Edit (b) — add to the returned object: `ANCHOR:` `return {\n\t\tname: CMUX_BACKEND_NAME,` → `REPLACE:` `return {\n\t\tname: CMUX_BACKEND_NAME,\n\t\t...(opts.preference !== undefined ? { preference: opts.preference } : {}),` | `node -e "const fs=require('node:fs'); const src=fs.readFileSync('cmux-terminal/lib/cmux-backend.ts','utf8'); console.log(/preference\\?: number/.test(src), /opts\\.preference !== undefined \\? \\{ preference: opts\\.preference \\} : \\{\\}/.test(src))"` prints `true true` |
+| 2.14 | `agents/test-fixtures/test-bg-terminal.mjs` | **EDIT** anchored + **APPEND**. First, the executor MUST `grep -n "getBgTerminalBackend" agents/test-fixtures/test-bg-terminal.mjs` to find all 16 sync call sites and update each to `await getBgTerminalBackend()`. Existing tests that wrap blocks in `{ ... }` (non-async IIFEs) MUST be refactored: the surrounding block becomes `await (async () => { ... })()`. The `fakeBackend()` helper itself does NOT change. Then **APPEND** the 5 net-new tests at the end of the file (before the final `console.log`). Full verbatim test bodies (in order): `
 
 // === P5b-1-S2 net-new tests (v2.1) ===
 import { selectBgTerminalBackend } from "../lib/bg-terminal.ts";
@@ -768,9 +797,87 @@ await (async () => {
 \tif (r.ok) assert.ok(r.backend.name === "no-pref" || r.backend.name === "explicit-zero", "absent preference must equal 0 (tied with explicit zero)");
 })();
 
-console.log("P4-4 bg-terminal tests passed (21 total)");
-` (replace the existing `console.log("P4-4 bg-terminal tests passed");` line with the new one). Note: the file's top-level imports need `selectBgTerminalBackend` added if not already imported. | `node agents/test-fixtures/test-bg-terminal.mjs` exits 0 with the new final `console.log` printing `"P4-4 bg-terminal tests passed (21 total)"`. Negative control (per template "red-then-green guard"): the executor MUST temporarily change test 19's `tmux.preference = 0` to `tmux.preference = 100` and confirm `node agents/test-fixtures/test-bg-terminal.mjs` exits non-zero (proves the preference assertion is wired). The executor then restores the original value. |
-| 2.14 | `agents/test-fixtures/test-bg-terminal-dual-instance.mjs` | **EDIT** anchored + **APPEND**. First, the executor MUST `grep -n "getBgTerminalBackend" agents/test-fixtures/test-bg-terminal-dual-instance.mjs` and update all 3 sync calls inside `main()` to `await`. The `main()` function is already `async`, so just adding `await` is sufficient. Then **APPEND** at the end of `main()` (before the final `console.log`): `
+// 22. RegisterAppendsToList (REQ-D1)
+await (async () => {
+\treset();
+\tconst a = fakeBackend("a"); a.isAvailable = async () => true;
+\tconst b = fakeBackend("b"); b.isAvailable = async () => true;
+\tconst c = fakeBackend("c"); c.isAvailable = async () => true;
+\tregisterBgTerminalBackend(a);
+\tregisterBgTerminalBackend(b);
+\tregisterBgTerminalBackend(c);
+\tconst list = listBgTerminalBackends();
+\tassert.equal(list.length, 3, "all 3 backends must be retained (first-wins is removed)");
+\tassert.deepEqual(list.map((b) => b.name), ["a", "b", "c"], "order must be registration order");
+})();
+
+// 23. ListBackendsReturnsSnapshot (REQ-D4)
+await (async () => {
+\treset();
+\tconst a = fakeBackend("a");
+\tregisterBgTerminalBackend(a);
+\tconst snap1 = listBgTerminalBackends();
+\tregisterBgTerminalBackend(fakeBackend("b"));
+\tconst snap2 = listBgTerminalBackends();
+\tassert.equal(snap1.length, 1, "first snapshot is unchanged by later registration");
+\tassert.equal(snap2.length, 2, "second snapshot reflects later registration");
+})();
+
+// 24. ListBackendsIsolatedFromRegistry (REQ-D4)
+await (async () => {
+\treset();
+\tconst a = fakeBackend("a");
+\tregisterBgTerminalBackend(a);
+\tconst snap = listBgTerminalBackends();
+\tassert.throws(() => { snap.push(fakeBackend("z")); }, "frozen snapshot must reject mutation");
+})();
+
+// 25. SelectProbesEachBackendOnce (REQ-D9)
+await (async () => {
+\treset();
+\tlet aCalls = 0, bCalls = 0;
+\tconst a = fakeBackend("a"); a.isAvailable = async () => { aCalls++; return false; };
+\tconst b = fakeBackend("b"); b.isAvailable = async () => { bCalls++; return true; };
+\tregisterBgTerminalBackend(a);
+\tregisterBgTerminalBackend(b);
+\tawait selectBgTerminalBackend();
+\tassert.equal(aCalls, 1, "a probed once");
+\tassert.equal(bCalls, 1, "b probed once");
+})();
+
+// 26. NoIsAvailableTreatedAsAvailable (REQ-D2 State B)
+await (async () => {
+\treset();
+\tconst noProbe = { name: "no-probe", launch: async () => ({ status: "ok" }), kill: async () => ({ status: "ok" }), isAlive: async () => true, list: async () => [] };
+\tregisterBgTerminalBackend(noProbe);
+\tconst r = await selectBgTerminalBackend();
+\tassert.equal(r.ok, true);
+\tif (r.ok) assert.equal(r.backend.name, "no-probe", "backend with no isAvailable is treated as available");
+})();
+
+// 27. IsAvailableThrowTreatedAsUnavailable (REQ-D9 State E)
+await (async () => {
+\treset();
+\tconst origDebug = console.debug;
+\tlet debugCalls = 0;
+\tconsole.debug = () => { debugCalls++; };
+\ttry {
+\t\tconst throwing = fakeBackend("throwing"); throwing.isAvailable = async () => { throw new Error("socket broken"); };
+\t\tconst good = fakeBackend("good"); good.isAvailable = async () => true;
+\t\tregisterBgTerminalBackend(throwing);
+\t\tregisterBgTerminalBackend(good);
+\t\tconst r = await selectBgTerminalBackend();
+\t\tassert.equal(r.ok, true, "throwing backend must not block; probe continues");
+\t\tif (r.ok) assert.equal(r.backend.name, "good", "second backend wins after throw");
+\t\tassert.ok(debugCalls >= 1, "throw must be logged at console.debug");
+\t} finally {
+\t\tconsole.debug = origDebug;
+\t}
+})();
+
+console.log("P4-4 bg-terminal tests passed (27 total: 16 existing updated + 11 net-new)");
+` (replace the existing `console.log("P4-4 bg-terminal tests passed");` line with the new one). Note: the file's top-level imports need both `selectBgTerminalBackend` and `listBgTerminalBackends` added if not already imported. | `node agents/test-fixtures/test-bg-terminal.mjs` exits 0 with the new final `console.log` printing `"P4-4 bg-terminal tests passed (27 total: 16 existing updated + 11 net-new)"`. Negative control (per template "red-then-green guard"): the executor MUST temporarily change test 19's `tmux.preference = 0` to `tmux.preference = 100` and confirm `node agents/test-fixtures/test-bg-terminal.mjs` exits non-zero (proves the preference assertion is wired). The executor then restores the original value. ALSO: temporarily change test 25's `b.isAvailable = async () => { bCalls++; return true; }` to `b.isAvailable = async () => { bCalls++; return false; }` and confirm exit non-zero (probes the probe-once assertion). |
+| 2.15 | `agents/test-fixtures/test-bg-terminal-dual-instance.mjs` | **EDIT** anchored + **APPEND**. First, the executor MUST `grep -n "getBgTerminalBackend" agents/test-fixtures/test-bg-terminal-dual-instance.mjs` and update all 3 sync calls inside `main()` to `await`. The `main()` function is already `async`, so just adding `await` is sufficient. Then **APPEND** at the end of `main()` (before the final `console.log`): `
 
 \t// === P5b-1-S2 SharedAcrossInstancesWithSelect (v2.1) ===
 \tA.__resetBgTerminalBackend();
@@ -781,8 +888,9 @@ console.log("P4-4 bg-terminal tests passed (21 total)");
 \tif (r.ok) assert.equal(r.backend.name, "cmux", "preference must win across instances (cmux preference=10 beats tmux preference=0)");
 \tconsole.log("  ✓ SharedAcrossInstancesWithSelect");
 ` | `node agents/test-fixtures/test-bg-terminal-dual-instance.mjs` exits 0 and prints `✓ SharedAcrossInstancesWithSelect`. Negative control: temporarily change cmux's `preference: 10` to `preference: 0` and confirm exit non-zero (proves preference assertion is wired); then restore. |
-| 2.15 | `tmux-terminal/test-fixtures/test-extension.mjs` | **EDIT** anchored. The executor MUST `grep -n "getBgTerminalBackend" tmux-terminal/test-fixtures/test-extension.mjs` and update each occurrence to `await getBgTerminalBackend()`. If the call is in a sync function, refactor that function to `async`. | `grep -nE "await getBgTerminalBackend" tmux-terminal/test-fixtures/test-extension.mjs` returns ≥1 match |
-| 2.16 | (manual) | **MANUAL S2.5 CLI SPIKE (REQ-T1a).** On a macOS dev box with cmux ≥0.64.17 GUI running: (a) open cmux, create a test workspace named `p5b1-spike`. (b) `cmux send --surface <ref> 'hello world'` → capture stdout, stderr, exit. (c) `cmux send-key --surface <ref> enter` → capture stdout, stderr, exit. (d) `cmux read-screen --surface <ref> --lines 50` → capture stdout, stderr, exit. (e) Commit capture to `cmux-terminal/docs/cli-spike-output.txt` with date and cmux version header. | `test -f cmux-terminal/docs/cli-spike-output.txt && wc -l cmux-terminal/docs/cli-spike-output.txt` prints `≥20` |
+| 2.16 | `tmux-terminal/test-fixtures/test-extension.mjs` | **EDIT** anchored. The executor MUST `grep -n "getBgTerminalBackend" tmux-terminal/test-fixtures/test-extension.mjs` and update each occurrence to `await getBgTerminalBackend()`. If the call is in a sync function, refactor that function to `async`. **Also update any existing assertions that use the dropped-registration debug message** (search the file for `first-wins` or `already registered` and refactor to assert registration persistence — the old fixture likely encoded the removed first-wins contract; that needs to come out). | `grep -nE "await getBgTerminalBackend" tmux-terminal/test-fixtures/test-extension.mjs` returns ≥1 match AND `grep -nE "first-wins|already registered" tmux-terminal/test-fixtures/test-extension.mjs` returns 0 matches (R2 blocker #4: stale first-wins assertions removed) |
+| 2.17 | (manual) | **MANUAL S2.5 CLI SPIKE (REQ-T1a).** On a macOS dev box with cmux ≥0.64.17 GUI running: (a) open cmux, create a test workspace named `p5b1-spike`. (b) `cmux send --surface <ref> 'hello world'` → capture stdout, stderr, exit. (c) `cmux send-key --surface <ref> enter` → capture stdout, stderr, exit. (d) `cmux read-screen --surface <ref> --lines 50` → capture stdout, stderr, exit. (e) Commit capture to `cmux-terminal/docs/cli-spike-output.txt` with date and cmux version header. **Scope note (R2 Q3 verdict):** the S2.5 spike is narrowly focused on the three send/send-key/read-screen flags REQ-T2..T4 need. CMUX_SOCKET_MODE auth and the `--socket <path>` isolation pattern are covered by the S1 real-cmux smoke and the S5 README per REQ-R1 — they are NOT in scope for S2.5. | `test -f cmux-terminal/docs/cli-spike-output.txt && wc -l cmux-terminal/docs/cli-spike-output.txt` prints `≥20` |
+| 2.18 | `agents/test-fixtures/test-bg-commands.mjs` | **EDIT** anchored + **APPEND** (R2 blocker #1). The existing test-bg-commands.mjs does NOT import `handleBgCommand` (line 16: it imports command-parsing helpers only). The executor MUST first **EDIT** anchored to add the dynamic import. `ANCHOR:` `import assert from "node:assert/strict";` (the file's first import — add the dynamic import for `agents/index.ts` right after it). Full verbatim REPLACE: `import assert from "node:assert/strict";\nimport { pathToFileURL } from "node:url";\nimport { resolve as resolvePath } from "node:path";\n\n// Dynamic import of agents/index.ts for the dispatch surface (REQ-D10/D11).\n// The file is loaded once per test process; __resetBgTerminalBackend() between\n// tests guarantees independent state.\nconst agentsModuleUrl = pathToFileURL(resolvePath(import.meta.dirname, "..", "index.ts")).href;`. Then **APPEND** the 4 net-new test bodies at the end of the file (before any final summary `console.log`): `\n// === P5b-1-S2 REQ-D10/D11 dispatch tests (v2.2) ===\nimport { __resetBgTerminalBackend, registerBgTerminalBackend } from "../lib/bg-terminal.ts";\n\nasync function freshAgents() {\n\t__resetBgTerminalBackend();\n\treturn await import(agentsModuleUrl + "?t=" + Date.now());\n}\n\n// 1. BgCommandFallsThroughToTmux\nawait (async () => {\n\tconst agents = await freshAgents();\n\tconst tmux = { name: "tmux", preference: 0, isAvailable: async () => false, launch: async () => ({ status: "failed", error: "primary down" }), kill: async () => ({ status: "ok", windowId: "w" }), isAlive: async () => true, list: async () => [] };\n\tregisterBgTerminalBackend(tmux);\n\t// Capture ctx.ui.notify calls\n\tlet notified = "";\n\tconst ctx = { ui: { notify: (msg, _level) => { notified = String(msg); }, cwd: "/tmp", hasUI: true, agentsHomeDir: "/tmp" };\n\tconst diag = { agents: [] };\n\ttry { await agents.handleBgCommand("scout test-task", ctx, diag); } catch { /* may throw on missing preflight — we only assert on the notify message */ }\n\tassert.match(notified, /cmux|backend|unavailable|is not available/, "fall-through path must surface a backend-related message");\n})();\n\n// 2. BgCommandReportsNoneAvailable\nawait (async () => {\n\tconst agents = await freshAgents();\n\t// No backends registered\n\tlet notified = "";\n\tconst ctx = { ui: { notify: (msg) => { notified = String(msg); }, cwd: "/tmp", hasUI: true, agentsHomeDir: "/tmp" };\n\tconst diag = { agents: [] };\n\ttry { await agents.handleBgCommand("scout test-task", ctx, diag); } catch { /* ok */ }\n\tassert.match(notified, /No terminal backend installed/, "no-registered path must surface the canonical no-backend message");\n})();\n\n// 3. BgCommandListsProbedBackendsWhenAllUnavailable\nawait (async () => {\n\tconst agents = await freshAgents();\n\tconst cmuxDown = { name: "cmux", preference: 10, isAvailable: async () => false, launch: async () => ({ status: "failed" }), kill: async () => ({ status: "ok" }), isAlive: async () => true, list: async () => [] };\n\tconst tmuxDown = { name: "tmux", preference: 0, isAvailable: async () => false, launch: async () => ({ status: "failed" }), kill: async () => ({ status: "ok" }), isAlive: async () => true, list: async () => [] };\n\tregisterBgTerminalBackend(cmuxDown);\n\tregisterBgTerminalBackend(tmuxDown);\n\tlet notified = "";\n\tconst ctx = { ui: { notify: (msg) => { notified = String(msg); }, cwd: "/tmp", hasUI: true, agentsHomeDir: "/tmp" };\n\tconst diag = { agents: [] };\n\ttry { await agents.handleBgCommand("scout test-task", ctx, diag); } catch { /* ok */ }\n\tassert.match(notified, /Terminal backends registered but unavailable/, "all-unavailable path must surface the differential message");\n\tassert.match(notified, /cmux/, "all-unavailable message must list the cmux backend name");\n\tassert.match(notified, /tmux/, "all-unavailable message must list the tmux backend name");\n})();\n\n// 4. BgBeforeSessionStart\nawait (async () => {\n\tconst agents = await freshAgents();\n\t// No backends registered, simulating pre-session_start state\n\tlet notified = "";\n\tconst ctx = { ui: { notify: (msg) => { notified = String(msg); }, cwd: "/tmp", hasUI: true, agentsHomeDir: "/tmp" };\n\tconst diag = { agents: [] };\n\ttry { await agents.handleBgCommand("scout test-task", ctx, diag); } catch { /* ok */ }\n\tassert.match(notified, /No terminal backend installed/, "pre-session_start must show the no-registered message");\n})();\n\nconsole.log("P5b-1-S2 test-bg-commands.mjs dispatch tests passed (4 total)");\n` (replace any existing final `console.log` with this one, or APPEND if the file currently has no final `console.log`). | `node agents/test-fixtures/test-bg-commands.mjs` exits 0 and prints `"P5b-1-S2 test-bg-commands.mjs dispatch tests passed (4 total)"`. Negative control: temporarily change test 3's expected message regex from `/Terminal backends registered but unavailable/` to `/NEVER_MATCH/` and confirm exit non-zero (proves the message-discrimination assertion is wired); restore. |
 
 ### P5b-1-S3 — real-cmux e2e (REQ-R1..R3)
 
@@ -810,7 +918,7 @@ console.log("P4-4 bg-terminal tests passed (21 total)");
 
 ```bash
 # S2 (immediately after this plan lands):
-node agents/test-fixtures/test-bg-terminal.mjs                          # prints "21 tests passed", exits 0
+node agents/test-fixtures/test-bg-terminal.mjs                          # prints "27 total: 16 existing updated + 11 net-new", exits 0
 node agents/test-fixtures/test-bg-terminal-dual-instance.mjs           # prints "SharedAcrossInstancesWithSelect", exits 0
 node agents/test-fixtures/test-bg-commands.mjs                         # all existing + 4 new tests green, exits 0
 node tmux-terminal/test-fixtures/test-extension.mjs                    # all existing tests green after await update, exits 0
