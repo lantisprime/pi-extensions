@@ -23,8 +23,8 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const srcBgTerminal = path.join(here, "..", "lib", "bg-terminal.ts");
 
-function fakeBackend(name) {
-	return {
+function fakeBackend(name, preference) {
+	const b = {
 		name,
 		isAvailable: async () => true,
 		launch: async () => ({ status: "ok", windowId: "w" }),
@@ -32,6 +32,8 @@ function fakeBackend(name) {
 		isAlive: async () => true,
 		list: async () => [],
 	};
+	if (preference !== undefined) b.preference = preference;
+	return b;
 }
 
 async function main() {
@@ -58,20 +60,29 @@ async function main() {
 
 		// THE REGRESSION: register via instance A, read via instance B.
 		A.registerBgTerminalBackend(fakeBackend("tmux"));
-		const seenByB = B.getBgTerminalBackend();
+		const seenByB = await B.getBgTerminalBackend();
 		assert.ok(seenByB, "backend registered via instance A MUST be visible via instance B (was the bug)");
 		assert.equal(seenByB.name, "tmux", "the shared backend must be the one A registered");
 		console.log("  ✓ backend registered in one module instance is visible in another");
 
-		// First-wins still holds across instances.
+		// All registered backends survive across instances (no first-wins drop).
 		B.registerBgTerminalBackend(fakeBackend("zellij"));
-		assert.equal(A.getBgTerminalBackend().name, "tmux", "first registration must win across instances");
-		console.log("  ✓ first-wins semantics hold across instances");
+		assert.equal((await A.getBgTerminalBackend()).name, "tmux", "tmux still wins (default preference=0, registered first)");
+		console.log("  ✓ both registered backends survive across instances");
 
 		// __reset via either instance clears the shared slot.
 		B.__resetBgTerminalBackend();
-		assert.equal(A.getBgTerminalBackend(), null, "__reset via B must clear the slot seen by A");
+		assert.equal(await A.getBgTerminalBackend(), null, "__reset via B must clear the slot seen by A");
 		console.log("  ✓ __resetBgTerminalBackend clears the shared slot");
+
+		// === P5b-1-S2 SharedAcrossInstancesWithSelect (v2.1) ===
+		A.__resetBgTerminalBackend();
+		A.registerBgTerminalBackend(fakeBackend("tmux", 0));
+		A.registerBgTerminalBackend(fakeBackend("cmux", 10));
+		const r = await B.selectBgTerminalBackend();
+		assert.equal(r.ok, true, "shared slot must propagate to second module instance via selectBgTerminalBackend");
+		if (r.ok) assert.equal(r.backend.name, "cmux", "preference must win across instances (cmux preference=10 beats tmux preference=0)");
+		console.log("  ✓ SharedAcrossInstancesWithSelect");
 	} finally {
 		await fs.rm(root, { recursive: true, force: true }).catch(() => {});
 	}

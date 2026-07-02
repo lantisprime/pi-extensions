@@ -58,6 +58,7 @@ export interface CreateCmuxBackendOpts {
 	executor: CmuxExecutor;
 	workerPath: string;
 	bgStateDir: string;
+	preference?: number;
 }
 
 export function createCmuxBackend(opts: CreateCmuxBackendOpts): TermBgBackend {
@@ -65,6 +66,7 @@ export function createCmuxBackend(opts: CreateCmuxBackendOpts): TermBgBackend {
 
 	return {
 		name: CMUX_BACKEND_NAME,
+		...(opts.preference !== undefined ? { preference: opts.preference } : {}),
 
 		async isAvailable(): Promise<boolean> {
 			// cmux is macOS-only (Ghostty-based macOS terminal multiplexer).

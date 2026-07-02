@@ -59,6 +59,10 @@ export interface TermBgBackend {
 	/** Human-readable backend name for status display. */
 	readonly name: string;
 
+	/** Optional. Selector preference (higher wins). Default 0 when absent.
+	 *  Backends with equal preference are probed in registration order. */
+	preference?: number;
+
 	/** Optional pre-flight probe. Returns true if the terminal
 	 *  system is installed and usable. P4-5 calls this before
 	 *  preflight to give a clean "no terminal backend installed"
@@ -119,37 +123,64 @@ export interface TermBgBackend {
 
 const REGISTRY_SLOT = Symbol.for("pi.agents.bgTerminalBackend");
 
-function registrySlot(): { backend: TermBgBackend | null } {
-	const g = globalThis as unknown as Record<symbol, { backend: TermBgBackend | null } | undefined>;
-	return (g[REGISTRY_SLOT] ??= { backend: null });
+function registrySlot(): { backends: TermBgBackend[] } {
+	const g = globalThis as unknown as Record<symbol, { backends: TermBgBackend[] } | undefined>;
+	return (g[REGISTRY_SLOT] ??= { backends: [] });
 }
 
-/** Register a terminal backend. First to register wins; subsequent calls
- *  emit a debug diagnostic so "pi -e a -e b" doesn't silently drop the
- *  second backend. Extensions load in command-line order.
+/** Register a terminal backend. Append-only — every registered backend is
+ *  retained in registration order. The selector (selectBgTerminalBackend)
+ *  picks one based on the optional `preference` field. Multiple backends
+ *  may coexist; one per terminal system (e.g. tmux-terminal + cmux-terminal).
  *
  *  Stored in the process-global registry (see above) so registration is
  *  visible across duplicate module instances of this file. */
 export function registerBgTerminalBackend(backend: TermBgBackend): void {
-	const slot = registrySlot();
-	if (!slot.backend) {
-		slot.backend = backend;
-		return;
-	}
-	console.debug(
-		`bg-terminal: ignoring backend "${backend.name}" — "${slot.backend.name}" already registered (first registration wins)`,
-	);
+	registrySlot().backends.push(backend);
 }
 
-/** Get the currently registered terminal backend, or null if none is loaded.
- *  Callers must handle null gracefully — e.g. "/agents bg: no terminal
- *  backend installed". */
-export function getBgTerminalBackend(): TermBgBackend | null {
-	return registrySlot().backend;
+/** Get the currently registered terminal backend, or null if none is loaded
+ *  or none of the registered backends is currently available. Backward-compat
+ *  async wrapper over selectBgTerminalBackend() — returns the selected backend
+ *  or null. Callers must handle null gracefully — e.g.
+ *  "/agents bg: no terminal backend installed". */
+export function getBgTerminalBackend(): Promise<TermBgBackend | null> {
+	return selectBgTerminalBackend().then((r) => (r.ok ? r.backend : null));
 }
 
-/** TEST-ONLY: reset the registered backend to null. Never call in production
- *  — only for test fixtures that need independent registration state. */
+/** TEST-ONLY: reset the registered backends to an empty array. Never call in
+ *  production — only for test fixtures that need independent registration
+ *  state. */
 export function __resetBgTerminalBackend(): void {
-	registrySlot().backend = null;
+	registrySlot().backends = [];
+}
+
+/** Discriminated union returned by selectBgTerminalBackend(). */
+export type SelectBgTerminalResult =
+	| { ok: true; backend: TermBgBackend }
+	| { ok: false; reason: "none-registered" }
+	| { ok: false; reason: "all-unavailable"; probed: readonly { name: string; ok: false }[] };
+
+/** Select: see plan REQ-D2. */
+export async function selectBgTerminalBackend(): Promise<SelectBgTerminalResult> {
+	const backends = registrySlot().backends;
+	if (backends.length === 0) return { ok: false, reason: "none-registered" };
+	const probeOrder = [...backends].sort((a, b) => (b.preference ?? 0) - (a.preference ?? 0));
+	const probed: { name: string; ok: false }[] = [];
+	for (const backend of probeOrder) {
+		try {
+			if (typeof backend.isAvailable !== "function") return { ok: true, backend };
+			if (await backend.isAvailable()) return { ok: true, backend };
+			probed.push({ name: backend.name, ok: false });
+		} catch (err) {
+			console.debug(`bg-terminal: ${backend.name}.isAvailable() threw; treating as unavailable: ${err}`);
+			probed.push({ name: backend.name, ok: false });
+		}
+	}
+	return { ok: false, reason: "all-unavailable", probed };
+}
+
+/** Inspect: frozen snapshot of registered backends, in registration order. */
+export function listBgTerminalBackends(): readonly TermBgBackend[] {
+	return Object.freeze(registrySlot().backends.slice());
 }

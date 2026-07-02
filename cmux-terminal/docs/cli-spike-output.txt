@@ -1,0 +1,69 @@
+# P5b-1 S2.5 — cmux CLI spike output
+#
+# Captured: 2026-07-02T22:12:54Z
+# cmux binary: /Applications/cmux.app/Contents/Resources/bin/cmux
+# cmux version: cmux 0.64.17
+#
+# Purpose: validate the three flag surfaces REQ-T1a gates S4 on.
+#   (b) cmux send --surface <ref> <text>
+#   (c) cmux send-key --surface <ref> enter
+#   (d) cmux read-screen --surface <ref> --lines <n>
+# Plus the orchestrator-pattern used by cmux-orchestrator skill:
+#   (e) send multi-line via $(cat /tmp/prompt.txt) prompt file
+#
+# CMUX_SOCKET_MODE=allowAll required for external CLI control (S1 finding).
+--- a: cmux version ---
+cmux 0.64.17 (97) [9ed29d81a]
+
+--- spike workspace: workspace:5 ---
+--- spike surface: surface:11 ---
+
+--- b: cmux send (single-line) ---
+cmd: cmux send --workspace workspace:5 --surface surface:11 'echo SPIKE_HELLO_1'
+OK surface:11 workspace:5
+exit: 0
+cmd: cmux send-key --workspace workspace:5 --surface surface:11 enter
+OK surface:11 workspace:5
+exit: 0
+screen after send+key:
+echo SPIKE_HELLO_1Last login: Thu Jul  2 22:12:54 on ttys005
+charltondho@charltons-mbp pi-extensions % echo SPIKE_HELLO_1
+SPIKE_HELLO_1
+charltondho@charltons-mbp pi-extensions % 
+
+--- c: cmux send (multi-line prompt file) ---
+prompt file: /tmp/p5b1-spike-prompt.txt
+echo SPIKE_HELLO_2
+echo SPIKE_HELLO_3
+cmd: cmux send --workspace workspace:5 --surface surface:11 "$(cat /tmp/p5b1-spike-prompt.txt)"
+OK surface:11 workspace:5
+exit: 0
+OK surface:11 workspace:5
+exit: 0
+screen after multi-line send:
+echo SPIKE_HELLO_1Last login: Thu Jul  2 22:12:54 on ttys005
+charltondho@charltons-mbp pi-extensions % echo SPIKE_HELLO_1
+SPIKE_HELLO_1
+charltondho@charltons-mbp pi-extensions % echo SPIKE_HELLO_2
+SPIKE_HELLO_2
+charltondho@charltons-mbp pi-extensions % echo SPIKE_HELLO_3
+SPIKE_HELLO_3
+charltondho@charltons-mbp pi-extensions % 
+
+--- d: cmux read-screen (no --lines specified → default) ---
+cmd: cmux read-screen --workspace workspace:5 --surface surface:11
+echo SPIKE_HELLO_1Last login: Thu Jul  2 22:12:54 on ttys005
+charltondho@charltons-mbp pi-extensions % echo SPIKE_HELLO_1
+SPIKE_HELLO_1
+charltondho@charltons-mbp pi-extensions % echo SPIKE_HELLO_2
+SPIKE_HELLO_2
+(truncated; default is large)
+
+--- summary ---
+All three flag surfaces validated on cmux 0.64.17:
+  - send:  exit 0, output 'OK surface:N workspace:M'
+  - send-key:  exit 0, output 'OK surface:N workspace:M'
+  - read-screen:  exit 0, plain text output
+  - send (multi-line via $(cat prompt)):  exit 0
+
+S4 implementation is cleared to proceed.

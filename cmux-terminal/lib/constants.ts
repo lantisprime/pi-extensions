@@ -2,6 +2,7 @@
 // Imported by other modules; no runtime side effects.
 export const CMUX_BACKEND_NAME = "cmux";
 export const CMUX_WINDOW_PREFIX = "pi-cmux-";
+export const CMUX_BACKEND_PREFERENCE = 10;
 export const MAX_ERROR_STDERR_LEN = 512;
 export const CMUX_INVOCATION_TIMEOUT_MS = 10_000;
 export const CMUX_KILL_TIMEOUT_MS = 5_000;

@@ -4,9 +4,11 @@
 // (debug-logged).
 //
 // Mirrors tmux-terminal/index.ts 1:1 — same worker-resolution strategy, same
-// bg-state-dir derivation, same first-wins registration contract (handled by
-// agents/lib/bg-terminal.ts). The only difference is which backend factory is
-// registered.
+// bg-state-dir derivation, same append-only registration contract (handled by
+// agents/lib/bg-terminal.ts; the selector probes in preference order, highest
+// wins). The only difference is which backend factory is registered and that
+// cmux sets preference: CMUX_BACKEND_PREFERENCE (10) to win over default-0
+// backends like tmux-terminal.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import path from "node:path";
 import os from "node:os";
@@ -14,6 +16,7 @@ import { registerBgTerminalBackend } from "../agents/lib/bg-terminal.ts";
 import { resolveWorkerPath } from "./lib/resolve-worker-path.ts";
 import { createCmuxBackend } from "./lib/cmux-backend.ts";
 import { defaultCmuxExecutor } from "./lib/exec.ts";
+import { CMUX_BACKEND_PREFERENCE } from "./lib/constants.ts";
 
 export default function cmuxTerminalExtension(pi: ExtensionAPI): void {
 	if (typeof pi?.on !== "function") {
@@ -38,6 +41,7 @@ export default function cmuxTerminalExtension(pi: ExtensionAPI): void {
 			executor: defaultCmuxExecutor(),
 			workerPath,
 			bgStateDir,
+			preference: CMUX_BACKEND_PREFERENCE,
 		}));
 	});
 }

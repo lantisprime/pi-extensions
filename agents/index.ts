@@ -25,7 +25,7 @@ import { disposeBackgroundRuns } from "./lib/bg-run.ts";
 import { validateBuiltInAgentSpecs } from "./lib/specs.ts";
 import { registerSubagentTool } from "./lib/subagent-tool.ts";
 import { preflightBgAgent } from "./lib/bg-preflight.ts";
-import { getBgTerminalBackend } from "./lib/bg-terminal.ts";
+import { getBgTerminalBackend, selectBgTerminalBackend } from "./lib/bg-terminal.ts";
 import { formatBuiltInProfilesList, toProfileLibrary, buildProfileLibrary, type ModelProfileLibrary, type ProfileLibraryBuildWarning } from "./lib/profiles.ts";
 import { discoverProfiles, rejectDuplicateProfileNames, DEFAULT_PROFILE_DISCOVERY_LIMITS, type ParsedProfile } from "./lib/profile-discovery.ts";
 import { addOrReplaceRegisteredProfile, findMatchingRegisteredProfile, type RegisteredProfile } from "./lib/registry.ts";
@@ -614,15 +614,17 @@ export async function handleBgCommand(
 	ctx: AgentsContext,
 	diagnostics: Awaited<ReturnType<typeof collectAgentDiagnostics>>,
 ): Promise<void> {
-	const backend = getBgTerminalBackend();
-	if (!backend) {
-		ctx.ui.notify("No terminal backend installed. Load tmux-terminal or equivalent to use background agents.", "warning");
+	const selection = await selectBgTerminalBackend();
+	if (!selection.ok) {
+		if (selection.reason === "none-registered") {
+			ctx.ui.notify("No terminal backend installed. Load tmux-terminal or equivalent to use background agents.", "warning");
+		} else {
+			const probed = selection.probed.map((p) => p.name).join(", ");
+			ctx.ui.notify(`Terminal backends registered but unavailable: ${probed}`, "error");
+		}
 		return;
 	}
-	if (typeof backend.isAvailable === "function" && !(await backend.isAvailable())) {
-		ctx.ui.notify(`Terminal backend "${backend.name}" is not available.`, "error");
-		return;
-	}
+	const backend = selection.backend;
 	// Parse <agent> <task> (split on first whitespace; agent name
 	// is the first token, everything after is the task).
 	const tokens = args.split(/\s+/);
@@ -693,7 +695,7 @@ export async function handleBgStatus(ctx: AgentsContext): Promise<void> {
 	}
 
 	const lines: string[] = [];
-	const backend = getBgTerminalBackend();
+	const backend = await getBgTerminalBackend();
 	let liveRunIds: string[] | undefined;
 	if (backend) {
 		// Collect runIds from backend entries (TermBgWindowEntry.runId), not
@@ -722,7 +724,7 @@ export async function handleBgStop(args: string, ctx: AgentsContext): Promise<vo
 		return;
 	}
 
-	const backend = getBgTerminalBackend();
+	const backend = await getBgTerminalBackend();
 	if (backend) {
 		// Correlate runId → windowId via list() (kill() takes an opaque
 		// windowId, not a runId — the two may differ).
@@ -811,7 +813,7 @@ export async function handleBgOpen(args: string, ctx: AgentsContext): Promise<vo
 		return;
 	}
 
-	const backend = getBgTerminalBackend();
+	const backend = await getBgTerminalBackend();
 	if (!backend) {
 		ctx.ui.notify("No terminal backend installed. Cannot check window.", "warning");
 		return;

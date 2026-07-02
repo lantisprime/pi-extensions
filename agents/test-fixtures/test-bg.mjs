@@ -47,7 +47,9 @@ import {
 import {
 	__resetBgTerminalBackend,
 	getBgTerminalBackend,
+	listBgTerminalBackends,
 	registerBgTerminalBackend,
+	selectBgTerminalBackend,
 } from "../lib/bg-terminal.ts";
 
 import {
@@ -695,6 +697,82 @@ async function testListEntryWithoutRunIdIsTreatedAsUnknown() {
 	assert.equal(actionable.length, 0, "entries with undefined runId must be filtered out (REQ-22)");
 }
 
+// === P5b-1-S2 REQ-D10/D11 dispatch tests (v2.4) ===
+
+async function testBgCommandFallsThroughToTmux() {
+	resetAll();
+	await withTempHome(async (home) => {
+		const { record, diag } = await setupRegisteredUserAgent(home);
+
+		const cmuxDown = makeFakeBackend({ name: "cmux", windowIdPrefix: "cmux" });
+		cmuxDown.isAvailable = async () => false; // cmux daemon down
+		const tmuxUp = makeFakeBackend({ name: "tmux", windowIdPrefix: "tmux" });
+		tmuxUp.isAvailable = async () => true;
+		registerBgTerminalBackend(cmuxDown);
+		registerBgTerminalBackend(tmuxUp);
+
+		let lastNotified = "";
+		let runId;
+		const ctx = makeCtx(home, { ui: { notify: (msg) => { lastNotified = String(msg); }, confirm: async () => true, setStatus: () => {}, setWidget: () => {} } });
+
+		try {
+			await handleBgCommand(`${record.name} test-task`, ctx, diag);
+
+			// Cmux was probed, found unavailable, and was NOT launched.
+			assert.equal(cmuxDown._getConfigLog().length, 0, "cmux should NOT be launched (its isAvailable returned false)");
+			// Tmux was selected via preference fall-through and launched.
+			const tmuxLog = tmuxUp._getConfigLog();
+			assert.equal(tmuxLog.length, 1, "tmux should be launched (preference fall-through when cmux is down)");
+			// Capture runId for cleanup (handleBgCommand writes a real bg-state reservation under resolveTrustedHome())
+			runId = tmuxLog[0]?.runId;
+			// User-visible message names the active backend.
+			assert.match(lastNotified, /via tmux/, "success notification must name the active backend (tmux)");
+		} finally {
+			// Best-effort cleanup of the real-home bg-state reservation (matches the pattern in testPreflightToLaunchContract at agents/test-fixtures/test-bg.mjs:194)
+			await cleanupRealHomeRun(runId);
+		}
+	});
+	resetAll();
+}
+
+async function testBgCommandReportsNoneAvailable() {
+	resetAll();
+	// No backends registered, no agent setup needed — dispatch short-circuits before preflight.
+	let lastNotified = "";
+	const ctx = makeCtx("/tmp", { ui: { notify: (msg) => { lastNotified = String(msg); }, confirm: async () => true, setStatus: () => {}, setWidget: () => {} } });
+	await handleBgCommand("scout test-task", ctx, { agents: [] });
+	assert.match(lastNotified, /No terminal backend installed/, "empty registry must surface the canonical no-backend message");
+	resetAll();
+}
+
+async function testBgCommandListsProbedBackendsWhenAllUnavailable() {
+	resetAll();
+	const cmuxDown = makeFakeBackend({ name: "cmux" });
+	cmuxDown.isAvailable = async () => false;
+	const tmuxDown = makeFakeBackend({ name: "tmux" });
+	tmuxDown.isAvailable = async () => false;
+	registerBgTerminalBackend(cmuxDown);
+	registerBgTerminalBackend(tmuxDown);
+
+	let lastNotified = "";
+	const ctx = makeCtx("/tmp", { ui: { notify: (msg) => { lastNotified = String(msg); }, confirm: async () => true, setStatus: () => {}, setWidget: () => {} } });
+	await handleBgCommand("scout test-task", ctx, { agents: [] });
+	assert.match(lastNotified, /Terminal backends registered but unavailable/, "all-unavailable must surface the differential message (REQ-D11)");
+	assert.match(lastNotified, /cmux/, "differential message must list the cmux backend name");
+	assert.match(lastNotified, /tmux/, "differential message must list the tmux backend name");
+	resetAll();
+}
+
+async function testBgBeforeSessionStart() {
+	resetAll();
+	// Simulate pre-session_start state: no backends registered, no agent resolved.
+	let lastNotified = "";
+	const ctx = makeCtx("/tmp", { ui: { notify: (msg) => { lastNotified = String(msg); }, confirm: async () => true, setStatus: () => {}, setWidget: () => {} } });
+	await handleBgCommand("scout test-task", ctx, { agents: [] });
+	assert.match(lastNotified, /No terminal backend installed/, "pre-session_start must show the no-registered message");
+	resetAll();
+}
+
 // ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
@@ -718,6 +796,10 @@ async function main() {
 	await test("listBgRuns: preflight shows up as reserved run", testListBgRunsShowsPreflight);
 	await test("worker rejects custom-home manifest (N3 invariant)", testWorkerRejectsCustomHomeManifest);
 	await test("list entry with undefined runId is treated as unknown (REQ-22)", testListEntryWithoutRunIdIsTreatedAsUnknown);
+	await test("bg-command: falls through to next backend when primary is down", testBgCommandFallsThroughToTmux);
+	await test("bg-command: reports no backend installed when registry is empty", testBgCommandReportsNoneAvailable);
+	await test("bg-command: lists probed backends when all are unavailable", testBgCommandListsProbedBackendsWhenAllUnavailable);
+	await test("bg-command: pre-session_start shows no-backend message", testBgBeforeSessionStart);
 	console.log("P4-7 bg integration tests passed");
 }
 
