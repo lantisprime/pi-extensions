@@ -9,14 +9,65 @@
 // wins). The only difference is which backend factory is registered and that
 // cmux sets preference: CMUX_BACKEND_PREFERENCE (10) to win over default-0
 // backends like tmux-terminal.
+//
+// P5b-1-S4 (REQ-T5): also exports `cmuxTerminalTools` for the tool-extension
+// wiring. The tools are independent of the bg backend — they target cmux
+// surfaces directly via the cmux CLI, so callers can use them without
+// triggering a bg backend lookup. The factory binds the tool functions to a
+// CmuxExecutor (default: `defaultCmuxExecutor()`) so callers get the
+// `cmuxPaste(opts)` / `cmuxWaitFor(opts)` / `cmuxSendKeys(opts)` shape
+// described in the S4 spec, with no executor argument.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import path from "node:path";
 import os from "node:os";
 import { registerBgTerminalBackend } from "../agents/lib/bg-terminal.ts";
 import { resolveWorkerPath } from "./lib/resolve-worker-path.ts";
 import { createCmuxBackend } from "./lib/cmux-backend.ts";
-import { defaultCmuxExecutor } from "./lib/exec.ts";
+import { defaultCmuxExecutor, type CmuxExecutor } from "./lib/exec.ts";
+import {
+	cmuxPaste,
+	cmuxWaitFor,
+	cmuxSendKeys,
+	type PasteOpts,
+	type WaitOpts,
+	type SendOpts,
+	type PasteResult,
+	type WaitResult,
+	type SendResult,
+} from "./lib/tools.ts";
 import { CMUX_BACKEND_PREFERENCE } from "./lib/constants.ts";
+
+/**
+ * Public tool surface for the cmuxTerminalTools factory (REQ-T5). Each
+ * function takes only its `Opts` payload — the CmuxExecutor is bound at
+ * factory time. The underlying functions (e.g. `cmuxPaste(executor, opts)`)
+ * are also exported from `./lib/tools.ts` for testability.
+ */
+export interface CmuxTerminalTools {
+	cmuxPaste: (opts: PasteOpts) => Promise<PasteResult>;
+	cmuxWaitFor: (opts: WaitOpts) => Promise<WaitResult>;
+	cmuxSendKeys: (opts: SendOpts) => Promise<SendResult>;
+}
+
+/**
+ * Bind the cmux tool surface (cmuxPaste / cmuxWaitFor / cmuxSendKeys) to a
+ * CmuxExecutor. Defaults to the production `defaultCmuxExecutor()`; tests
+ * (and callers that want a custom executor, e.g. for tracing) inject one.
+ *
+ * The tools are independent of the bg backend: they call `cmux send` /
+ * `cmux send-key` / `cmux read-screen` directly against a surface ref, so
+ * callers don't need to look up a TermBgBackend. The executor is the only
+ * seam. The tools are NOT registered as a TermBgBackend — that is the role
+ * of `cmux-terminal/lib/cmux-backend.ts`, registered by the default
+ * extension below.
+ */
+export function cmuxTerminalTools(executor: CmuxExecutor = defaultCmuxExecutor()): CmuxTerminalTools {
+	return {
+		cmuxPaste: (opts) => cmuxPaste(executor, opts),
+		cmuxWaitFor: (opts) => cmuxWaitFor(executor, opts),
+		cmuxSendKeys: (opts) => cmuxSendKeys(executor, opts),
+	};
+}
 
 export default function cmuxTerminalExtension(pi: ExtensionAPI): void {
 	if (typeof pi?.on !== "function") {

@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # P5b-1 cmux-terminal test runner. Runs the 16 unit tests in test-cmux-backend.mjs
-# via Node 22+ `--experimental-strip-types`. Also runs the REQ-13 grep guard
-# (no agents/lib imports outside bg-terminal.ts) plus a second guard for the
-# helper-file verbatim-copy contract.
+# (S1) plus the 9 unit tests in test-cmux-tools.mjs (S4) via Node 22+
+# `--experimental-strip-types`. Also runs the REQ-13 grep guard (no agents/lib
+# imports outside bg-terminal.ts) plus a second guard for the helper-file
+# verbatim-copy contract.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-echo "Running P5b-1 cmux-backend tests..."
+echo "Running P5b-1 cmux-backend tests (S1)..."
 node --experimental-strip-types test-fixtures/test-cmux-backend.mjs
+echo "Running P5b-1 cmux-tools tests (S4)..."
+node --experimental-strip-types test-fixtures/test-cmux-tools.mjs
 echo "Verifying REQ-13 (no agents/lib imports outside bg-terminal.ts)..."
 if grep -rn 'from "\.\./.*/agents/lib/"' .; then
 	echo "REQ-13 VIOLATED: agents/lib imports outside bg-terminal.ts"
