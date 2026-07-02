@@ -37,7 +37,7 @@ async function tryLoadBackend(): Promise<{ list(): Promise<Array<{ windowId: str
 		const mod = await import(url.href);
 		const getBgTerminalBackend = mod?.getBgTerminalBackend;
 		if (typeof getBgTerminalBackend !== "function") return null;
-		const backend = getBgTerminalBackend();
+		const backend = await getBgTerminalBackend();
 		if (!backend || typeof backend.list !== "function") return null;
 		return backend;
 	} catch {

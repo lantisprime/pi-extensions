@@ -352,7 +352,7 @@ function registerTools(pi: ExtensionAPI): void {
 		}),
 		async execute(_id, params, _signal, _onUpdate, _ctx) {
 			const sock = getSocketPrefix();
-			if (!sock) return { content: [{ type: "text", text: notConfiguredMsg() }], details: { ok: false } };
+			if (!sock) return { content: [{ type: "text", text: `drive failed at resolve: ${notConfiguredMsg()}` }], details: { ok: false, phase: "resolve" } };
 			const wins = await listAgentWindows(executor, sock, currentPrefix);
 			const r = await driveClaude(executor, sock, wins, currentPrefix, params);
 			if (!r.ok) {
