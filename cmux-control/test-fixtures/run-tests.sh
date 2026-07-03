@@ -22,4 +22,8 @@ echo "Running P5d-S3 cmux-control send tests..."
 node --experimental-strip-types test-fixtures/test-send.mjs
 echo "Running P5d-S3 cmux-control launch tests..."
 node --experimental-strip-types test-fixtures/test-launch.mjs
-echo "P5d-S3 cmux-control tests passed"
+echo "Running P5d-S4 cmux-control resolve tests..."
+node --experimental-strip-types test-fixtures/test-resolve.mjs
+echo "Running P5d-S4 cmux-control nlp tests..."
+node --experimental-strip-types test-fixtures/test-nlp.mjs
+echo "P5d-S4 cmux-control tests passed"
