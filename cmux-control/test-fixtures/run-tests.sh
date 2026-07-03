@@ -14,4 +14,12 @@ echo "Running P5d-S2 cmux-control safety tests..."
 node --experimental-strip-types test-fixtures/test-safety.mjs
 echo "Running P5d-S2 cmux-control focus-op tests..."
 node --experimental-strip-types test-fixtures/test-focus-ops.mjs
-echo "P5d-S2 cmux-control tests passed"
+echo "Running P5d-S3 cmux-control list tests..."
+node --experimental-strip-types test-fixtures/test-list.mjs
+echo "Running P5d-S3 cmux-control capture tests..."
+node --experimental-strip-types test-fixtures/test-capture.mjs
+echo "Running P5d-S3 cmux-control send tests..."
+node --experimental-strip-types test-fixtures/test-send.mjs
+echo "Running P5d-S3 cmux-control launch tests..."
+node --experimental-strip-types test-fixtures/test-launch.mjs
+echo "P5d-S3 cmux-control tests passed"
