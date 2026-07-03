@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # P5b-1 cmux-terminal test runner. Runs the 16 unit tests in test-cmux-backend.mjs
-# (S1) plus the 9 unit tests in test-cmux-tools.mjs (S4) and the REQ-T5
-# extension-surface test via Node 22+
+# (S1) plus the 9 unit tests in test-cmux-tools.mjs (S4), the REQ-T5
+# extension-surface test, and the S5 README docs guard via Node 22+
 # `--experimental-strip-types`. Also runs the REQ-13 grep guard (no agents/lib
 # imports outside bg-terminal.ts) plus a second guard for the helper-file
 # verbatim-copy contract.
@@ -14,6 +14,8 @@ echo "Running P5b-1 cmux-tools tests (S4)..."
 node --experimental-strip-types test-fixtures/test-cmux-tools.mjs
 echo "Running P5b-1 cmux-extension tests (S4 REQ-T5)..."
 node --experimental-strip-types test-fixtures/test-cmux-extension.mjs
+echo "Running P5b-1 cmux-docs tests (S5 REQ-R1)..."
+node --experimental-strip-types test-fixtures/test-cmux-docs.mjs
 echo "Verifying REQ-13 (no agents/lib imports outside bg-terminal.ts)..."
 if grep -rn 'from "\.\./.*/agents/lib/"' .; then
 	echo "REQ-13 VIOLATED: agents/lib imports outside bg-terminal.ts"
