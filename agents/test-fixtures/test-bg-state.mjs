@@ -23,6 +23,7 @@ import {
   reapStaleBgRuns,
   resolveTrustedHome,
   retireSessionMacKeyIfFullyIdle,
+  updateBgReservationOwner,
   signBgManifest,
   signBgPayload,
   verifyBgManifest,
@@ -614,7 +615,7 @@ async function testReapExpiredFreesSlotNoSignal() {
 async function testReapUsesInjectedIsAlive() {
   await withTempHome(async (home) => {
     await writeReservationAge(home, "bg-resv-006", { startedAtMs: Date.now(), effectiveTimeoutSec: 86_400, ownerHandle: "win-9" });
-    const { reapedRunIds } = await reapStaleBgRuns(home, { isAlive: (h) => h !== "win-9" });
+    const { reapedRunIds } = await reapStaleBgRuns(home, { isAlive: (r) => r.ownerHandle !== "win-9" });
     assert.deepEqual(reapedRunIds, ["bg-resv-006"]);
     const paths = getBgRunPaths("bg-resv-006", home);
     assert.equal(JSON.parse(await fs.readFile(paths.resultPath, "utf8")).status, "stopped");
@@ -634,6 +635,133 @@ async function testReaperNeverSignals() {
     } finally {
       process.kill = realKill;
     }
+  });
+}
+
+/** P5+ async isAlive: a reserved run whose injected `isAlive` returns
+ *  a resolved Promise<false> must be reaped even though its age-based
+ *  timeout has not expired. Regression for the "1 agent running"
+ *  status-bar leak where a terminal pane died without writing `done`. */
+async function testReapOrphanedOwnerHandleFreesSlot() {
+  await withTempHome(async (home) => {
+    await writeReservationAge(home, "bg-resv-008", {
+      startedAtMs: Date.now(),
+      effectiveTimeoutSec: 86_400,
+      ownerHandle: "win-dead",
+    });
+    // Sanity: before reap, the orphan counts as active.
+    assert.equal(await countActiveBgRuns(home), 1, "orphan should be counted as active before reap");
+
+    const { reapedRunIds } = await reapStaleBgRuns(home, { isAlive: async () => false });
+    assert.deepEqual(reapedRunIds, ["bg-resv-008"],
+      "orphaned-owner reservation should be reaped");
+    assert.equal(JSON.parse(await fs.readFile(getBgRunPaths("bg-resv-008", home).resultPath, "utf8")).status, "stopped");
+    assert.equal(await countActiveBgRuns(home), 0, "orphan should be gone after reap");
+  });
+}
+
+/** P5+ isAlive true: a live reservation must NOT be reaped even when
+ *  the age path would otherwise be willing. */
+async function testReapKeepsSlotWhenOwnerAlive() {
+  await withTempHome(async (home) => {
+    await writeReservationAge(home, "bg-resv-009", {
+      startedAtMs: Date.now(),
+      effectiveTimeoutSec: 86_400,
+      ownerHandle: "win-alive",
+    });
+    const { reapedRunIds } = await reapStaleBgRuns(home, { isAlive: async () => true });
+    assert.deepEqual(reapedRunIds, [], "live reservation must NOT be reaped");
+    assert.equal(await countActiveBgRuns(home), 1, "slot stays active");
+  });
+}
+
+/** P5+ isAlive throws: a backend that throws on isAlive() must NOT free
+ *  the slot (conservative: never reap a slot we cannot prove is dead). */
+async function testReapKeepsSlotWhenIsAliveThrows() {
+  await withTempHome(async (home) => {
+    await writeReservationAge(home, "bg-resv-010", {
+      startedAtMs: Date.now(),
+      effectiveTimeoutSec: 86_400,
+      ownerHandle: "win-throws",
+    });
+    const { reapedRunIds } = await reapStaleBgRuns(home, {
+      isAlive: () => { throw new Error("backend hiccup"); },
+    });
+    assert.deepEqual(reapedRunIds, [], "isAlive throw must NOT free the slot");
+    assert.equal(await countActiveBgRuns(home), 1, "slot stays active when backend throws");
+  });
+}
+
+/** P5+ no ownerHandle: reservations without ownerHandle must fall back
+ *  to age-only expiry — never trust the parent Pi's pid. */
+async function testReapFallsBackToAgeWhenNoOwnerHandle() {
+  await withTempHome(async (home) => {
+    // writeReservationAge defaults ownerHandle to undefined.
+    await writeReservationAge(home, "bg-resv-011", {
+      startedAtMs: Date.now() - 10_000_000,
+      effectiveTimeoutSec: 1, // already expired
+    });
+    // isAlive would return true, but no ownerHandle => isAlive not consulted.
+    const { reapedRunIds } = await reapStaleBgRuns(home, { isAlive: async () => true });
+    assert.deepEqual(reapedRunIds, ["bg-resv-011"],
+      "no ownerHandle + expired age => age path frees the slot");
+  });
+}
+
+/** P5+ updateBgReservationOwner: persists ownerHandle + ownerBackendName
+ *  on an existing reservation, atomically, preserving all other fields. */
+async function testUpdateBgReservationOwner() {
+  await withTempHome(async (home) => {
+    const paths = await createBgRunState({ homeDir: home, runId: "bg-resv-012" });
+    // Sanity: the original reservation has no owner.
+    {
+      const fs = await import("node:fs/promises");
+      const r = JSON.parse((await fs.readFile(paths.reservationPath, "utf8")).trim());
+      assert.equal(r.ownerHandle, undefined);
+      assert.equal(r.ownerBackendName, undefined);
+    }
+    await updateBgReservationOwner(paths, {
+      ownerHandle: "win-12",
+      ownerBackendName: "tmux",
+    });
+    const fs = await import("node:fs/promises");
+    const r = JSON.parse((await fs.readFile(paths.reservationPath, "utf8")).trim());
+    assert.equal(r.ownerHandle, "win-12");
+    assert.equal(r.ownerBackendName, "tmux");
+    // Other fields preserved (startedAtMs, effectiveTimeoutSec, keyGenId).
+    assert.equal(typeof r.startedAtMs, "number");
+    assert.equal(typeof r.effectiveTimeoutSec, "number");
+    assert.match(r.keyGenId, /^[0-9a-f]{8}$/);
+  });
+}
+
+/** P5+ updateBgReservationOwner refuses a non-reserved run. */
+async function testUpdateBgReservationOwnerRefusesUnreserved() {
+  await withTempHome(async (home) => {
+    const paths = await createBgRunState({ homeDir: home, runId: "bg-resv-013" });
+    await markBgRunDone(paths);
+    await assert.rejects(
+      () => updateBgReservationOwner(paths, { ownerHandle: "x", ownerBackendName: "y" }),
+      /not reserved|done sentinel/i,
+      "post-launch patch must refuse a run that is no longer reserved",
+    );
+  });
+}
+
+/** P5+ updateBgReservationOwner refuses a symlinked runDir. */
+async function testUpdateBgReservationOwnerRefusesSymlinkedRunDir() {
+  await withTempHome(async (home, root) => {
+    const paths = await createBgRunState({ homeDir: home, runId: "bg-resv-014" });
+    // Replace the runDir with a symlink to a directory outside the state root.
+    const outside = path.join(root, "outside-run");
+    await fs.mkdir(outside);
+    await fs.rm(paths.runDir, { recursive: true, force: true });
+    await fs.symlink(outside, paths.runDir);
+    await assert.rejects(
+      () => updateBgReservationOwner(paths, { ownerHandle: "x", ownerBackendName: "y" }),
+      /symlink/i,
+      "post-launch patch must refuse a symlinked runDir",
+    );
   });
 }
 
@@ -796,6 +924,13 @@ async function main() {
   await test("reap expired frees slot with no signal", testReapExpiredFreesSlotNoSignal);
   await test("reap uses injected isAlive", testReapUsesInjectedIsAlive);
   await test("reaper never signals", testReaperNeverSignals);
+  await test("reap orphaned owner handle frees slot", testReapOrphanedOwnerHandleFreesSlot);
+  await test("reap keeps slot when owner alive", testReapKeepsSlotWhenOwnerAlive);
+  await test("reap keeps slot when isAlive throws", testReapKeepsSlotWhenIsAliveThrows);
+  await test("reap falls back to age when no ownerHandle", testReapFallsBackToAgeWhenNoOwnerHandle);
+  await test("updateBgReservationOwner persists fields atomically", testUpdateBgReservationOwner);
+  await test("updateBgReservationOwner refuses unreserved", testUpdateBgReservationOwnerRefusesUnreserved);
+  await test("updateBgReservationOwner refuses symlinked runDir", testUpdateBgReservationOwnerRefusesSymlinkedRunDir);
 
   // Group 2: P4R-2 tolerant + honest listing
   await test("list quarantines not omits", testListQuarantinesNotOmits);

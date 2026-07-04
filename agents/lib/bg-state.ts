@@ -94,6 +94,12 @@ export type BgRunSummary = BgRunPaths & {
 export type BgReservation = {
 	pid: number;
 	ownerHandle?: string;
+	/** Persistent identity of the terminal backend that owns this run.
+	 *  Persisted alongside `ownerHandle` after a successful launch so the
+	 *  reaper can recover the right backend across parent Pi restarts.
+	 *  (Process-local `runId → backend` maps disappear on restart; this
+	 *  is the durable record.) */
+	ownerBackendName?: string;
 	startedAtMs: number;
 	effectiveTimeoutSec: number;
 	keyGenId: string;
@@ -106,6 +112,7 @@ export type CreateBgRunOptions = {
 	maxConcurrentRuns?: number;
 	maxAttempts?: number;
 	ownerHandle?: string;
+	ownerBackendName?: string;
 	effectiveTimeoutSec?: number; // optional-with-default: missing ⇒ BG_MAX_DURATION_SEC (REQ-5)
 };
 
@@ -236,6 +243,7 @@ export async function createBgRunState(options: CreateBgRunOptions = {}): Promis
 			const reservation: BgReservation = {
 				pid: process.pid,
 				ownerHandle: options.ownerHandle,
+				ownerBackendName: options.ownerBackendName,
 				startedAtMs: Date.now(),
 				effectiveTimeoutSec: options.effectiveTimeoutSec ?? BG_MAX_DURATION_SEC,
 				keyGenId: keyGenIdFromKey(await readOrCreateSessionMacKey(homeDir)),
@@ -283,6 +291,7 @@ async function readReservation(paths: BgRunPaths): Promise<BgReservation> {
 	return {
 		pid: typeof r.pid === "number" ? r.pid : 0,
 		ownerHandle: typeof r.ownerHandle === "string" ? r.ownerHandle : undefined,
+		ownerBackendName: typeof r.ownerBackendName === "string" ? r.ownerBackendName : undefined,
 		startedAtMs,
 		effectiveTimeoutSec,
 		keyGenId: typeof r.keyGenId === "string" ? r.keyGenId : "",
@@ -346,7 +355,16 @@ export async function countActiveBgRuns(homeDir = resolveTrustedHome()): Promise
 
 export async function reapStaleBgRuns(
 	homeDir = resolveTrustedHome(),
-	opts?: { isAlive?: (h: string) => boolean },
+	opts?: {
+		/** Async-friendly liveness probe. Called with the full reservation
+		 *  (so the callback can route to the right backend via
+		 *  `ownerBackendName`). Returns true if the backend considers
+		 *  the owner alive. May return a Promise. Throws/errors are
+		 *  treated as "alive" (conservative — the reaper never frees a
+		 *  slot it can't prove is dead). The callback is only invoked
+		 *  when the reservation has a non-empty `ownerHandle`. */
+		isAlive?: (reservation: BgReservation) => boolean | Promise<boolean>;
+	},
 ): Promise<{ reapedRunIds: string[] }> {
 	const reapedRunIds: string[] = [];
 	for (const run of await listBgRuns(homeDir)) {
@@ -354,7 +372,23 @@ export async function reapStaleBgRuns(
 		const paths = getBgRunPaths(run.runId, homeDir);
 		const r = await readReservation(paths);
 		const expired = isReservationExpired(r);
-		const dead = opts?.isAlive && r.ownerHandle ? !opts.isAlive(r.ownerHandle) : false;
+		// Backend-backed liveness: the reaper only consults `isAlive` when
+		// the reservation has a persisted `ownerHandle` (set by the call
+		// site after a successful backend.launch()). Reservations without
+		// an ownerHandle fall back to the existing age-based expiry — we
+		// never trust `r.pid` because that is the parent Pi's pid written
+		// during preflight, not the worker (P5+ MAJOR). Errors thrown by
+		// `isAlive` are treated as "alive" for that tick so a transient
+		// backend hiccup cannot free a live run.
+		let ownerDead = false;
+		if (opts?.isAlive && r.ownerHandle) {
+			try {
+				ownerDead = !(await opts.isAlive(r));
+			} catch {
+				ownerDead = false;
+			}
+		}
+		const dead = ownerDead;
 		if (!expired && !dead) continue;
 		try {
 			await writeBgResult(paths, { version: 1, runId: run.runId, status: expired ? "timed-out" : "stopped" });
@@ -469,6 +503,42 @@ export async function markBgRunDone(paths: BgRunPaths): Promise<void> {
 	await assertReservedRun(paths);
 	await createEmptyFileNoSymlink(paths.donePath, 0o600, "done sentinel");
 	await fs.rm(paths.reservationPath, { force: true });
+}
+
+export type BgReservationOwnerPatch = {
+	ownerHandle?: string;
+	ownerBackendName?: string;
+};
+
+/** Patch the reserved (still-running) .reservation file in place with the
+ *  terminal backend's identity for the live run. Called by the launch path
+ *  after a successful backend.launch() so the reaper can recover the right
+ *  backend across parent Pi restarts (process-local runId→backend maps
+ *  disappear on restart; the persisted `ownerBackendName` does not).
+ *
+ *  Invariants:
+ *  - Refuses to patch if the run is no longer reserved (done / no
+ *    .reservation file) — the launch path may have raced a stop.
+ *  - Refuses symlinked runDir / .reservation file (N3 family).
+ *  - Atomic write via writeJsonAtomic so a concurrent reader never sees a
+ *    half-updated reservation.
+ *  - Preserves the original keyGenId (and any other field) by reading the
+ *    current reservation and re-writing the merged object.
+ *  - Best-effort: a post-launch patch failure is a non-fatal diagnostic;
+ *    the launch path can catch and log, and the reaper falls back to
+ *    age-only expiry for that run. */
+export async function updateBgReservationOwner(
+	paths: BgRunPaths,
+	patch: BgReservationOwnerPatch,
+): Promise<void> {
+	await assertWritableReservedRun(paths);
+	const current = await readReservation(paths);
+	const next: BgReservation = {
+		...current,
+		ownerHandle: patch.ownerHandle ?? current.ownerHandle,
+		ownerBackendName: patch.ownerBackendName ?? current.ownerBackendName,
+	};
+	await writeJsonAtomic(paths.reservationPath, next, 0o600);
 }
 
 async function writeJsonAtomic(filePath: string, value: unknown, mode = 0o600): Promise<void> {
