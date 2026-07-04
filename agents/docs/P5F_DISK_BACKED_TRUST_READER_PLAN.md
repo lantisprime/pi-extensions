@@ -2,7 +2,7 @@
 
 ## Status
 
-Planning only. Do not implement until this plan, plan review, and adversarial review are accepted. **Pass 1 + Pass 2 + Pass 3 + Pass 4 reviews (codex, changes-requested) addressed; awaiting Pass 5.**
+Planning only — **plan review consensus REACHED (codex APPROVE, Pass 5)**. Plan ACCEPTED for slicing P5F-1 by a high-capability executor. P5F-2/P5F-3 step tables still deferred by design (authored after P5F-1 review).
 
 ## Episode Search Summary
 
@@ -310,7 +310,7 @@ Total: 23 unit tests + 2 static + 1 UNGUARDED-IN-CI manual grep (REQ-10) + 1 UNG
 | 2 | codex (cmux surface:49) | gpt-5.5 high | 5 new-surface | `changes-requested` — Pass-1 blockers 1–5 + audit RESOLVED; verifier-only defects in the verbatim Appendix B source (private-helper imports, missing `await`, State-E create-during-read, key-symlink throw not propagated, test import/async) addressed in revision 2 |
 | 3 | codex (cmux surface:49) | gpt-5.5 high | 1 (excerpt-completeness) | `changes-requested` — all 5 Pass-2 defects RESOLVED; only remaining: test block was an excerpt, not full verbatim 12-test source as the (false) header claimed. Revision 3 re-scopes step 1.2 to high-capability-executor scope (PLAN_TEMPLATE-sanctioned) with an explicit 8-test contract table, dropping the false "Full verbatim" claim |
 | 4 | codex (cmux surface:49) | gpt-5.5 high | 2 (Q3 REQ-10 contradiction + Q4 residual comments) | `changes-requested` — re-scope Q1+Q2 RESOLVED; Q3 NOT-RESOLVED (contract row for macCheckedBeforeRootCompare "punts ordering to manual grep" contradicted REQ-10's "automated mock-injection" claim); Q4 NOT-RESOLVED (residual "6 follow skeleton"/"8 more tests" comments inside the verbatim block). Revision 4 makes REQ-10 honest+consistent: renamed `macCheckedBeforeRootCompare` → `macAndRootBothChecked` (automated both-checks G+H); ORDERING → `UNGUARDED-IN-CI` manual grep consistently across REQ-10 row / Safety / catalog / contract table / Done Criteria / Group 6 (REQ-11 forbids mock deps, so no mock framework); residual verbatim-block comments fixed. |
-| 5 | _(pending)_ | — | — | pending |
+| 5 | codex (cmux surface:49) | gpt-5.5 high | 0 | **`approve`** — CONSENSUS. All 4 audit questions RESOLVED. Plan ACCEPTED for slicing P5F-1 by a high-capability executor. |
 
 ### Resolved blockers (Pass 1 → revision 1)
 
