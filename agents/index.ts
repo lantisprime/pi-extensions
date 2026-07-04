@@ -299,6 +299,10 @@ export default function agentsExtension(pi: ExtensionAPI) {
  *  Do not mutate in production. Defaults to dispatchChildRun. */
 export const __gateDispatch = { fn: dispatchChildRun };
 
+/** Test seam: override fn to intercept background launch calls in tests.
+ *  Do not mutate in production. Defaults to handleBgCommand. */
+export const __bgLaunchTestHook = { fn: handleBgCommand };
+
 export async function handleGateInput(
 	text: string,
 	ctx: AgentsContext,
@@ -319,15 +323,16 @@ export async function handleGateInput(
 	// REQ-2: classify
 	const decision = classifyGateIntent(text, configResult.config);
 
-	// REQ-4 / REQ-11: route or confirm — always ask in TUI (REQ-SEC-3)
-	if (decision.kind === "route" || decision.kind === "confirm") {
+	// REQ-4 / REQ-11: route, confirm, or bg-launch — always ask in TUI (REQ-SEC-3)
+	if (decision.kind === "route" || decision.kind === "confirm" || decision.kind === "bg-launch") {
 		// REQ-SEC-3: NL-routed prompts ALWAYS confirm, regardless of P6 confidence
 		if (ctx.ui.confirm) {
+			const actionDesc = decision.kind === "bg-launch" ? "Launch in background" : "Route to";
 			const ok = await ctx.ui.confirm(
-				`Route to ${decision.agent}?`,
+				`${actionDesc} ${decision.agent}?`,
 				`Intent '${decision.metadata.intentId}' matched by ${decision.metadata.matchedBy}.\nTask: ${text}`,
 			);
-			if (!ok) { ctx.ui.notify("Routing cancelled.", "info"); return { action: "continue" }; }
+			if (!ok) { ctx.ui.notify("Action cancelled.", "info"); return { action: "continue" }; }
 		}
 
 		// REQ-SEC-5: gate-routed children must disable context files
@@ -354,12 +359,25 @@ export async function handleGateInput(
 			ctx.projectRegistry = diagnostics.projectRegistry;
 		}
 
-		// C3: config-chosen agent = spawned agent — direct dispatch, no re-classification.
-		// Bypasses runIntentCommand's classifier + auto-run rail (SEC-3 satisfied).
-		// Profile passed structurally, not via string interpolation (SEC-2).
-		void __gateDispatch.fn(decision.agent, text, ctx, "built-in", decision.profile).catch((err) => {
-			ctx.ui.notify(`Gate dispatch failed: ${err instanceof Error ? err.message : String(err)}`, "error");
-		});
+		// Handle different dispatch types
+		if (decision.kind === "bg-launch") {
+			// Launch in background using existing bg command infrastructure
+			const diagnostics = await collectAgentDiagnostics({ cwd: ctx.cwd, homeDir: ctx.agentsHomeDir, projectTrusted });
+			// Thread decision.profile through to handleBgCommand as `--profile <name>` (parsed
+			// by parseBgArgs). Mirrors the slash-command path; the gate's profile is the
+			// user's explicit override for this run.
+			const bgArgs = decision.profile ? `--profile ${decision.profile} ${decision.agent} ${text}` : `${decision.agent} ${text}`;
+			void __bgLaunchTestHook.fn(bgArgs, ctx, diagnostics).catch((err) => {
+				ctx.ui.notify(`Background launch failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+			});
+		} else {
+			// C3: config-chosen agent = spawned agent — direct dispatch, no re-classification.
+			// Bypasses runIntentCommand's classifier + auto-run rail (SEC-3 satisfied).
+			// Profile passed structurally, not via string interpolation (SEC-2).
+			void __gateDispatch.fn(decision.agent, text, ctx, "built-in", decision.profile).catch((err) => {
+				ctx.ui.notify(`Gate dispatch failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+			});
+		}
 		return { action: "handled" };
 	}
 
@@ -669,6 +687,10 @@ export async function handleBgCommand(
 		ctx.ui.notify("Usage: /agents bg <agent> <task> [--backend <name>]", "warning");
 		return;
 	}
+	if (parse.profileFlagMissingValue) {
+		ctx.ui.notify("Usage: /agents bg <agent> <task> [--profile <name>]", "warning");
+		return;
+	}
 	let backend;
 	if (parse.backendName !== undefined) {
 		const named = getBgTerminalBackendByName(parse.backendName);
@@ -721,9 +743,13 @@ export async function handleBgCommand(
 		return;
 	}
 
-	// Preflight: write signed manifest + reservation.
+	// Preflight: write signed manifest + reservation. The profile override (if any)
+	// comes from the gate or the user's explicit `--profile <name>` flag; it overrides
+	// any profile declared on the agent spec.
 	const preflightCtx = { cwd: ctx.cwd, hasUI: ctx.hasUI, agentsHomeDir: ctx.agentsHomeDir } as AgentsContextLike;
-	const result = await preflightBgAgent(resolved.record, task, preflightCtx, diagnostics);
+	const result = await preflightBgAgent(resolved.record, task, preflightCtx, diagnostics, {
+		...(parse.profileName !== undefined ? { profileOverride: parse.profileName } : {}),
+	});
 	if (!result.ok) {
 		ctx.ui.notify(`Preflight failed: ${result.reason}`, "error");
 		return;

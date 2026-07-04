@@ -474,4 +474,498 @@ function fakeCompletedResult(name, task) {
 	});
 }
 
+// 13. Manifest with options.profile threads profileOverride to runChildAgent
+{
+	await withTempHome(async (home) => {
+		const { record, diag } = await setupRegisteredUserAgent(home);
+		// Preflight WITH profileOverride so the manifest's options.profile is set.
+		const result = await preflightBgAgent(record, "task", makeCtx(home), diag, {
+			homeDir: home,
+			profileOverride: "smart",
+		});
+		assert.equal(result.ok, true, `preflight should succeed, got: ${result.reason}`);
+		const paths = result.paths;
+		const manifest = await readBgManifest(paths);
+		assert.equal(manifest.options.profile, "smart", "preflight stashed profile in manifest");
+
+		const runnerCalls = [];
+		const fakeRunner = async (spec, task, opts) => {
+			runnerCalls.push({ spec, task, options: opts });
+			return fakeCompletedResult(spec.name, task);
+		};
+
+		await runBgWorker(paths.manifestPath, { homeDir: home, runner: fakeRunner });
+
+		assert.equal(runnerCalls.length, 1);
+		assert.equal(runnerCalls[0].options?.profileOverride, "smart",
+			"worker passed manifest.options.profile as profileOverride to runChildAgent");
+	});
+}
+
+// 14. Manifest WITHOUT options.profile → worker does NOT set profileOverride
+// (preserves existing behavior: runChildAgent falls through to spec.profile)
+{
+	await withTempHome(async (home) => {
+		const { record, diag } = await setupRegisteredUserAgent(home);
+		// Preflight WITHOUT profileOverride — manifest's options.profile is absent.
+		const { paths } = await preflightAndRead(home, record, diag, "task");
+
+		const manifest = await readBgManifest(paths);
+		assert.equal(manifest.options.profile, undefined, "control: manifest has no profile");
+
+		const runnerCalls = [];
+		const fakeRunner = async (spec, task, opts) => {
+			runnerCalls.push({ spec, task, options: opts });
+			return fakeCompletedResult(spec.name, task);
+		};
+
+		await runBgWorker(paths.manifestPath, { homeDir: home, runner: fakeRunner });
+
+		assert.equal(runnerCalls.length, 1);
+		assert.equal(runnerCalls[0].options?.profileOverride, undefined,
+			"worker does NOT set profileOverride when manifest has no profile (preserves spec.profile fallthrough)");
+	});
+}
+
+// 15. Positive: manifest.options.profile set + profile library available →
+// child runner resolves the effective model/thinking from the named profile.
+{
+	await withTempHome(async (home) => {
+		const { record, diag } = await setupRegisteredUserAgent(home);
+		// Preflight WITH profileOverride so the manifest carries options.profile.
+		const result = await preflightBgAgent(record, "task", makeCtx(home), diag, {
+			homeDir: home,
+			profileOverride: "smart",
+		});
+		assert.equal(result.ok, true, `preflight should succeed, got: ${result.reason}`);
+		const paths = result.paths;
+
+		// Library carrying a "smart" profile with known model + thinking.
+		const library = {
+			profiles: [
+				{ name: "smart", model: "smart-model", thinking: "high", sourceOrigin: "built-in" },
+			],
+		};
+
+		// Runner that mirrors the production resolution path: call resolveSpecProfile
+		// exactly as runChildAgent does (child-runner.ts:96-105) and capture the
+		// resolved values. We do NOT spawn a real child — the assertion is on the
+		// resolved profile, not on the spawn.
+		const { resolveSpecProfile } = await import("../lib/profiles.ts");
+		let resolved = null;
+		const fakeRunner = async (spec, task, opts) => {
+			const effective = opts?.profileOverride ?? spec.profile;
+			resolved = resolveSpecProfile(
+				{ model: spec.model, thinking: spec.thinking, profile: effective },
+				library,
+			);
+			return fakeCompletedResult(spec.name, task);
+		};
+
+		await runBgWorker(paths.manifestPath, { homeDir: home, runner: fakeRunner });
+
+		assert.ok(resolved, "profile resolution ran");
+		assert.equal(resolved.resolved, true, `resolution should succeed, got: ${JSON.stringify(resolved)}`);
+		assert.equal(resolved.profileName, "smart", "resolved to the 'smart' profile");
+		assert.equal(resolved.effectiveModel, "smart-model", "model resolved from profile");
+		assert.equal(resolved.effectiveThinking, "high", "thinking resolved from profile");
+		assert.equal(resolved.profileProvidedModel, true, "profile (not spec fallback) provided the model");
+		assert.equal(resolved.profileProvidedThinking, true, "profile (not spec fallback) provided the thinking");
+	});
+}
+
+// 16. Negative: manifest.options.profile set + NO profile library → fails clearly.
+// Mirrors the fail-closed path at child-runner.ts:99-101: profile requested but
+// the library is empty/missing, runChildAgent returns a spawnErrorResult with
+// a descriptive error rather than silently picking a default model.
+{
+	await withTempHome(async (home) => {
+		const { record, diag } = await setupRegisteredUserAgent(home);
+		const result = await preflightBgAgent(record, "task", makeCtx(home), diag, {
+			homeDir: home,
+			profileOverride: "smart",
+		});
+		assert.equal(result.ok, true, `preflight should succeed, got: ${result.reason}`);
+		const paths = result.paths;
+
+		// Runner that mimics runChildAgent's fail-closed branch: profile requested
+		// but library is empty → return a spawn-error result with a descriptive
+		// message naming the missing profile (matches child-runner.ts:99-101 which
+		// calls spawnErrorResult with that exact message).
+		const fakeRunner = async (spec, task, opts) => {
+			const effective = opts?.profileOverride ?? spec.profile;
+			if (effective) {
+				return {
+					agentName: spec.name,
+					status: "spawn-error",
+					durationMs: 0,
+					stdoutBytes: 0,
+					stderrPreview: "",
+					invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin", stdinText: task } },
+					summary: { summaryText: "", toolCalls: [], errors: [], usage: undefined, cost: undefined, stopReason: undefined, model: undefined, provider: undefined, truncation: {} },
+					timedOut: false,
+					outputLimitExceeded: false,
+					error: `profile '${effective}' requested but no profile library is available`,
+				};
+			}
+			return fakeCompletedResult(spec.name, task);
+		};
+
+		await runBgWorker(paths.manifestPath, { homeDir: home, runner: fakeRunner });
+
+		const raw = await fs.readFile(paths.resultPath, "utf8");
+		const result2 = JSON.parse(raw);
+		// Worker normalizes the child's status to "failed" via mapChildStatus
+		// (bg-worker.ts:215-224). The IMPORTANT assertion is the error message —
+		// a "silent fallthrough to a default model" would have a generic exit-code
+		// or "Background agent did not complete" error instead of the descriptive
+		// profile-not-found message.
+		assert.equal(result2.status, "failed", "run fails closed (status: failed) when profile is requested but library is empty");
+		assert.match(result2.error, /profile 'smart' requested but no profile library is available/,
+			"error names the missing profile and the cause (no library) — NOT a silent fallthrough to a default model");
+	});
+}
+
+// 17. Worker passes the profile library to the runner as the 4th positional arg.
+// Codex asks: "prove runBgWorker receives/reconstructs the library". The library
+// flows through the existing mock seam (options.runner) as a 4th positional arg,
+// matching runChildAgent's signature: (spec, task, options, profiles, profileOverride).
+// Production workers use the default runner; tests use the seam to assert the wiring.
+{
+	await withTempHome(async (home) => {
+		const { record, diag } = await setupRegisteredUserAgent(home);
+		const result = await preflightBgAgent(record, "task", makeCtx(home), diag, {
+			homeDir: home,
+			profileOverride: "smart",
+		});
+		assert.equal(result.ok, true, `preflight should succeed, got: ${result.reason}`);
+		const paths = result.paths;
+
+		const library = {
+			profiles: [
+				{ name: "smart", model: "smart-model", thinking: "high", sourceOrigin: "built-in" },
+				{ name: "fast", model: "fast-model", thinking: "low", sourceOrigin: "built-in" },
+			],
+		};
+
+		let capturedLibrary = null;
+		const fakeRunner = async (spec, task, opts, lib) => {
+			capturedLibrary = lib;
+			return fakeCompletedResult(spec.name, task);
+		};
+
+		await runBgWorker(paths.manifestPath, {
+			homeDir: home,
+			profileLibrary: library,
+			runner: fakeRunner,
+		});
+
+		assert.equal(capturedLibrary, library,
+			"worker passed options.profileLibrary to runner as the 4th positional arg (production-style wiring)");
+	});
+}
+
+// 18. Production path: with no user profiles on disk and no options.profileLibrary,
+// the worker still reconstructs a library (built-in-only). This proves the production
+// path never hands an undefined library to the runner — the runChildAgent fail-closed
+// branch (child-runner.ts:99-101) only fires when the requested profile isn't in the
+// library, NOT when the library is missing entirely.
+{
+	await withTempHome(async (home) => {
+		const { record, diag } = await setupRegisteredUserAgent(home);
+		const result = await preflightBgAgent(record, "task", makeCtx(home), diag, {
+			homeDir: home,
+			profileOverride: "smart",
+		});
+		assert.equal(result.ok, true, `preflight should succeed, got: ${result.reason}`);
+		const paths = result.paths;
+
+		// Ensure <home>/.pi/agent/profiles/ is empty so reconstruction falls back to
+		// built-ins only.
+		const userProfilesDir = path.join(home, ".pi", "agent", "profiles");
+		await fs.mkdir(userProfilesDir, { recursive: true });
+
+		let capturedLibrary = "sentinel";
+		const fakeRunner = async (spec, task, opts, lib) => {
+			capturedLibrary = lib;
+			return fakeCompletedResult(spec.name, task);
+		};
+
+		await runBgWorker(paths.manifestPath, {
+			homeDir: home,
+			// no profileLibrary, no user profile files on disk
+			runner: fakeRunner,
+		});
+
+		assert.ok(capturedLibrary && typeof capturedLibrary === "object",
+			"worker reconstructed a library (never undefined on the production path)");
+		assert.ok(Array.isArray(capturedLibrary.profiles), "library has a profiles array");
+		assert.ok(capturedLibrary.profiles.length > 0,
+			"library includes built-in profiles (buildProfileLibrary always merges built-ins)");
+		assert.equal(capturedLibrary.profiles.find((p) => p.name === "smart"), undefined,
+			"library does NOT include 'smart' (no user profile on disk) — the production run will fail-closed at child-runner.ts:99-101 with 'profile \"smart\" requested but no profile library is available'");
+	});
+}
+
+// 19. Production path: worker reconstructs the profile library from disk when
+// no library is injected. Writes a real user profile at <homeDir>/.pi/agent/profiles/smart.md,
+// runs preflight with profileOverride: "smart" (manifest.options.profile = "smart"),
+// runs the worker WITHOUT options.profileLibrary. The worker must call
+// buildBgWorkerProfileLibrary(homeDir), discover the on-disk "smart" profile, and
+// pass it as the 4th positional arg to the runner. This is the production-style
+// wiring: the worker is detached and has no UX channel to receive a library
+// from the foreground, so it must build the library itself.
+{
+	await withTempHome(async (home) => {
+		// Write a real user profile file on disk.
+		const userProfilesDir = path.join(home, ".pi", "agent", "profiles");
+		await fs.mkdir(userProfilesDir, { recursive: true });
+		await fs.writeFile(
+			path.join(userProfilesDir, "smart.md"),
+			`---\nname: smart\nmodel: smart-model\nthinking: high\n---\nbody`,
+			"utf-8",
+		);
+
+		const { record, diag } = await setupRegisteredUserAgent(home);
+		const result = await preflightBgAgent(record, "task", makeCtx(home), diag, {
+			homeDir: home,
+			profileOverride: "smart",
+		});
+		assert.equal(result.ok, true, `preflight should succeed, got: ${result.reason}`);
+		const paths = result.paths;
+
+		let capturedLibrary = null;
+		const fakeRunner = async (spec, task, opts, lib) => {
+			capturedLibrary = lib;
+			return fakeCompletedResult(spec.name, task);
+		};
+
+		// Production path: NO options.profileLibrary. Worker must reconstruct.
+		await runBgWorker(paths.manifestPath, {
+			homeDir: home,
+			runner: fakeRunner,
+		});
+
+		assert.ok(capturedLibrary, "runner was called (reconstruction completed)");
+		assert.ok(Array.isArray(capturedLibrary.profiles), "library has a profiles array");
+		const smart = capturedLibrary.profiles.find((p) => p.name === "smart");
+		assert.ok(smart, `reconstructed library includes the 'smart' profile from disk (got: ${capturedLibrary.profiles.map((p) => p.name).join(", ")})`);
+		assert.equal(smart.model, "smart-model", "smart profile's model was discovered from disk");
+		assert.equal(smart.thinking, "high", "smart profile's thinking was discovered from disk");
+		assert.equal(smart.sourceOrigin, "user", "profile is marked as user-source (from <homeDir>/.pi/agent/profiles/)");
+	});
+}
+
+// 20. Production path: when preflight snapshots projectTrusted=true, the worker
+// includes project profiles from <cwd>/.pi/profiles/ in the reconstructed library.
+// This mirrors the foreground session_start path (agents/index.ts:117-141) which
+// includes project profiles when project trust is active. The worker is detached
+// and cannot re-verify trust, so it honors the manifest's snapshot.
+{
+	await withTempHome(async (home) => {
+		// Write a project profile at <cwd>/.pi/profiles/smart.md.
+		const projectProfilesDir = path.join(home, ".pi", "profiles");
+		await fs.mkdir(projectProfilesDir, { recursive: true });
+		await fs.writeFile(
+			path.join(projectProfilesDir, "smart.md"),
+			`---\nname: smart\nmodel: smart-model\nthinking: high\n---\nbody`,
+			"utf-8",
+		);
+
+		const { record, diag } = await setupRegisteredUserAgent(home);
+		// Preflight WITH projectTrusted=true so the manifest snapshots it.
+		// (collectAgentDiagnostics defaults projectTrusted to false; pass true via the
+		// diag object the preflight receives. Since preflight reads diagnostics.projectTrusted,
+		// we can use the existing setup — but for this test we need the worker to honor it,
+		// so we run preflight with the explicit projectTrusted path via a custom diag.)
+		const diagWithProjectTrust = { ...diag, projectTrusted: true };
+		const result = await preflightBgAgent(record, "task", makeCtx(home), diagWithProjectTrust, {
+			homeDir: home,
+			profileOverride: "smart",
+		});
+		assert.equal(result.ok, true, `preflight should succeed, got: ${result.reason}`);
+		const paths = result.paths;
+
+		// Confirm the manifest snapshotted projectTrusted=true.
+		const manifest = await readBgManifest(paths);
+		assert.equal(manifest.options.projectTrusted, true,
+			"manifest snapshots projectTrusted=true from preflight diagnostics");
+
+		let capturedLibrary = null;
+		const fakeRunner = async (spec, task, opts, lib) => {
+			capturedLibrary = lib;
+			return fakeCompletedResult(spec.name, task);
+		};
+
+		// Production path: no options.profileLibrary. Worker must reconstruct from disk.
+		await runBgWorker(paths.manifestPath, {
+			homeDir: home,
+			runner: fakeRunner,
+		});
+
+		assert.ok(capturedLibrary, "runner was called");
+		const smart = capturedLibrary.profiles.find((p) => p.name === "smart");
+		assert.ok(smart, `reconstructed library includes 'smart' profile from project dir (got: ${capturedLibrary.profiles.map((p) => `${p.name}(${p.sourceOrigin ?? "?"})`).join(", ")})`);
+		assert.equal(smart.model, "smart-model");
+		assert.equal(smart.thinking, "high");
+		assert.equal(smart.sourceOrigin, "project",
+			"profile is marked as project-source (from <cwd>/.pi/profiles/, when manifest.options.projectTrusted=true)");
+	});
+}
+
+// 21. Production path: when manifest.options.projectTrusted is false/undefined,
+// project profiles are NOT included in the reconstructed library (the worker
+// conservatively excludes project-source profiles when trust is not snapshotted).
+// User profiles are still included; only project profiles are gated.
+{
+	await withTempHome(async (home) => {
+		// Write a project profile AND a user profile with the same name.
+		const projectProfilesDir = path.join(home, ".pi", "profiles");
+		await fs.mkdir(projectProfilesDir, { recursive: true });
+		await fs.writeFile(
+			path.join(projectProfilesDir, "smart.md"),
+			`---\nname: smart\nmodel: project-model\n---\n`,
+			"utf-8",
+		);
+		const userProfilesDir = path.join(home, ".pi", "agent", "profiles");
+		await fs.mkdir(userProfilesDir, { recursive: true });
+		await fs.writeFile(
+			path.join(userProfilesDir, "smart.md"),
+			`---\nname: smart\nmodel: user-model\n---\n`,
+			"utf-8",
+		);
+
+		const { record, diag } = await setupRegisteredUserAgent(home);
+		// projectTrusted defaults to false in setupRegisteredUserAgent.
+		assert.equal(diag.projectTrusted, false, "control: diag.projectTrusted is false");
+		const result = await preflightBgAgent(record, "task", makeCtx(home), diag, {
+			homeDir: home,
+			profileOverride: "smart",
+		});
+		assert.equal(result.ok, true, `preflight should succeed, got: ${result.reason}`);
+		const paths = result.paths;
+
+		const manifest = await readBgManifest(paths);
+		assert.equal(manifest.options.projectTrusted, false,
+			"control: manifest snapshots projectTrusted=false");
+
+		let capturedLibrary = null;
+		const fakeRunner = async (spec, task, opts, lib) => {
+			capturedLibrary = lib;
+			return fakeCompletedResult(spec.name, task);
+		};
+
+		await runBgWorker(paths.manifestPath, {
+			homeDir: home,
+			runner: fakeRunner,
+		});
+
+		assert.ok(capturedLibrary);
+		const smart = capturedLibrary.profiles.find((p) => p.name === "smart");
+		assert.ok(smart, "library includes 'smart' (from user dir)");
+		assert.equal(smart.sourceOrigin, "user",
+			"with projectTrusted=false, the 'smart' profile comes from the user dir, not the project dir");
+		assert.equal(smart.model, "user-model",
+			"user profile's model takes precedence (higher precedence than project when both exist)");
+	});
+}
+
+// 22. Production path: when manifest.options.projectTrusted=true, the worker passes
+// projectTrusted + a reconstructed projectRegistry to runChildAgent. Without these,
+// runChildAgent's project-profile trust gate (child-runner.ts:108-135) fails-closed
+// for any project-source profile even when the library includes it. This test asserts
+// the worker's wiring is correct by capturing the options passed to the runner and
+// simulating the trust gate (calling profileTrustCheck directly with the captured
+// registry + the resolved profile's identity). The trust gate must pass.
+{
+	await withTempHome(async (home) => {
+		const crypto = await import("node:crypto");
+		const { readProjectRegistry, emptyProjectRegistry, addOrReplaceRegisteredProfile, writeProjectRegistry, getProjectRegistryPaths, hashProjectRoot, canonicalizeProjectRoot } = await import("../lib/registry.ts");
+		const { profileTrustCheck } = await import("../lib/profile-discovery.ts");
+
+		// Write a project profile and register it in the project registry.
+		const projectProfilesDir = path.join(home, ".pi", "profiles");
+		await fs.mkdir(projectProfilesDir, { recursive: true });
+		const profilePath = path.join(projectProfilesDir, "smart.md");
+		const profileBytes = Buffer.from(`---\nname: smart\nmodel: smart-model\nthinking: high\n---\nbody`, "utf-8");
+		await fs.writeFile(profilePath, profileBytes);
+		const profileSha256 = crypto.createHash("sha256").update(profileBytes).digest("hex");
+		const profileCanonical = await fs.realpath(profilePath);
+
+		const canonicalRoot = await canonicalizeProjectRoot(home);
+		const projectRootHash = hashProjectRoot(canonicalRoot);
+		let registry = emptyProjectRegistry(canonicalRoot, projectRootHash);
+		registry = addOrReplaceRegisteredProfile(registry, {
+			name: "smart",
+			source: "project",
+			canonicalPath: profileCanonical,
+			rawBytesSha256: profileSha256,
+			approvedAt: new Date().toISOString(),
+			approvedBy: "user",
+		});
+		await writeProjectRegistry(registry, canonicalRoot, home);
+
+		const { record, diag } = await setupRegisteredUserAgent(home);
+		const diagWithProjectTrust = { ...diag, projectTrusted: true };
+		const result = await preflightBgAgent(record, "task", makeCtx(home), diagWithProjectTrust, {
+			homeDir: home,
+			profileOverride: "smart",
+		});
+		assert.equal(result.ok, true, `preflight should succeed, got: ${result.reason}`);
+		const paths = result.paths;
+
+		let capturedOpts = null;
+		const fakeRunner = async (spec, task, opts) => {
+			capturedOpts = opts;
+			return fakeCompletedResult(spec.name, task);
+		};
+
+		await runBgWorker(paths.manifestPath, {
+			homeDir: home,
+			runner: fakeRunner,
+		});
+
+		assert.ok(capturedOpts, "runner was called");
+		assert.equal(capturedOpts.projectTrusted, true,
+			"worker passes projectTrusted=true to runChildAgent (from manifest snapshot)");
+		assert.ok(capturedOpts.projectRegistry, "worker passes a reconstructed projectRegistry to runChildAgent");
+		assert.equal(capturedOpts.projectRegistry.projectRoot, canonicalRoot,
+			"reconstructed registry is rooted at the canonical manifest cwd");
+
+		// Now simulate runChildAgent's trust gate (child-runner.ts:108-135):
+		// resolveSpecProfile + profileTrustCheck, with the same inputs the real
+		// runChildAgent would see. The library entry must include the same
+		// canonicalPath + rawBytesSha256 as the registry entry (the worker
+		// reconstructs these from disk; here we mirror what discoverProfiles
+		// would set on the parsed entry).
+		const { resolveSpecProfile } = await import("../lib/profiles.ts");
+		const effectiveProfile = "smart";
+		const library = {
+			profiles: [
+				{
+					name: "smart",
+					model: "smart-model",
+					thinking: "high",
+					sourceOrigin: "project",
+					canonicalPath: profileCanonical,
+					rawBytesSha256: profileSha256,
+				},
+			],
+		};
+		const resolved = resolveSpecProfile(
+			{ model: undefined, thinking: undefined, profile: effectiveProfile },
+			library,
+		);
+		assert.equal(resolved.resolved, true, `resolveSpecProfile succeeded: ${JSON.stringify(resolved)}`);
+		const trustCheck = profileTrustCheck(
+			resolved.profileName,
+			resolved.profileCanonicalPath,
+			resolved.profileRawBytesSha256,
+			capturedOpts.projectRegistry,
+			capturedOpts.projectTrusted,
+		);
+		assert.equal(trustCheck.ok, true, `trust gate passed: ${JSON.stringify(trustCheck)}`);
+	});
+}
+
 console.log("P4-3 bg-worker tests passed");

@@ -34,6 +34,9 @@ export type BgPreflightOptions = {
 	ownerHandle?: string;
 	/** Slot-accounting timeout written to .reserved (distinct from maxDurationSec). */
 	effectiveTimeoutSec?: number;
+	/** Profile override from the caller (gate config or `--profile <name>`). When set,
+	 *  this is the effective profile for the run; the spec's own profile is ignored. */
+	profileOverride?: string;
 };
 
 export type BgPreflightResult =
@@ -61,11 +64,15 @@ export async function preflightBgAgent(
 
 	// Profile support in background agents is deferred (REQ-PROFILE-BG).
 	// Reject at preflight rather than failing silently at spawn when
-	// the worker has no profile library.
-	if (liveSpec.profile) {
+	// the worker has no profile library. A caller-provided profileOverride
+	// (from the gate or `--profile <name>`) is the user's explicit acknowledgment
+	// that they want a profile on this bg run, so the rejection is skipped —
+	// the override is the effective profile.
+	if (liveSpec.profile && !options.profileOverride) {
 		return { ok: false, code: "bg-profile-unsupported",
 			reason: `background agents do not support profiles yet: '${liveSpec.profile}'. Remove the profile from "${liveSpec.name}" or use synchronous /agents run instead.` };
 	}
+	const effectiveProfile = options.profileOverride ?? liveSpec.profile;
 
 	// 2. Allocate a bg run state (reservation written as JSON with keyGenId).
 	const paths = await createBgRunState({
@@ -89,6 +96,10 @@ export async function preflightBgAgent(
 			cwd: ctx.cwd ?? process.cwd(),
 			homeDir: trustedHome,
 			...(options.maxDurationSec !== undefined ? { maxDurationSec: options.maxDurationSec } : {}),
+			...(effectiveProfile ? { profile: effectiveProfile } : {}),
+			// Snapshot project trust at preflight time so the worker (no UX channel)
+			// can reconstruct the library with the right scope.
+			projectTrusted: diagnostics.projectTrusted,
 		},
 		keyGenId: "", // filled below after we have the key
 	};
