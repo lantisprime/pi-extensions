@@ -27,3 +27,6 @@ node --experimental-strip-types test-fixtures/test-resolve.mjs
 echo "Running P5d-S4 cmux-control nlp tests..."
 node --experimental-strip-types test-fixtures/test-nlp.mjs
 echo "P5d-S4 cmux-control tests passed"
+echo "Running P5d-S5 cmux-control extension entry test..."
+node --experimental-strip-types test-fixtures/test-extension.mjs
+echo "P5d-S5 cmux-control tests passed"
