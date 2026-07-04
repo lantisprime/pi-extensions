@@ -215,19 +215,21 @@ Completed and merged:
 - **REQ-13 import guard** (mirroring tmux-terminal): no `agents/lib` static imports outside `lib/resolve.ts` (which uses dynamic import).
 - **Research grounding**: episodic memory episode `20260627-133046-cmux-research-for-pi-extension-design-an-6d74` (research store) + `https://cmux.com/docs/api`.
 
-### P5d cmux-control (OPENED — scaffold on `feat/cmux-control-and-p5b-cmux-terminal`)
+### P5d cmux-control (COMPLETE — all 5 slices MERGED via PRs #126, #128, #130, #131, #132)
 - New user-facing `cmux-control/` extension parallel to `tmux-control/` (P5c), but driving cmux instead of tmux.
 - **Pattern**: mirrors `tmux-control/` 1:1 with cmux-specific adaptations.
-- **5-slice ladder**:
+- **5-slice ladder (all MERGED)**:
 
-| Slice | Objective | Primary files | Tests | Parallel? |
-|---|---|---|---|---|
-| `P5d-S1` | `exec.ts` (argv-only cmux executor with hard 5s timeout), `socket.ts` (Unix socket client at `/tmp/cmux.sock` or `CMUX_SOCKET_PATH`), `identify.ts` (`cmux identify --json` wrapper + env-var fallback to `CMUX_WORKSPACE_ID`/`CMUX_SURFACE_ID`) | `cmux-control/lib/{exec, socket, identify}.ts` | 6 tests (exec errors, socket re-connect, identify parse) | top-level |
-| `P5d-S2` | `safety.ts` (ref validation: `workspace:N`, `pane:N`, `surface:N` regex; prefix gate default `pi-cmux-`), `focus-ops.ts` (**cmux-unique**: refuses `select-workspace`/`focus-pane`/`focus-panel`/`tab-action` without explicit user opt-in via `--i-mean-focus` flag or confirmation prompt) | `cmux-control/lib/{safety, focus-ops}.ts` | **MERGED (PR #128)** — 8 tests | 645173f | done |
-| `P5d-S3` | `list.ts` (`cmux list-workspaces --json`, `cmux list-panes --workspace ID`, `cmux tree --workspace ID`), `capture.ts` (`cmux read-screen --surface ID`), `send.ts` (`cmux send --surface ID "text"` + `cmux send-key --surface ID enter`), `launch.ts` (`cmux new-workspace --name X --cwd P --command "..." --focus false`, `cmux new-pane --workspace ID --type terminal --direction right --focus false`) | `cmux-control/lib/{list, capture, send, launch}.ts` | 14 tests | **NEXT** | top priority |
-| `P5d-S4` | `resolve.ts` (dynamic-import bridge to `agents/lib/bg-terminal.ts` — same pattern as `tmux-control/lib/resolve.ts`), `nlp.ts` (NL patterns: `list cmux workspaces`, `split pane right`, `send 'continue' to surface:3`), `constants.ts` | `cmux-control/lib/{resolve, nlp, constants}.ts` | 6 tests | parallel with S3 |
-| `P5d-S5` | `index.ts` — extension entry: 6 slash commands, 5 LLM tools, NLP input hook | `cmux-control/index.ts` | 1 extension-integration test | serial after S1-S4 |
+| Slice | Objective | Primary files | Tests | Status | Commit |
+|---|---|---|---|---|---|
+| `P5d-S1` | `exec.ts` (argv-only cmux executor with hard 5s timeout), `socket.ts` (Unix socket client at `/tmp/cmux.sock` or `CMUX_SOCKET_PATH`), `identify.ts` (`cmux identify --json` wrapper + env-var fallback to `CMUX_WORKSPACE_ID`/`CMUX_SURFACE_ID`) | `cmux-control/lib/{exec, socket, identify}.ts` | 6 tests (exec errors, socket re-connect, identify parse) | **MERGED (PR #126)** | `86c743d` |
+| `P5d-S2` | `safety.ts` (ref validation: `workspace:N`, `pane:N`, `surface:N` regex; prefix gate default `pi-cmux-`), `focus-ops.ts` (**cmux-unique**: refuses `select-workspace`/`focus-pane`/`focus-panel`/`tab-action` without explicit user opt-in via `--i-mean-focus` flag or confirmation prompt) | `cmux-control/lib/{safety, focus-ops}.ts` | 8 tests | **MERGED (PR #128)** | `645173f` |
+| `P5d-S3` | `list.ts` (`cmux list-workspaces --json`, `cmux list-panes --workspace ID`, `cmux tree --workspace ID`), `capture.ts` (`cmux read-screen --surface ID`), `send.ts` (`cmux send --surface ID "text"` + `cmux send-key --surface ID enter`), `launch.ts` (`cmux new-workspace --name X --cwd P --command "..." --focus false`, `cmux new-pane --workspace ID --type terminal --direction right --focus false`) | `cmux-control/lib/{list, capture, send, launch}.ts` | 14 tests | **MERGED (PR #130)** | `1d8b9e3` |
+| `P5d-S4` | `resolve.ts` (dynamic-import bridge to `agents/lib/bg-terminal.ts` — same pattern as `tmux-control/lib/resolve.ts`), `nlp.ts` (NL patterns: `list cmux workspaces`, `split pane right`, `send 'continue' to surface:3`), `constants.ts` | `cmux-control/lib/{resolve, nlp, constants}.ts` | 6 tests | **MERGED (PR #131)** | `fbafc99` |
+| `P5d-S5` | `index.ts` — extension entry: 6 slash commands, 5 LLM tools, NLP input hook | `cmux-control/index.ts` | 1 extension-integration test | **MERGED (PR #132)** | `5faa8d1` |
 
+- **Process discipline**: each slice went through codex review (R0–R4) with READY-TO-MERGE verdict before merge.
+- **Stats**: ~+1200/-15 across 11 files + 1 new dir (`cmux-control/`) across the 5 PRs.
 - **cmux-unique features** (vs tmux-control):
   1. **`focus-ops.ts` gate** — refuses focus-changing cmux verbs (`select-workspace`, `focus-pane`, `focus-panel`, `tab-action`) without explicit user opt-in. Mirrors cmux's own SKILL.md non-disruptive automation rule. Auto-defaults `--focus false` on every layout op.
   2. **Workspace/surface refs** instead of session/window. `cmux list-workspaces --workspace workspace:2` etc. Replaces tmux's `session:window_index` syntax.
@@ -247,6 +249,16 @@ Completed and merged:
   - 5 LLM-callable tools: `cmux_list_workspaces`, `cmux_tree`, `cmux_read_screen`, `cmux_send`, `cmux_send_key`, `cmux_new_workspace`, `cmux_new_pane`, `cmux_notify`
   - 1 NLP input hook (NL patterns for cmux commands)
 - **Research grounding**: episodic memory episode `20260627-133046-cmux-research-for-pi-extension-design-an-6d74` + `https://cmux.com/docs` (CLI Reference, Notifications).
+
+### P5+ orphan reaper bug fix (MERGED via PR #134)
+- User-reported regression in `agents/lib/bg-state.ts`: orphan bg runs (where `ownerHandle` + `ownerBackendName` are unset, e.g. after a crashed prior session) were never reaped until the next process restart.
+- **Fix**: post-launch patch writes `ownerHandle` + `ownerBackendName` on the reservation; reaper now uses an `isAlive(reservation)` seam; 15s status poll also calls the reaper so orphans are caught in the *currently-open* session within 15s.
+- **Commit**: `d4c1bd6` (standalone PR, cherry-picked from an in-flight branch — fix was independent of any open slice).
+- **Review cycle**: 4 codex rounds. R0–R2 NEEDS REVISION → R3 READY-TO-MERGE → R4 READY-TO-MERGE (final consensus).
+- **Process lesson**: reaper error-tolerance is a footgun — when `isAlive` throws, the reaper treats as "alive" (correct for production safety) but it also swallows `ReferenceError` from missing imports (NOT correct — that's a code bug). Caught in codex v3 review.
+- **Internal API change**: `isAlive` seam is now `(reservation: BgReservation) => boolean | Promise<boolean>`. Production callers use `buildReaperIsAlive` from `agents/index.ts`.
+- **Post-launch patch is best-effort**: an `updateBgReservationOwner` failure leaves the slot active and the reaper falls back to age-only. Not user-facing, but worth flagging if anyone is debugging a stuck slot.
+- No user-visible regression; no docs/CLI surface changes.
 
 - Not in current cut
 
