@@ -42,6 +42,7 @@ import {
 	markBgRunDone,
 	createBgRunState,
 	reapStaleBgRuns,
+	updateBgReservationOwner,
 } from "../lib/bg-state.ts";
 
 import {
@@ -59,6 +60,7 @@ import {
 	handleBgCommand,
 	__setBgStatusHomeOverride,
 	__resetBgStatusPolling,
+	updateBgStatusLine,
 } from "../index.ts";
 
 // ---------------------------------------------------------------------------
@@ -777,6 +779,104 @@ async function testBgBeforeSessionStart() {
 // Run
 // ---------------------------------------------------------------------------
 
+/** P5+ E2E orphan regression: full real launch via a fake backend that
+ *  later "loses" the window (simulating a dead tmux pane). Mirrors the
+ *  user-reported bug ("status bar keeps saying 1 agent running but no
+ *  agent is running") and proves the reaper-with-isAlive path actually
+ *  clears the slot and unblocks the status line.
+ *
+ *  bg-state lives in the REAL home (resolveTrustedHome), not the test
+ *  temp dir — same constraint as every other test-bg.mjs test that calls
+ *  handleBgCommand / preflight. We use listBgTerminalBackends + the
+ *  resolved home to find the run, and cleanupRealHomeRun in finally. */
+async function testE2EOrphanClearsStatusLine() {
+	resetAll();
+	// Sweep any prior test leaks so the count assertion is deterministic.
+	await sweepRealHomeReservations();
+	const backend = makeFakeBackend({ name: "fake-e2e", windowIdPrefix: "e2e" });
+	registerBgTerminalBackend(backend);
+	await withTempHome(async (home) => {
+		const { record, diag } = await setupRegisteredUserAgent(home);
+		const statuses = [];
+		const ctx = makeCtx(home, {
+			ui: { notify: () => {}, confirm: async () => true, setStatus: (k, t) => statuses.push({ k, t }), setWidget: () => {} },
+		});
+		let runId;
+		try {
+			// 1. Launch via the real handleBgCommand path. This exercises
+			//    preflight + backend.launch + updateBgReservationOwner.
+			await handleBgCommand(`${record.name} orphan-task`, ctx, diag);
+
+			// Find the run in the REAL home (bg-state is not home-overridable
+			// for createBgRunState).
+			const realHome = resolveTrustedHome();
+			const realRuns = await listBgRuns(realHome);
+			const realRun = realRuns.find((r) => r.runId && r.runId.startsWith("bg-"));
+			assert.ok(realRun, "handleBgCommand should have created a bg run");
+			runId = realRun.runId;
+			const realPaths = getBgRunPaths(runId, realHome);
+
+			// Sanity: the reservation has ownerHandle + ownerBackendName
+			// (proves the post-launch patch ran).
+			const reservation = JSON.parse((await fs.readFile(realPaths.reservationPath, "utf8")).trim());
+			assert.equal(reservation.ownerHandle, `e2e-${runId}`);
+			assert.equal(reservation.ownerBackendName, "fake-e2e");
+
+			// 2. status line uses the home override for count. We point it
+			//    at the real home (not the test temp dir) so it sees the
+			//    live run.
+			__setBgStatusHomeOverride(realHome);
+			statuses.length = 0;
+			await updateBgStatusLine(ctx);
+			const lastBefore = statuses[statuses.length - 1];
+			assert.equal(lastBefore?.t, "1 agent running", "status line should show the running agent");
+
+			// 3. Simulate the window dying — kill it on the backend so
+			//    subsequent isAlive() returns false.
+			const entry = (await backend.list())[0];
+			assert.ok(entry, "backend.list should still show the window before kill");
+			await backend.kill(entry.windowId);
+
+			// 4. The status line update itself runs the reaper as part of
+			//    its routine. So we only need ONE more updateBgStatusLine
+			//    call to exercise the full production path: reap -> count ->
+			//    setStatus. The buildReaperIsAlive-shaped callback is the
+			//    same one session_start and the 15s poll use.
+			statuses.length = 0;
+			await updateBgStatusLine(ctx);
+			const lastAfter = statuses[statuses.length - 1];
+			assert.equal(lastAfter?.t, undefined,
+				`status line MUST clear after the orphan is reaped; got '${lastAfter?.t}'`);
+
+			// 6. The slot is gone (done + result.json present).
+			const finalRuns = await listBgRuns(realHome);
+			const finalRun = finalRuns.find((r) => r.runId === runId);
+			assert.ok(finalRun && finalRun.done, "reaped run should be marked done");
+			const result = JSON.parse((await fs.readFile(realPaths.resultPath, "utf8")).trim());
+			assert.equal(result.status, "stopped", "reaped orphan should have status=stopped");
+		} finally {
+			__setBgStatusHomeOverride(undefined);
+			await cleanupRealHomeRun(runId);
+			resetAll();
+		}
+	});
+}
+
+/** Mark every still-reserved run in resolveTrustedHome() as done, so a
+ *  leaky test cannot pollute the next test's count assertion. Best-effort;
+ *  missing files are swallowed. */
+async function sweepRealHomeReservations() {
+	try {
+		const realHome = resolveTrustedHome();
+		const runs = await listBgRuns(realHome);
+		for (const r of runs) {
+			if (r.reserved && !r.done) {
+				await cleanupRealHomeRun(r.runId);
+			}
+		}
+	} catch { /* best-effort */ }
+}
+
 async function main() {
 	console.log("P4-7 bg integration tests");
 	await test("preflight->launch: backend gets correct config, task not in argv", testPreflightToLaunchContract);
@@ -800,6 +900,7 @@ async function main() {
 	await test("bg-command: reports no backend installed when registry is empty", testBgCommandReportsNoneAvailable);
 	await test("bg-command: lists probed backends when all are unavailable", testBgCommandListsProbedBackendsWhenAllUnavailable);
 	await test("bg-command: pre-session_start shows no-backend message", testBgBeforeSessionStart);
+	await test("P5+: E2E orphan clears status line", testE2EOrphanClearsStatusLine);
 	console.log("P4-7 bg integration tests passed");
 }
 
