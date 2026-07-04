@@ -11,17 +11,18 @@ the source of truth; older entries in the chain are `superseded`.
 
 ## Current state
 
-**P5E1 backend selector COMPLETE** (PR #137, commit `8e41670`). **P5d cmux-control COMPLETE** (PRs #126, #128, #130, #131, #132) + **P5+ orphan reaper** bug fix merged (#134). **P5d + P5E1 closed; no next slice decided.**
+**P5b-2 zellij-terminal backend COMPLETE** (PR #139, commit `3c6e6b8`). **P5E1 backend selector COMPLETE** (PR #137, `8e41670`). **P5d cmux-control COMPLETE** (PRs #126, #128, #130, #131, #132) + **P5+ orphan reaper** bug fix merged (#134). **P5d + P5E1 + P5b-2 closed; no next slice decided.**
 
-- Chain head: `20260704-083722-post-merge-sync-p5e1-backend-selector-co-64a1`
+- Chain head: `20260704-104711-post-merge-sync-p5b-2-zellij-terminal-ba-edce`
 - Status: active
-- Revises: `20260704-054011-post-merge-sync-p5d-cmux-control-complet-7ea6`
-- Tags include: `canonical-workplan`, `workplan`, `p5e1`, `p5e1-complete`, `backend-selector`, `post-merge-sync`, `roadmap`, `p5b-next`
-- Summary: **Post-merge sync — P5E1 backend selector COMPLETE (#137).** P5d + P5E1 closed; next natural: P5b alternative backends.
+- Revises: `20260704-083722-post-merge-sync-p5e1-backend-selector-co-64a1`
+- Tags include: `canonical-workplan`, `workplan`, `p5b`, `p5b-2`, `p5b-2-complete`, `zellij`, `zellij-terminal`, `terminal-backend`, `post-merge-sync`, `roadmap`, `p5b-3-next`
+- Summary: **Post-merge sync — P5b-2 zellij-terminal backend COMPLETE (#139).** P5d + P5E1 + P5b-2 closed; next natural: wezterm/headless backends or NL→`/agents bg` intent-gate.
 
 ### Open follow-ups (none decided; details in canonical episode)
-- **P5b alternative terminal backends** — zellij/wezterm/headless. Next natural; now cleanly testable from the CLI via the `--backend <name>` seam P5E1 shipped.
-- **NL → `/agents bg` intent-gate workflow** — needs `background` workflow kind in `intent-gate.ts`. Can now emit `--backend <name>` once an NLP mapping is added.
+- **P5b-3 wezterm-terminal** / **P5b-4 headless** — same pattern as zellij; the spike/plan/implement/review workflow is now proven for a third backend. Wezterm is the next analog (GUI terminal with a CLI).
+- **`zellij-control` extension** — feasible (the spike confirmed `action send-keys`/`dump-screen` cover the tmux-control surface); separate slice.
+- **NL → `/agents bg` intent-gate workflow** — needs `background` workflow kind in `intent-gate.ts`; can emit `--backend <name>`.
 - **P4R-PROJ Project Background Agents** — deferred (needs disk-backed trust reader).
 - **Persistent per-project default backend** — still deferred (needs trust reader); P5E1 is per-launch only.
 - **P5+ orphan reaper follow-ups**:
