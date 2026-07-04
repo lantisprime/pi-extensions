@@ -20,6 +20,7 @@ async function main() {
 	await test("testParseNoFlag", async () => {
 		assert.deepStrictEqual(parseBgArgs("scout do"), {
 			backendFlagMissingValue: false,
+			profileFlagMissingValue: false,
 			restArgs: "scout do",
 		});
 	});
@@ -28,6 +29,7 @@ async function main() {
 		assert.deepStrictEqual(parseBgArgs("--backend cmux scout do"), {
 			backendName: "cmux",
 			backendFlagMissingValue: false,
+			profileFlagMissingValue: false,
 			restArgs: "scout do",
 		});
 	});
@@ -36,6 +38,7 @@ async function main() {
 		assert.deepStrictEqual(parseBgArgs("--backend"), {
 			backendName: "",
 			backendFlagMissingValue: true,
+			profileFlagMissingValue: false,
 			restArgs: "",
 		});
 	});
@@ -43,6 +46,7 @@ async function main() {
 	await test("testParseEqualsFormNotConsumed", async () => {
 		assert.deepStrictEqual(parseBgArgs("--backend=cmux scout"), {
 			backendFlagMissingValue: false,
+			profileFlagMissingValue: false,
 			restArgs: "--backend=cmux scout",
 		});
 	});
@@ -51,6 +55,7 @@ async function main() {
 		assert.deepStrictEqual(parseBgArgs("--backend tmux scout --backend cmux thing"), {
 			backendName: "tmux",
 			backendFlagMissingValue: false,
+			profileFlagMissingValue: false,
 			restArgs: "scout --backend cmux thing",
 		});
 	});
@@ -58,11 +63,41 @@ async function main() {
 	await test("testParseNoFlagPreservesRawArgs", async () => {
 		assert.deepStrictEqual(parseBgArgs("  scout do  "), {
 			backendFlagMissingValue: false,
+			profileFlagMissingValue: false,
 			restArgs: "  scout do  ",
 		});
 		assert.deepStrictEqual(parseBgArgs("   "), {
 			backendFlagMissingValue: false,
+			profileFlagMissingValue: false,
 			restArgs: "   ",
+		});
+	});
+
+	await test("testParseProfileFlagWithValue", async () => {
+		assert.deepStrictEqual(parseBgArgs("--profile smart planner do thing"), {
+			backendFlagMissingValue: false,
+			profileName: "smart",
+			profileFlagMissingValue: false,
+			restArgs: "planner do thing",
+		});
+	});
+
+	await test("testParseProfileFlagNoValue", async () => {
+		assert.deepStrictEqual(parseBgArgs("--profile"), {
+			backendFlagMissingValue: false,
+			profileName: "",
+			profileFlagMissingValue: true,
+			restArgs: "",
+		});
+	});
+
+	await test("testParseProfileFlagMidStringNotConsumed", async () => {
+		// Profile is positional (first token only), like --backend. Mid-string --profile
+		// flows into restArgs as task text, mirroring testParseEqualsFormNotConsumed.
+		assert.deepStrictEqual(parseBgArgs("scout do --profile smart"), {
+			backendFlagMissingValue: false,
+			profileFlagMissingValue: false,
+			restArgs: "scout do --profile smart",
 		});
 	});
 

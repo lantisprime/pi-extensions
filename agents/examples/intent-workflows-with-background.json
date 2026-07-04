@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "intents": [
+    {
+      "id": "code-review",
+      "match": {
+        "phrases": ["code review", "review this", "review the code"]
+      },
+      "workflow": {
+        "kind": "review",
+        "profile": "code-review"
+      }
+    },
+    {
+      "id": "security-review",
+      "match": {
+        "phrases": ["security review", "adversarial review", "threat review"]
+      },
+      "workflow": {
+        "kind": "review", 
+        "profile": "security-review"
+      }
+    },
+    {
+      "id": "plan-only",
+      "match": {
+        "phrases": ["create a plan", "make a plan", "just plan this"]
+      },
+      "workflow": {
+        "kind": "plan-only"
+      }
+    },
+    {
+      "id": "implementation",
+      "match": {
+        "phrases": ["implement this", "build this feature", "code this up"]
+      },
+      "workflow": {
+        "kind": "implementation"
+      }
+    },
+    {
+      "id": "scout-background",
+      "match": {
+        "phrases": ["scout this in background", "background scout", "scout in bg"]
+      },
+      "workflow": {
+        "kind": "background",
+        "agent": "scout",
+        "profile": "fast-local"
+      }
+    },
+    {
+      "id": "planner-background", 
+      "match": {
+        "phrases": ["plan this in background", "background planning"]
+      },
+      "workflow": {
+        "kind": "background",
+        "agent": "planner",
+        "profile": "smart"
+      }
+    },
+    {
+      "id": "reviewer-background",
+      "match": {
+        "phrases": ["review in background", "background review"]
+      },
+      "workflow": {
+        "kind": "background",
+        "agent": "reviewer",
+        "profile": "code-review"
+      }
+    },
+    {
+      "id": "default-background",
+      "match": {
+        "phrases": ["run in background", "background this"]
+      },
+      "workflow": {
+        "kind": "background"
+      }
+    }
+  ]
+}

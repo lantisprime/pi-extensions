@@ -45,6 +45,14 @@ export type BgRunManifest = {
 		maxDurationSec?: number;
 		cwd: string;
 		homeDir: string;
+		/** Effective profile for the run (gate override or agent spec). Read by the worker
+		 *  if/when profile support lands in the bg path (REQ-PROFILE-BG). */
+		profile?: string;
+		/** P5-NL-bg: project trust at preflight time. The worker is detached and has
+		 *  no UX channel to re-verify project trust, so it honors this snapshot when
+		 *  reconstructing the profile library. Conservative: only project profiles
+		 *  are included when this is `true`. */
+		projectTrusted?: boolean;
 	};
 	mac: string;
 	keyGenId: string;
@@ -420,7 +428,7 @@ export async function writeBgManifest(paths: BgRunPaths, manifest: BgRunManifest
 }
 
 const ALLOWED_MANIFEST_KEYS = new Set(["version", "runId", "identity", "task", "options", "mac", "keyGenId"]);
-const ALLOWED_OPTIONS_KEYS = new Set(["cwd", "homeDir", "maxDurationSec"]);
+const ALLOWED_OPTIONS_KEYS = new Set(["cwd", "homeDir", "maxDurationSec", "profile", "projectTrusted"]);
 const IDENTITY_KEYS = new Set(["agentName", "canonicalPath", "expectedHash"]);
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const HEX8_RE = /^[0-9a-f]{8}$/;

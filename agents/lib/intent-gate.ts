@@ -17,13 +17,15 @@ export type IntentGateEntry = {
 	workflow:
 		| { kind: "review"; profile?: string }
 		| { kind: "plan-only" }
-		| { kind: "implementation" };
+		| { kind: "implementation" }
+		| { kind: "background"; agent?: string; profile?: string };
 };
 
 export type GateDecision =
 	| { kind: "route"; agent: "reviewer"; task: string; profile?: string; metadata: GateMetadata }
 	| { kind: "inject"; instruction: GateInstruction }
 	| { kind: "confirm"; agent: string; task: string; metadata: GateMetadata }
+	| { kind: "bg-launch"; agent: string; task: string; profile?: string; metadata: GateMetadata }
 	| { kind: "pass-through" };
 
 export type GateMetadata = {
@@ -107,7 +109,7 @@ export async function loadGateConfig(configPath: string, trusted: boolean): Prom
 		if ("model" in (workflow as object) || "thinking" in (workflow as object)) return { ok: false, reason: "inline-model" };
 
 		const kind = workflow.kind;
-		if (kind !== "review" && kind !== "plan-only" && kind !== "implementation") {
+		if (kind !== "review" && kind !== "plan-only" && kind !== "implementation" && kind !== "background") {
 			return { ok: false, reason: "unknown-kind" };
 		}
 
@@ -119,6 +121,15 @@ export async function loadGateConfig(configPath: string, trusted: boolean): Prom
 
 		if (kind === "review" && typeof workflow.profile === "string") {
 			(gateEntry.workflow as { kind: "review"; profile?: string }).profile = workflow.profile;
+		}
+
+		if (kind === "background") {
+			if (typeof workflow.agent === "string") {
+				(gateEntry.workflow as { kind: "background"; agent?: string; profile?: string }).agent = workflow.agent;
+			}
+			if (typeof workflow.profile === "string") {
+				(gateEntry.workflow as { kind: "background"; agent?: string; profile?: string }).profile = workflow.profile;
+			}
 		}
 
 		entries.push(gateEntry);
@@ -241,5 +252,13 @@ export function classifyGateIntent(prompt: string, config: IntentGateConfig): Ga
 			return { kind: "inject", instruction: "PLAN_ONLY" };
 		case "implementation":
 			return { kind: "confirm", agent: "planner", task: text, metadata };
+		case "background":
+			return {
+				kind: "bg-launch",
+				agent: (entry.workflow as { kind: "background"; agent?: string; profile?: string }).agent || "scout",
+				task: text,
+				profile: (entry.workflow as { kind: "background"; agent?: string; profile?: string }).profile,
+				metadata,
+			};
 	}
 }

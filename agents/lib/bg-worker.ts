@@ -26,8 +26,10 @@ import {
 } from "./bg-state.ts";
 import { canRunAgent } from "./can-run-agent.ts";
 import { parseAgentMarkdownFile } from "./agent-markdown.ts";
-import { readUserRegistry } from "./registry.ts";
+import { readProjectRegistry, readUserRegistry, type ProjectAgentRegistry } from "./registry.ts";
 import { describeChildFailure, runChildAgent, STDERR_DIAGNOSTIC_CAP, type ChildAgentRunResult, type RunChildAgentOptions } from "./child-runner.ts";
+import { buildProfileLibrary, type ModelProfile, type ModelProfileLibrary } from "./profiles.ts";
+import { discoverProfiles, rejectDuplicateProfileNames } from "./profile-discovery.ts";
 import type { AgentSpec } from "./specs.ts";
 
 const TOOL_CONTEXT_LOADER_PATH_ENV = "PI_AGENTS_TOOL_CONTEXT_LOADER_PATH";
@@ -39,9 +41,53 @@ export type BgWorkerOptions = {
 	 *  Only use in unit tests with a temp home. */
 	homeDir?: string;
 	/** Test-only seam: override the child agent runner. Do not set in production.
-	 *  The terminal backend never passes this — it's for unit tests only. */
-	runner?: (spec: AgentSpec, task: string, options?: RunChildAgentOptions) => Promise<ChildAgentRunResult>;
+	 *  The terminal backend never passes this — it's for unit tests only.
+	 *  Production workers use runChildAgent (the default), which receives the
+	 *  profileLibrary and manifest.options.profile as positional args. */
+	runner?: (spec: AgentSpec, task: string, options?: RunChildAgentOptions, profileLibrary?: ModelProfileLibrary) => Promise<ChildAgentRunResult>;
+	/** Test-only seam: provide a profile library directly. When set, skips the
+	 *  production path of building the library from disk. Production workers
+	 *  reconstruct the library themselves via buildBgWorkerProfileLibrary; this
+	 *  seam exists so tests can avoid writing profile files to the temp home. */
+	profileLibrary?: ModelProfileLibrary;
 };
+
+/** Build the profile library the bg worker uses to resolve manifest.options.profile.
+ *  Mirrors the foreground session_start path at agents/index.ts:117-141: discover user
+ *  profiles from <homeDir>/.pi/agent/profiles/, optionally include project profiles from
+ *  <cwd>/.pi/profiles/ when projectTrusted is true. Project trust is snapshotted at
+ *  preflight time (manifest.options.projectTrusted) because the worker is detached and
+ *  has no UX channel to re-verify trust.
+ *
+ *  Returns a built-in-only library on any discovery error (matches the foreground
+ *  try/catch fallback). The library is keyed by name; the resolver in runChildAgent
+ *  consults it for any profile named in the manifest. */
+export async function buildBgWorkerProfileLibrary(
+	homeDir: string,
+	cwd: string,
+	projectTrusted: boolean,
+): Promise<ModelProfileLibrary> {
+	try {
+		const userProfilesDir = path.join(homeDir, ".pi", "agent", "profiles");
+		const userParsed = await discoverProfiles(userProfilesDir, "user");
+		const dedupedUser = rejectDuplicateProfileNames(userParsed);
+		const userProfiles = dedupedUser.filter((p) => p.profile).map((p) => p.profile!);
+		let projectProfiles: ModelProfile[] = [];
+		if (projectTrusted) {
+			const projectProfilesDir = path.join(cwd, ".pi", "profiles");
+			const projectParsed = await discoverProfiles(projectProfilesDir, "project");
+			const dedupedProject = rejectDuplicateProfileNames(projectParsed);
+			projectProfiles = dedupedProject.filter((p) => p.profile).map((p) => p.profile!);
+		}
+		const result = buildProfileLibrary({ userProfiles, projectProfiles, projectTrusted });
+		return result.library;
+	} catch {
+		// Discovery failed (e.g., profile parse error, disk error): fall back to
+		// the built-in-only library so the run can still proceed (and fail-closed
+		// in runChildAgent if a non-built-in profile was requested).
+		return buildProfileLibrary({ userProfiles: [], projectProfiles: [], projectTrusted: false }).library;
+	}
+}
 
 /** P4-3: Entry point for the terminal-launched worker process.
  *  @param manifestPath - path to the signed manifest.json written by P4-2 preflight.
@@ -50,7 +96,7 @@ export type BgWorkerOptions = {
  *  @param options - internal options including a test-only runner seam. */
 export async function runBgWorker(manifestPath: string, options: BgWorkerOptions = {}): Promise<void> {
 	const trustedHome = options.homeDir ?? resolveTrustedHome();
-	const childRunner = options.runner ?? (runChildAgent as (spec: AgentSpec, task: string, options?: RunChildAgentOptions) => Promise<ChildAgentRunResult>);
+	const childRunner = options.runner ?? (runChildAgent as unknown as (spec: AgentSpec, task: string, options?: RunChildAgentOptions, profileLibrary?: ModelProfileLibrary) => Promise<ChildAgentRunResult>);
 	const runDir = path.dirname(manifestPath);
 	const runId = path.basename(runDir);
 	const paths = getBgRunPaths(runId, trustedHome);
@@ -148,6 +194,23 @@ export async function runBgWorker(manifestPath: string, options: BgWorkerOptions
 		// P4-3-fix: AbortController wired so SIGTERM kills the child promptly.
 		abortController = new AbortController();
 		const spec = parsed.spec!; // safe: canRunAgent denies with missing-spec before this point
+		// Resolve the profile library: use the test-seam override if provided;
+		// otherwise reconstruct from the trusted home directory (user profiles +
+		// built-ins + project profiles if preflight snapshotted projectTrusted=true).
+		// The worker is detached and cannot re-verify project trust, so it honors
+		// the manifest's snapshot of preflight-time project trust.
+		const resolvedLibrary = options.profileLibrary ?? await buildBgWorkerProfileLibrary(
+			trustedHome,
+			manifest.options.cwd,
+			manifest.options.projectTrusted === true,
+		);
+		// Reconstruct the project registry from the trusted home (same source the
+		// foreground session_start uses at agents/index.ts:184). Required for
+		// runChildAgent's project-profile trust gate (child-runner.ts:108-135);
+		// without it, every project-source profile fails with
+		// 'project trust is not active' or 'no project registry available' even
+		// when preflight snapshotted projectTrusted=true.
+		const resolvedProjectRegistry = await readProjectRegistry(manifest.options.cwd, trustedHome);
 		const result = await childRunner(spec, manifest.task, {
 			cwd: manifest.options.cwd,
 			explicitToolContextLoaderPath: process.env[TOOL_CONTEXT_LOADER_PATH_ENV],
@@ -156,8 +219,17 @@ export async function runBgWorker(manifestPath: string, options: BgWorkerOptions
 			timeoutMs: manifest.options.maxDurationSec
 				? manifest.options.maxDurationSec * 1000
 				: undefined,
+			// Thread the effective profile from the manifest (set by the gate's --profile flag
+			// or the spec's own profile). Wins over spec.profile in runChildAgent.
+			...(manifest.options.profile ? { profileOverride: manifest.options.profile } : {}),
+			// Thread project trust snapshot + reconstructed registry so runChildAgent's
+			// project-profile trust gate (child-runner.ts:108-135) can verify project-
+			// source profiles against the registry. Without these, every project-source
+			// profile fails-closed at the gate even when preflight snapshotted trust.
+			projectTrusted: manifest.options.projectTrusted === true,
+			projectRegistry: resolvedProjectRegistry,
 			signal: abortController.signal,
-		});
+		}, resolvedLibrary);
 
 		if (sigtermReceived) {
 			// SIGTERM arrived during/after child run — write stopped, not the child's result.

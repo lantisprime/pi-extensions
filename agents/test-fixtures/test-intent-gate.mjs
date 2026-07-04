@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { loadGateConfig, classifyGateIntent, GATE_INSTRUCTIONS } from "../lib/intent-gate.ts";
-import { handleGateInput, __gateDispatch } from "../index.ts";
+import { handleGateInput, __gateDispatch, __bgLaunchTestHook } from "../index.ts";
 import { dispatchChildRun } from "../lib/run-resolver.ts";
 
 // ── Helpers ──
@@ -556,6 +556,259 @@ async function testGate_regexTimeout() {
 	} finally { await fs.rm(dir, { recursive: true, force: true }).catch(() => {}); }
 }
 
+// ── Background workflow tests (3) ──
+
+async function testGate_backgroundWorkflowConfig() {
+	const config = {
+		version: 1,
+		intents: [
+			{
+				id: "scout-background",
+				match: { phrases: ["scout this in background", "background scout"] },
+				workflow: { kind: "background", agent: "scout" },
+			},
+			{
+				id: "reviewer-background",
+				match: { phrases: ["review in background"] },
+				workflow: { kind: "background", agent: "reviewer", profile: "code-review" },
+			},
+			{
+				id: "default-background",
+				match: { phrases: ["run in background"] },
+				workflow: { kind: "background" }, // no agent specified, should default to scout
+			},
+		],
+	};
+	const { dir, filePath } = await writeTempConfig(config);
+	try {
+		const result = await loadGateConfig(filePath, true);
+		assert.equal(result.ok, true);
+		if (result.ok) {
+			assert.equal(result.config.intents.length, 3);
+			assert.equal(result.config.intents[0].workflow.kind, "background");
+			assert.equal(result.config.intents[0].workflow.agent, "scout");
+			assert.equal(result.config.intents[1].workflow.agent, "reviewer");
+			assert.equal(result.config.intents[1].workflow.profile, "code-review");
+			assert.equal(result.config.intents[2].workflow.kind, "background");
+			assert.equal(result.config.intents[2].workflow.agent, undefined); // no agent specified
+		}
+	} finally { await fs.rm(dir, { recursive: true, force: true }).catch(() => {}); }
+}
+
+async function testGate_backgroundDecisionClassification() {
+	const config = {
+		version: 1,
+		intents: [
+			{
+				id: "scout-bg",
+				match: { phrases: ["scout this in background"] },
+				workflow: { kind: "background", agent: "scout", profile: "fast-local" },
+			},
+			{
+				id: "default-bg",
+				match: { phrases: ["run in background"] },
+				workflow: { kind: "background" },
+			},
+		],
+	};
+	const { dir, filePath } = await writeTempConfig(config);
+	try {
+		const result = await loadGateConfig(filePath, true);
+		assert.equal(result.ok, true);
+		if (!result.ok) return;
+
+		// Test specific agent with profile
+		const decision1 = classifyGateIntent("scout this in background", result.config);
+		assert.equal(decision1.kind, "bg-launch");
+		if (decision1.kind === "bg-launch") {
+			assert.equal(decision1.agent, "scout");
+			assert.equal(decision1.profile, "fast-local");
+			assert.equal(decision1.metadata.intentId, "scout-bg");
+			assert.equal(decision1.task, "scout this in background");
+		}
+
+		// Test default agent (scout) without profile
+		const decision2 = classifyGateIntent("run in background", result.config);
+		assert.equal(decision2.kind, "bg-launch");
+		if (decision2.kind === "bg-launch") {
+			assert.equal(decision2.agent, "scout"); // default
+			assert.equal(decision2.profile, undefined);
+			assert.equal(decision2.metadata.intentId, "default-bg");
+		}
+	} finally { await fs.rm(dir, { recursive: true, force: true }).catch(() => {}); }
+}
+
+async function testGate_backgroundRoutingConfirm() {
+	const intents = [
+		{
+			id: "planner-background",
+			match: { phrases: ["plan this in background"] },
+			workflow: { kind: "background", agent: "planner", profile: "smart" },
+		},
+	];
+
+	const _origBgLaunchHook = __bgLaunchTestHook.fn;
+	let bgLaunchCalled = false;
+	let bgLaunchArgs = "";
+	__bgLaunchTestHook.fn = async (args, ctx, diagnostics) => {
+		bgLaunchCalled = true;
+		bgLaunchArgs = args;
+	};
+
+	try {
+		await withGateConfig(intents, async (dir) => {
+			let confirmCalled = false;
+			let confirmTitle = "";
+			let confirmMessage = "";
+
+			const ctx = makeGateCtx({ 
+				cwd: dir, 
+				confirm: async (title, message) => {
+					confirmCalled = true;
+					confirmTitle = title;
+					confirmMessage = message;
+					return true;
+				}
+			});
+			const sessionCtx = { profileLibrary: {}, deliverResult: () => {} };
+			
+			// Test that background launch triggers confirmation and call
+			const result = await handleGateInput("plan this in background", ctx, sessionCtx);
+
+			// Verify confirmation was requested with correct text
+			assert.equal(confirmCalled, true, "should confirm background launch");
+			assert.ok(confirmTitle.includes("Launch in background planner"), `unexpected confirm title: ${confirmTitle}`);
+			assert.ok(confirmMessage.includes("planner-background"), "confirm message should include intent ID");
+
+			// Verify background hook was called with correct args (--profile threaded through)
+			assert.equal(bgLaunchCalled, true, "should call background launch hook");
+			assert.equal(bgLaunchArgs, "--profile smart planner plan this in background", "should pass --profile, agent, and task");
+
+			// Verify action was handled
+			assert.equal(result.action, "handled");
+
+			// Test confirm declined - reset state
+			bgLaunchCalled = false;
+			confirmCalled = false;
+			const ctx2 = makeGateCtx({
+				cwd: dir,
+				confirm: async () => {
+					confirmCalled = true;
+					return false; // decline
+				}
+			});
+			const result2 = await handleGateInput("plan this in background", ctx2, sessionCtx);
+			assert.equal(confirmCalled, true, "confirm called on decline path");
+			assert.equal(bgLaunchCalled, false, "no background launch when declined");
+			assert.equal(result2.action, "continue", "should continue when declined");
+
+			// Negative control: a `background` intent WITHOUT a profile does NOT inject --profile.
+			bgLaunchCalled = false;
+			bgLaunchArgs = "";
+			const noProfileIntents = [{
+				id: "scout-bg",
+				match: { phrases: ["scout this in background"] },
+				workflow: { kind: "background", agent: "scout" },
+			}];
+			await withGateConfig(noProfileIntents, async (dirNoProfile) => {
+				const ctx3 = makeGateCtx({ cwd: dirNoProfile, confirm: async () => true });
+				await handleGateInput("scout this in background", ctx3, sessionCtx);
+				assert.equal(bgLaunchCalled, true, "bg-launch hook called for no-profile intent");
+				assert.equal(bgLaunchArgs, "scout scout this in background",
+					"NO --profile in bgArgs when workflow.profile is absent (proves the ternary)");
+			});
+		});
+	} finally {
+		__bgLaunchTestHook.fn = _origBgLaunchHook;
+	}
+}
+
+// REQ-7a: bg-launch inherits the session-built profileLibrary via the same
+// re-attach block as the route/confirm path. The "input" event hands handleGateInput
+// a fresh ctx without the session library; without the re-attach, a configured
+// `workflow.profile` (any source) would fail to resolve with "no profile library
+// available" downstream.
+async function testGate_bgLaunchInputHookReattachesProfileLibrary() {
+	const intents = [{ id: "scout-bg", match: { phrases: ["scout in bg"] }, workflow: { kind: "background", agent: "scout", profile: "code-review" } }];
+	const sessionLib = { profiles: [{ name: "code-review", model: "m" }] };
+	const _origBgLaunchHook = __bgLaunchTestHook.fn;
+	let capturedCtx = null;
+	__bgLaunchTestHook.fn = async (args, ctx) => { capturedCtx = ctx; };
+
+	const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-test-gate-bg-home-"));
+	try {
+		await withGateConfig(intents, async (dir) => {
+			// Fresh input-event ctx (no profileLibrary); session ctx carries the built library.
+			const ctx = makeGateCtx({ cwd: dir, agentsHomeDir: homeDir });
+			const sessionCtx = { profileLibrary: sessionLib, profileLibraryWarnings: [] };
+			await handleGateInput("scout in bg", ctx, sessionCtx);
+			assert.ok(capturedCtx, "bg-launch hook called");
+			assert.equal(capturedCtx.profileLibrary, sessionLib, "session profile library re-attached onto the input ctx (bg path)");
+
+			// Negative control: without a session ctx the library stays absent — the exact bug condition.
+			capturedCtx = null;
+			const ctx2 = makeGateCtx({ cwd: dir, agentsHomeDir: homeDir });
+			await handleGateInput("scout in bg", ctx2);
+			assert.ok(capturedCtx, "bg-launch hook called (no sessionCtx)");
+			assert.equal(capturedCtx.profileLibrary, undefined, "without sessionCtx the library is absent on the bg ctx (repros the spawn-error)");
+		});
+	} finally {
+		__bgLaunchTestHook.fn = _origBgLaunchHook;
+		await fs.rm(homeDir, { recursive: true, force: true }).catch(() => {});
+	}
+}
+
+// REQ-7b: bg-launch inherits the session-wired deliverResult. The "input" event
+// hands handleGateInput a fresh ctx without deliverResult, so a gate-routed bg
+// run completing would surface the operator toast but the model's findings would
+// never reach the conversation. Re-attach from the session ctx (wired at
+// session_start) — mirrors the profileLibrary re-attach.
+async function testGate_bgLaunchInputHookReattachesDeliverResult() {
+	const intents = [{ id: "scout-bg", match: { phrases: ["scout in bg"] }, workflow: { kind: "background", agent: "scout" } }];
+	const _origBgLaunchHook = __bgLaunchTestHook.fn;
+	let capturedCtx = null;
+	__bgLaunchTestHook.fn = async (args, ctx) => { capturedCtx = ctx; };
+
+	await withGateConfig(intents, async (dir) => {
+		// Fresh input-event ctx (no deliverResult); session ctx carries the wired deliver fn.
+		const deliver = () => {};
+		const ctx = makeGateCtx({ cwd: dir });
+		const sessionCtx = { deliverResult: deliver };
+		await handleGateInput("scout in bg", ctx, sessionCtx);
+		assert.ok(capturedCtx, "bg-launch hook called");
+		assert.equal(typeof capturedCtx.deliverResult, "function", "deliverResult re-attached onto the input ctx (bg path)");
+		assert.equal(capturedCtx.deliverResult, deliver, "re-attached the session's deliver fn (findings reach pi)");
+
+		// Negative control: no session ctx → no deliverResult on the bg ctx.
+		capturedCtx = null;
+		const ctx2 = makeGateCtx({ cwd: dir });
+		await handleGateInput("scout in bg", ctx2);
+		assert.ok(capturedCtx, "bg-launch hook called (no sessionCtx)");
+		assert.equal(capturedCtx.deliverResult, undefined, "without sessionCtx deliverResult is absent on the bg ctx (the bug)");
+	});
+
+	__bgLaunchTestHook.fn = _origBgLaunchHook;
+}
+
+// REQ-SEC-5: gate-routed children must disable context files. The bg-launch
+// path goes through the same dispatch block as route/confirm, so disableContextFiles
+// must be set on the ctx that reaches __bgLaunchTestHook.fn.
+async function testGate_bgLaunchChildDisablesContextFiles() {
+	const intents = [{ id: "scout-bg", match: { phrases: ["scout in bg"] }, workflow: { kind: "background", agent: "scout" } }];
+	const _origBgLaunchHook = __bgLaunchTestHook.fn;
+	let capturedCtx = null;
+	__bgLaunchTestHook.fn = async (args, ctx) => { capturedCtx = ctx; };
+
+	await withGateConfig(intents, async (dir) => {
+		const ctx = makeGateCtx({ cwd: dir });
+		await handleGateInput("scout in bg", ctx);
+		assert.ok(capturedCtx, "bg-launch hook called");
+		assert.equal(capturedCtx.disableContextFiles, true, "disableContextFiles set on ctx (bg path, REQ-SEC-5)");
+	});
+
+	__bgLaunchTestHook.fn = _origBgLaunchHook;
+}
+
 // ── Main ──
 
 async function main() {
@@ -595,7 +848,15 @@ async function main() {
 	await testGate_regexWithPhrase();
 	await testGate_regexTimeout();
 
-	console.log("OK: 27/27 tests passed");
+	// Background workflow (3) + REQ-7 / REQ-SEC-5 invariants (3)
+	await testGate_backgroundWorkflowConfig();
+	await testGate_backgroundDecisionClassification();
+	await testGate_backgroundRoutingConfirm();
+	await testGate_bgLaunchInputHookReattachesProfileLibrary();
+	await testGate_bgLaunchInputHookReattachesDeliverResult();
+	await testGate_bgLaunchChildDisablesContextFiles();
+
+	console.log("OK: 33/33 tests passed");
 }
 
 main().catch((error) => { console.error(error); process.exit(1); });
