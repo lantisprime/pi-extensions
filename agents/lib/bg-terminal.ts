@@ -148,6 +148,16 @@ export function getBgTerminalBackend(): Promise<TermBgBackend | null> {
 	return selectBgTerminalBackend().then((r) => (r.ok ? r.backend : null));
 }
 
+/** Look up a registered backend by its `name`. Returns undefined if no
+ *  backend with that name is currently registered. Does NOT probe
+ *  `isAvailable` — the caller is responsible for that, and for treating
+ *  exceptions as "unknown/alive" rather than reaping live runs. Used by
+ *  the bg-state reaper to recover the right backend from the persisted
+ *  `ownerBackendName` field across parent Pi restarts. */
+export function getBgTerminalBackendByName(name: string): TermBgBackend | undefined {
+	return registrySlot().backends.find((b) => b.name === name);
+}
+
 /** TEST-ONLY: reset the registered backends to an empty array. Never call in
  *  production — only for test fixtures that need independent registration
  *  state. */
