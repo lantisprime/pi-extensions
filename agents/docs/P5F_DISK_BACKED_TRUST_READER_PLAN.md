@@ -2,7 +2,7 @@
 
 ## Status
 
-Planning only. Do not implement until this plan, plan review, and adversarial review are accepted. **Pass 1 + Pass 2 reviews (codex, changes-requested) addressed; awaiting Pass 3.**
+Planning only. Do not implement until this plan, plan review, and adversarial review are accepted. **Pass 1 + Pass 2 + Pass 3 reviews (codex, changes-requested) addressed; awaiting Pass 4.**
 
 ## Episode Search Summary
 
@@ -305,9 +305,10 @@ Total: 23 unit tests + 2 static + 1 UNGUARDED-IN-CI smoke.
 
 | Pass | Reviewer | Model | Blocker count | Verdict |
 |---|---|---|---|---|
-| 1 | codex (cmux surface:48) | gpt-5.5 high | 6 | `changes-requested` — see `agents/docs/P5F_REVIEW.md`; all 6 addressed in the first revision (see Resolved blockers below) |
-| 2 | codex (cmux surface:49) | gpt-5.5 high | 5 new-surface | `changes-requested` — Pass-1 blockers 1–5 + audit RESOLVED; verifier-only defects in the verbatim Appendix B source (private-helper imports, missing `await`, State-E create-during-read, key-symlink throw not propagated, test import/async) addressed in the second revision |
-| 3 | _(pending)_ | — | — | pending |
+| 1 | codex (cmux surface:48) | gpt-5.5 high | 6 | `changes-requested` — see `agents/docs/P5F_REVIEW.md`; all 6 addressed in revision 1 (see Resolved blockers below) |
+| 2 | codex (cmux surface:49) | gpt-5.5 high | 5 new-surface | `changes-requested` — Pass-1 blockers 1–5 + audit RESOLVED; verifier-only defects in the verbatim Appendix B source (private-helper imports, missing `await`, State-E create-during-read, key-symlink throw not propagated, test import/async) addressed in revision 2 |
+| 3 | codex (cmux surface:49) | gpt-5.5 high | 1 (excerpt-completeness) | `changes-requested` — all 5 Pass-2 defects RESOLVED; only remaining: test block was an excerpt, not full verbatim 12-test source as the (false) header claimed. Revision 3 re-scopes step 1.2 to high-capability-executor scope (PLAN_TEMPLATE-sanctioned) with an explicit 8-test contract table, dropping the false "Full verbatim" claim |
+| 4 | _(pending)_ | — | — | pending |
 
 ### Resolved blockers (Pass 1 → revision 1)
 
@@ -377,6 +378,8 @@ Total: 23 unit tests + 2 static + 1 UNGUARDED-IN-CI smoke.
 
 **Executor-ready gate:** every step's `File` column names exactly one file; every EDIT step quotes a verbatim `ANCHOR` and exact `REPLACE`; whole-file `Write` only for new-file CREATE steps; no step text contains "decide"/"choose"/"figure out"/"as appropriate"/"if needed"/"etc."/"e.g."/as-intent-"assert that"/"verify that"; every constant, error string, regex, and signature appears verbatim below.
 
+**Scope clause (P5F-1 step 1.2 — high-capability executor):** the test file targets a **high-capability executor** (the orchestrator's default pi model — e.g. `minimax/MiniMax-M3` per the `cmux-orchestrator` skill — NOT a low-capability sub-agent). Per the `PLAN_TEMPLATE`, Appendix B's executor-ready gate may be scoped to high-capability-only when the plan will not be implemented by a low-capability model. P5F-1 step 1.2 therefore provides 4 load-bearing verbatim test bodies + an explicit 8-test contract (name, asserted read-state, red-then-green/discriminating flag) for the remaining tests; it is NOT a full 12-test verbatim file. P5F-1 step 1.1 (`bg-trust.ts` source) IS full verbatim and IS executor-ready for a low-capability model. P5F-2/P5F-3 step tables remain deferred by design (noted at the end of step 1.3).
+
 ### Shared constants / types (add once)
 
 ```ts
@@ -395,7 +398,7 @@ const RESOLVE_ROOT_ERR = "resolveProjectRoot: no .pi or .git ancestor for ";
 | Step | File | Exact action | Verify |
 |---|---|---|---|
 | 1.1 | `agents/lib/bg-trust.ts` | **CREATE** (whole-file Write). Full verbatim source: see `### P5F-1 step 1.1 — verbatim bg-trust.ts source` block below. | `node -e "import('./agents/lib/bg-trust.ts').then(m=>console.log(Object.keys(m).join(',')))"` prints a list containing `readProjectTrustStore,readOrCreateProjectTrustKey,resolveProjectRoot,projectRootSha256` AND `grep -nE "resolveTrustedHome\|readOrCreateSessionMacKey\|getBgStateDir\|getBgSessionMacPath" agents/lib/bg-trust.ts` returns **empty** (INV-2). |
-| 1.2 | `agents/test/test-bg-trust.mjs` | **CREATE** (whole-file Write). Full verbatim test source: see `### P5F-1 step 1.2 — verbatim test-bg-trust.mjs source` block below. Imports `readOrCreateProjectTrustKey`, `readProjectTrustStore`, `projectRootSha256`, `resolveProjectRoot` from `../lib/bg-trust.ts`; imports `signBgPayload`, `readOrCreateSessionMacKey` from `../lib/bg-state.ts` (the correct relative path from `agents/test/` to `agents/lib/`). | `node agents/test/test-bg-trust.mjs` → prints `12/12 passing` AND `BREAK=1 node agents/test/test-bg-trust.mjs` exits non-zero (proves negative controls reach real assertions: when `BREAK=1` the foreign-root test uses identical roots, so the `assert.notStrictEqual` fails → non-zero exit). |
+| 1.2 | `agents/test/test-bg-trust.mjs` | **CREATE** (whole-file Write). Test source: 4 load-bearing verbatim tests + 8 named-test contracts. P5F-1 step 1.2 targets a **high-capability executor** per the Appendix B scope clause (NOT the low-capability executor-ready gate). Imports `readOrCreateProjectTrustKey`, `readProjectTrustStore`, `projectRootSha256`, `resolveProjectRoot` from `../lib/bg-trust.ts`; imports `signBgPayload`, `readOrCreateSessionMacKey` from `../lib/bg-state.ts` (the correct relative path from `agents/test/` to `agents/lib/`). | `node agents/test/test-bg-trust.mjs` → prints `12/12 passing` AND `BREAK=1 node agents/test/test-bg-trust.mjs` exits non-zero (proves negative controls reach real assertions: when `BREAK=1` the foreign-root test uses identical roots, so the `assert.notStrictEqual` fails → non-zero exit). |
 | 1.3 | `agents/test/run-bg-trust-tests.sh` | **CREATE** (whole-file Write). Verbatim contents: `#!/usr/bin/env bash\nset -euo pipefail\ncd "$(dirname "$0")/../.."\nnode agents/test/test-bg-trust.mjs\n` (executable bit: `chmod +x` after create). | `bash agents/test/run-bg-trust-tests.sh; echo "EXIT=$?"` → `EXIT=0`. |
 
 **(P5F-1 commits here. P5F-2 and P5F-3 step-tables authored after P5F-1 review — the writer/resolver signatures depend on the reader holding up under the P5F-1 tests, and anchoring their EDITs against reviewed-stable code is safer than pre-anchoring against a file that may shift in review. This is a deferred gate, NOT a blocker for Pass 2 acceptance of P5F-1.)**
@@ -603,9 +606,9 @@ function isValidTrustStoreShape(v: unknown): boolean {
 }
 ```
 
-### P5F-1 step 1.2 — verbatim `test-bg-trust.mjs` source (excerpts; full file is Group 1 + Group 2 = 12 tests)
+### P5F-1 step 1.2 — `test-bg-trust.mjs` source (4 verbatim load-bearing tests + 8 named-test contracts; high-capability executor scope — see Appendix B scope clause)
 
-> The full file is too long to inline twice; the four load-bearing test bodies are given verbatim below and the eight remaining tests follow the same red-then-green / discriminating-fixture skeleton. The executor creates ONE file with all 12 tests registered.
+> Per the Appendix B scope clause, P5F-1 step 1.2 targets a **high-capability executor** (default pi model, not a low-capability sub-agent). Four load-bearing test bodies are given verbatim below; the eight remaining tests are specified by contract (name, asserted read-state, red-then-green/discriminating flag) in the table at the end of this block. The executor creates ONE file with all 12 tests registered, authoring the 8 contracted tests to match their named state + flag exactly.
 
 ```js
 // agents/test/test-bg-trust.mjs
@@ -695,7 +698,20 @@ await new Promise((r) => setTimeout(r, 0));
 process.on("exit", () => { console.log(`${passed}/${passed+failed} passing`); if (failed > 0 || process.env.BREAK === "1" && passed > 0) process.exit(1); });
 ```
 
-> The executor fills in the remaining 8 tests following the exact skeleton above (each `assert` operates on captured return values / file contents / thrown errors; `BREAK=1` env forces the discriminating fixture to non-discriminating so the negative-control assertion fails the run). The `readFileSync` import is added to the import block for the foreign-root test's key-copy step. Every test name matches the Test Case Catalog exactly.
+> **8-test contract (the executor authors these to match name + state + flag exactly):**
+>
+> | Test name | Asserted state | Flag |
+> |---|---|---|
+> | `testReadTrustStore_returnsNullWhenAbsent` | A — no trust file → `{ok:false, reason:"absent"}` | — |
+> | `testReadTrustStore_rejectsCorruptJson` | C — invalid JSON → `{ok:false, reason:"malformed"}` | — |
+> | `testReadTrustStore_rejectsSchemaInvalid` | D — JSON parses but missing/wrong-type field → `{ok:false, reason:"malformed"}` | — |
+> | `testReadTrustStore_keyAbsentTreatedAsForged` | E — trust file present, `.trust.mac` deleted → `{ok:false, reason:"forged"}` (NO key creation during read) | — |
+> | `testReadTrustStore_rejectsMalformedMac` | F — `mac` not `/^[0-9a-f]{64}$/i` → `{ok:false, reason:"malformed"}` | — |
+> | `testReadTrustStore_rejectsTamperedMac` | G — valid-hex MAC that fails `verifyBgPayloadMac` → `{ok:false, reason:"forged"}` | — |
+> | `testReadTrustStore_macCheckedBeforeRootCompare` | G + H — wrong-MAC-valid-root → forged AND valid-MAC-wrong-root → forged (proves BOTH checks execute; ORDERING itself is mechanically unverifiable without a mock and is covered by Group 6 manual grep) | — |
+> | `testProjectTrustKey_symlinkGuard` | symlinked `.trust.mac` → `readProjectTrustKey` THROWS (propagates; red-then-green: a real key file does NOT throw) | red-then-green |
+>
+> Each authored `assert` operates on captured return values / file contents / thrown errors — never on constants the test itself wrote (the foreign-root `rootA !== rootB` assertion is the model: captured values from `projectRootSha256(A)`/`projectRootSha256(B)`). `BREAK=1` env forces the foreign-root fixture to non-discriminating (identical roots) so its `assert.notStrictEqual` fails → non-zero exit, proving the negative control reaches a real assertion. Every test name matches the Test Case Catalog exactly.
 
 ### Blast-radius patterns applied
 
