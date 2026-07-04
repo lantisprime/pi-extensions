@@ -877,6 +877,383 @@ async function sweepRealHomeReservations() {
 	} catch { /* best-effort */ }
 }
 
+// === P5E1-1: --backend <name> selector on /agents bg ===
+
+/** EC2/EC6: `--backend cmux researcher multi-word-task-still-here` launches
+ *  via the named backend; success notification names cmux; task is the
+ *  full string after the agent name. */
+async function testBackendFlagLaunchesNamedBackend() {
+	resetAll();
+	await withTempHome(async (home) => {
+		const { record, diag } = await setupRegisteredUserAgent(home);
+
+		const cmux = makeFakeBackend({ name: "cmux", windowIdPrefix: "cmux" });
+		const tmux = makeFakeBackend({ name: "tmux", windowIdPrefix: "tmux" });
+		registerBgTerminalBackend(cmux);
+		registerBgTerminalBackend(tmux);
+
+		let lastNotified = "";
+		let runId;
+		const ctx = makeCtx(home, { ui: { notify: (msg) => { lastNotified = String(msg); }, confirm: async () => true, setStatus: () => {}, setWidget: () => {} } });
+
+		try {
+			await handleBgCommand(`--backend cmux ${record.name} multi-word-task-still-here`, ctx, diag);
+
+			const cmuxLog = cmux._getConfigLog();
+			assert.equal(cmuxLog.length, 1, "cmux should be launched (named selection)");
+			runId = cmuxLog[0]?.runId;
+			assert.equal(cmuxLog[0].agentName, record.name, "launch config should carry the resolved agent name");
+			assert.match(lastNotified, /via cmux/, "success notification must name the named backend (cmux)");
+		} finally {
+			await cleanupRealHomeRun(runId);
+		}
+	});
+	resetAll();
+}
+
+/** EC3: `--backend tmux` with cmux registered at higher preference still
+ *  launches via tmux — the explicit selector overrides preference. */
+async function testBackendFlagBypassesPreference() {
+	resetAll();
+	await withTempHome(async (home) => {
+		const { record, diag } = await setupRegisteredUserAgent(home);
+
+		const cmux = makeFakeBackend({ name: "cmux", windowIdPrefix: "cmux" });
+		cmux.preference = 10; // higher than tmux (default 0)
+		const tmux = makeFakeBackend({ name: "tmux", windowIdPrefix: "tmux" });
+		registerBgTerminalBackend(cmux);
+		registerBgTerminalBackend(tmux);
+
+		let lastNotified = "";
+		let runId;
+		const ctx = makeCtx(home, { ui: { notify: (msg) => { lastNotified = String(msg); }, confirm: async () => true, setStatus: () => {}, setWidget: () => {} } });
+
+		try {
+			await handleBgCommand(`--backend tmux ${record.name} bypass-task`, ctx, diag);
+
+			assert.equal(cmux._getConfigLog().length, 0, "cmux must NOT be launched (explicit --backend tmux overrides cmux preference)");
+			assert.equal(tmux._getConfigLog().length, 1, "tmux should be launched via explicit --backend");
+			runId = tmux._getConfigLog()[0]?.runId;
+			assert.match(lastNotified, /via tmux/, "success notification must name tmux when --backend tmux is used");
+		} finally {
+			await cleanupRealHomeRun(runId);
+		}
+	});
+	resetAll();
+}
+
+/** EC1: bare `--backend` (no value) emits the usage message; no launch. */
+async function testBackendFlagMissingValueErrors() {
+	resetAll();
+	const tmux = makeFakeBackend({ name: "tmux", windowIdPrefix: "tmux" });
+	registerBgTerminalBackend(tmux);
+
+	let lastNotified = "";
+	const ctx = makeCtx("/tmp", { ui: { notify: (msg) => { lastNotified = String(msg); }, confirm: async () => true, setStatus: () => {}, setWidget: () => {} } });
+	await handleBgCommand("--backend", ctx, { agents: [] });
+
+	assert.equal(lastNotified, "Usage: /agents bg <agent> <task> [--backend <name>]", "bare --backend must emit the canonical usage message");
+	assert.equal(tmux._getConfigLog().length, 0, "no backend.launch() must be called when --backend has no value");
+	resetAll();
+}
+
+/** EC4: unknown backend name lists every registered backend name. */
+async function testBackendFlagUnknownNameErrorsWithList() {
+	resetAll();
+	const tmux = makeFakeBackend({ name: "tmux", windowIdPrefix: "tmux" });
+	const cmux = makeFakeBackend({ name: "cmux", windowIdPrefix: "cmux" });
+	registerBgTerminalBackend(tmux);
+	registerBgTerminalBackend(cmux);
+
+	let lastNotified = "";
+	const ctx = makeCtx("/tmp", { ui: { notify: (msg) => { lastNotified = String(msg); }, confirm: async () => true, setStatus: () => {}, setWidget: () => {} } });
+	await handleBgCommand("--backend zellij researcher task", ctx, { agents: [] });
+
+	assert.match(lastNotified, /Unknown backend 'zellij'/, "unknown-name error must name the requested backend");
+	assert.match(lastNotified, /Registered:/, "unknown-name error must include the 'Registered:' prefix");
+	assert.match(lastNotified, /tmux/, "unknown-name error must list tmux (registered)");
+	assert.match(lastNotified, /cmux/, "unknown-name error must list cmux (registered)");
+	resetAll();
+}
+
+/** EC4: unknown backend name does NOT call any backend.launch(). */
+async function testBackendFlagUnknownNameDoesNotLaunch() {
+	resetAll();
+	const tmux = makeFakeBackend({ name: "tmux", windowIdPrefix: "tmux" });
+	const cmux = makeFakeBackend({ name: "cmux", windowIdPrefix: "cmux" });
+	registerBgTerminalBackend(tmux);
+	registerBgTerminalBackend(cmux);
+
+	const ctx = makeCtx("/tmp", { ui: { notify: () => {}, confirm: async () => true, setStatus: () => {}, setWidget: () => {} } });
+	await handleBgCommand("--backend zellij researcher task", ctx, { agents: [] });
+
+	assert.equal(tmux._getConfigLog().length, 0, "tmux must NOT launch for an unknown --backend name");
+	assert.equal(cmux._getConfigLog().length, 0, "cmux must NOT launch for an unknown --backend name");
+	resetAll();
+}
+
+/** EC5: explicit selection of an unavailable backend does NOT fall through
+ *  to a higher-preference available sibling. This is the REQ-3 negative
+ *  control: register a higher-preference available sibling and assert its
+ *  launch was NOT called. */
+async function testBackendFlagUnavailableDoesNotFallThrough() {
+	resetAll();
+	const cmux = makeFakeBackend({ name: "cmux", windowIdPrefix: "cmux" });
+	cmux.isAvailable = async () => false; // explicitly unavailable
+	const tmux = makeFakeBackend({ name: "tmux", windowIdPrefix: "tmux" });
+	tmux.preference = 100; // would normally win preference
+	registerBgTerminalBackend(cmux);
+	registerBgTerminalBackend(tmux);
+
+	const ctx = makeCtx("/tmp", { ui: { notify: () => {}, confirm: async () => true, setStatus: () => {}, setWidget: () => {} } });
+	await handleBgCommand("--backend cmux researcher task", ctx, { agents: [] });
+
+	assert.equal(tmux._getConfigLog().length, 0, "explicit --backend cmux must NOT fall through to the higher-preference available tmux");
+	assert.equal(cmux._getConfigLog().length, 0, "the unavailable cmux must NOT be launched");
+	resetAll();
+}
+
+/** EC5: unavailable backend errors with the canonical wording naming the backend. */
+async function testBackendFlagUnavailableNamesBackend() {
+	resetAll();
+	const cmux = makeFakeBackend({ name: "cmux", windowIdPrefix: "cmux" });
+	cmux.isAvailable = async () => false;
+	registerBgTerminalBackend(cmux);
+
+	let lastNotified = "";
+	const ctx = makeCtx("/tmp", { ui: { notify: (msg) => { lastNotified = String(msg); }, confirm: async () => true, setStatus: () => {}, setWidget: () => {} } });
+	await handleBgCommand("--backend cmux researcher task", ctx, { agents: [] });
+
+	assert.match(lastNotified, /Backend 'cmux' is registered but unavailable\./, "unavailable-backend error must use the canonical wording AND name cmux");
+	resetAll();
+}
+
+/** EC7: `--backend` mid-args is NOT consumed; the literal token survives
+ *  in BgRunManifest.task; launch proceeds via the preference winner. */
+async function testBackendFlagMidArgsNotConsumed() {
+	resetAll();
+	await withTempHome(async (home) => {
+		const { record, diag } = await setupRegisteredUserAgent(home);
+
+		const tmux = makeFakeBackend({ name: "tmux", windowIdPrefix: "tmux" });
+		registerBgTerminalBackend(tmux);
+
+		let lastNotified = "";
+		let runId;
+		const ctx = makeCtx(home, { ui: { notify: (msg) => { lastNotified = String(msg); }, confirm: async () => true, setStatus: () => {}, setWidget: () => {} } });
+
+		try {
+			await handleBgCommand(`${record.name} do --backend thing`, ctx, diag);
+
+			assert.equal(tmux._getConfigLog().length, 1, "the preference winner must launch when --backend is mid-args (State A)");
+			const cfg = tmux._getConfigLog()[0];
+			runId = cfg.runId;
+			assert.equal(cfg.agentName, record.name, "first token must remain the agent name");
+			// Read the manifest from disk and verify the literal --backend text survived into task.
+			const manifest = await readBgManifest(getBgRunPaths(runId));
+			assert.ok(manifest.task.includes("--backend"), "BgRunManifest.task must contain the literal '--backend' token when mid-args");
+			assert.ok(manifest.task.includes("thing"), "BgRunManifest.task must contain the trailing 'thing' token");
+			assert.match(lastNotified, /via tmux/, "mid-args launch goes through the default-selected backend");
+		} finally {
+			await cleanupRealHomeRun(runId);
+		}
+	});
+	resetAll();
+}
+
+/** REQ-12: the `--backend <name>` pair MUST NOT appear in any launch-config
+ *  field AND MUST NOT appear in BgRunManifest.task. The legitimate task
+ *  sentinel MUST appear in BgRunManifest.task intact. */
+async function testBackendFlagNotInLaunchConfigOrManifest() {
+	resetAll();
+	await withTempHome(async (home) => {
+		const { record, diag } = await setupRegisteredUserAgent(home);
+
+		// Backend name "zznoleak-probe" is a sentinel — if it appears in the
+		// launch config or in manifest.task, the leak gate has failed.
+		const probe = makeFakeBackend({ name: "zznoleak-probe", windowIdPrefix: "probe" });
+		registerBgTerminalBackend(probe);
+
+		const TASK_SENTINEL = "legit-task-sentinel-9f8";
+		let runId;
+		const ctx = makeCtx(home, { ui: { notify: () => {}, confirm: async () => true, setStatus: () => {}, setWidget: () => {} } });
+
+		try {
+			await handleBgCommand(`--backend zznoleak-probe ${record.name} ${TASK_SENTINEL}`, ctx, diag);
+
+			const logged = probe._getConfigLog();
+			assert.equal(logged.length, 1, "the named backend should be launched");
+			const cfg = logged[0];
+			runId = cfg.runId;
+
+			// No fragment of the consumed --backend <name> pair appears in
+			// any launch-config field the backend receives.
+			assert.equal(cfg.agentName, record.name, "cfg.agentName must be the resolved agent name, not --backend zznoleak-probe");
+			assert.ok(!cfg.agentName.includes("zznoleak-probe"), "cfg.agentName must NOT contain the backend name sentinel");
+			assert.ok(!cfg.agentName.includes("--backend"), "cfg.agentName must NOT contain the --backend token");
+			assert.ok(!cfg.runId.includes("zznoleak-probe"), "cfg.runId must NOT contain the backend name sentinel");
+			assert.ok(!cfg.manifestPath.includes("zznoleak-probe"), "cfg.manifestPath must NOT contain the backend name sentinel");
+			assert.ok(!cfg.cwd.includes("zznoleak-probe"), "cfg.cwd must NOT contain the backend name sentinel");
+
+			// No fragment in BgRunManifest.task, and the legit task IS present.
+			const manifest = await readBgManifest(getBgRunPaths(runId));
+			assert.ok(!manifest.task.includes("zznoleak-probe"), "BgRunManifest.task must NOT contain the backend name sentinel");
+			assert.ok(!manifest.task.includes("--backend"), "BgRunManifest.task must NOT contain the --backend token");
+			assert.equal(manifest.task, TASK_SENTINEL, "BgRunManifest.task must equal the legitimate task sentinel");
+		} finally {
+			await cleanupRealHomeRun(runId);
+		}
+	});
+	resetAll();
+}
+
+/** EC8: `--backend=cmux` first token is NOT recognized as the flag (it is
+ *  not the literal token `--backend`). State A: selectBgTerminalBackend
+ *  runs first; if a backend is available, tokenization yields agentName
+ *  `--backend=cmux`, which fails with the existing unknown-agent error. */
+async function testBackendEqualsFormPassedThrough() {
+	resetAll();
+	const tmux = makeFakeBackend({ name: "tmux", windowIdPrefix: "tmux" });
+	registerBgTerminalBackend(tmux);
+
+	let lastNotified = "";
+	const ctx = makeCtx("/tmp", { ui: { notify: (msg) => { lastNotified = String(msg); }, confirm: async () => true, setStatus: () => {}, setWidget: () => {} } });
+	await handleBgCommand("--backend=cmux researcher task", ctx, { records: [], projectTrusted: false });
+
+	// --backend=cmux is the first token, not the literal --backend, so the
+	// existing path runs: backend is selected, then agent resolution fails
+	// because no agent is named "--backend=cmux".
+	assert.equal(tmux._getConfigLog().length, 0, "tmux must NOT launch (agent resolution should fail before launch)");
+	assert.match(lastNotified, /No discovered registered user\/project agent named '--backend=cmux'/, "equals-form first token should be treated as the agent name and fail with the unknown-agent error");
+	resetAll();
+}
+
+/** EC10: a second `--backend <name>` pair after a valid first pair is NOT
+ *  consumed; it survives intact as part of the task text. */
+async function testBackendFlagDuplicateSecondPairPassesThrough() {
+	resetAll();
+	await withTempHome(async (home) => {
+		const { record, diag } = await setupRegisteredUserAgent(home);
+
+		const tmux = makeFakeBackend({ name: "tmux", windowIdPrefix: "tmux" });
+		const cmux = makeFakeBackend({ name: "cmux", windowIdPrefix: "cmux" });
+		registerBgTerminalBackend(tmux);
+		registerBgTerminalBackend(cmux);
+
+		let runId;
+		const ctx = makeCtx(home, { ui: { notify: () => {}, confirm: async () => true, setStatus: () => {}, setWidget: () => {} } });
+
+		try {
+			await handleBgCommand(`--backend tmux ${record.name} --backend cmux thing`, ctx, diag);
+
+			assert.equal(tmux._getConfigLog().length, 1, "first --backend wins; tmux must launch");
+			assert.equal(cmux._getConfigLog().length, 0, "second --backend pair must NOT trigger cmux launch");
+			const cfg = tmux._getConfigLog()[0];
+			runId = cfg.runId;
+			assert.equal(cfg.agentName, record.name, "first non-flag token after the consumed pair is the agent name");
+
+			// Second pair survives intact in BgRunManifest.task.
+			const manifest = await readBgManifest(getBgRunPaths(runId));
+			assert.ok(manifest.task.includes("--backend cmux thing"), "BgRunManifest.task must contain the second --backend pair intact");
+			assert.ok(manifest.task.includes("--backend"), "BgRunManifest.task must contain the literal --backend token");
+		} finally {
+			await cleanupRealHomeRun(runId);
+		}
+	});
+	resetAll();
+}
+
+/** EC9: `--backend CMUX` (wrong case) is treated as unknown because
+ *  TermBgBackend.name matching is exact-case (no normalize / toLowerCase). */
+async function testBackendFlagCaseSensitive() {
+	resetAll();
+	const tmux = makeFakeBackend({ name: "tmux", windowIdPrefix: "tmux" });
+	const cmux = makeFakeBackend({ name: "cmux", windowIdPrefix: "cmux" });
+	registerBgTerminalBackend(tmux);
+	registerBgTerminalBackend(cmux);
+
+	let lastNotified = "";
+	const ctx = makeCtx("/tmp", { ui: { notify: (msg) => { lastNotified = String(msg); }, confirm: async () => true, setStatus: () => {}, setWidget: () => {} } });
+	await handleBgCommand("--backend CMUX researcher task", ctx, { agents: [] });
+
+	assert.match(lastNotified, /Unknown backend 'CMUX'/, "wrong-case --backend CMUX must be treated as unknown (exact-case match)");
+	assert.match(lastNotified, /tmux/, "unknown-name error must still list tmux");
+	assert.match(lastNotified, /cmux/, "unknown-name error must still list cmux");
+	assert.equal(tmux._getConfigLog().length, 0, "tmux must NOT launch");
+	assert.equal(cmux._getConfigLog().length, 0, "cmux must NOT launch");
+	resetAll();
+}
+
+/** REQ-4/EC11: launch failure under `--backend tmux` runs the existing
+ *  cleanup path (write bg-result failed + markBgRunDone) AND the failure
+ *  notification names the attempted backend (`via tmux`). */
+async function testBackendFlagLaunchFailureCleansAndNamesBackend() {
+	resetAll();
+	await withTempHome(async (home) => {
+		const { record, diag } = await setupRegisteredUserAgent(home);
+
+		const tmux = makeFakeBackend({ name: "tmux", windowIdPrefix: "tmux", launchShouldFail: "tmux daemon died" });
+		registerBgTerminalBackend(tmux);
+
+		let lastNotified = "";
+		let runId;
+		const ctx = makeCtx(home, { ui: { notify: (msg) => { lastNotified = String(msg); }, confirm: async () => true, setStatus: () => {}, setWidget: () => {} } });
+
+		try {
+			await handleBgCommand(`--backend tmux ${record.name} doomed-task`, ctx, diag);
+
+			// Notification names the attempted backend.
+			assert.match(lastNotified, /Launch failed via tmux:/, "launch-failure notification must name the attempted backend (via tmux)");
+			assert.match(lastNotified, /tmux daemon died/, "launch-failure notification must include the original error message");
+
+			// Cleanup released the slot.
+			const active = await countActiveBgRuns(home);
+			assert.equal(active, 0, "launch-failure cleanup must release the reservation slot");
+		} finally {
+			await cleanupRealHomeRun(runId);
+		}
+	});
+	resetAll();
+}
+
+/** REQ-9: the reservation's ownerBackendName is persisted as the literal
+ *  `--backend <name>` value (NOT the preference winner), so the reaper
+ *  routes isAlive() to the same backend that launched the run. */
+async function testBackendFlagPersistsOwnerName() {
+	resetAll();
+	await withTempHome(async (home) => {
+		const { record, diag } = await setupRegisteredUserAgent(home);
+
+		const tmux = makeFakeBackend({ name: "tmux", windowIdPrefix: "tmux-persist" });
+		const cmux = makeFakeBackend({ name: "cmux", windowIdPrefix: "cmux-persist" });
+		cmux.preference = 100; // would normally win preference
+		registerBgTerminalBackend(tmux);
+		registerBgTerminalBackend(cmux);
+
+		let runId;
+		const ctx = makeCtx(home, { ui: { notify: () => {}, confirm: async () => true, setStatus: () => {}, setWidget: () => {} } });
+
+		try {
+			// Explicit --backend tmux despite cmux having higher preference.
+			await handleBgCommand(`--backend tmux ${record.name} persist-task`, ctx, diag);
+
+			const cfg = tmux._getConfigLog()[0];
+			runId = cfg.runId;
+			assert.ok(runId, "tmux must have launched and recorded a runId");
+
+			// Read the reservation from disk.
+			const paths = getBgRunPaths(runId);
+			const reservationRaw = await fs.readFile(paths.reservationPath, "utf8");
+			const reservation = JSON.parse(reservationRaw.trim());
+			assert.equal(reservation.ownerBackendName, "tmux", "ownerBackendName must equal the user's --backend value (tmux), not the preference winner (cmux)");
+			assert.equal(reservation.ownerHandle, `tmux-persist-${runId}`, "ownerHandle must equal the windowId the backend returned at launch");
+		} finally {
+			await cleanupRealHomeRun(runId);
+		}
+	});
+	resetAll();
+}
+
 async function main() {
 	console.log("P4-7 bg integration tests");
 	await test("preflight->launch: backend gets correct config, task not in argv", testPreflightToLaunchContract);
@@ -901,6 +1278,21 @@ async function main() {
 	await test("bg-command: lists probed backends when all are unavailable", testBgCommandListsProbedBackendsWhenAllUnavailable);
 	await test("bg-command: pre-session_start shows no-backend message", testBgBeforeSessionStart);
 	await test("P5+: E2E orphan clears status line", testE2EOrphanClearsStatusLine);
+	// === P5E1-1: --backend <name> selector on /agents bg ===
+	await test("P5E1: --backend cmux launches via the named backend", testBackendFlagLaunchesNamedBackend);
+	await test("P5E1: --backend tmux overrides higher-preference cmux", testBackendFlagBypassesPreference);
+	await test("P5E1: bare --backend emits usage; no launch", testBackendFlagMissingValueErrors);
+	await test("P5E1: --backend <unknown> errors listing registered backends", testBackendFlagUnknownNameErrorsWithList);
+	await test("P5E1: --backend <unknown> does NOT launch any backend", testBackendFlagUnknownNameDoesNotLaunch);
+	await test("P5E1: --backend <unavailable> does NOT fall through to sibling", testBackendFlagUnavailableDoesNotFallThrough);
+	await test("P5E1: --backend <unavailable> errors with canonical wording", testBackendFlagUnavailableNamesBackend);
+	await test("P5E1: --backend mid-args survives in manifest.task", testBackendFlagMidArgsNotConsumed);
+	await test("P5E1: --backend pair never leaks into launch config or manifest.task", testBackendFlagNotInLaunchConfigOrManifest);
+	await test("P5E1: --backend=cmux first token flows through as agent name", testBackendEqualsFormPassedThrough);
+	await test("P5E1: second --backend pair passes through as task text", testBackendFlagDuplicateSecondPairPassesThrough);
+	await test("P5E1: --backend CMUX (wrong case) is unknown", testBackendFlagCaseSensitive);
+	await test("P5E1: launch failure under --backend cleans up and names backend", testBackendFlagLaunchFailureCleansAndNamesBackend);
+	await test("P5E1: --backend value is persisted as ownerBackendName", testBackendFlagPersistsOwnerName);
 	console.log("P4-7 bg integration tests passed");
 }
 

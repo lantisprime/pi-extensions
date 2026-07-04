@@ -25,7 +25,8 @@ import { disposeBackgroundRuns } from "./lib/bg-run.ts";
 import { validateBuiltInAgentSpecs } from "./lib/specs.ts";
 import { registerSubagentTool } from "./lib/subagent-tool.ts";
 import { preflightBgAgent } from "./lib/bg-preflight.ts";
-import { getBgTerminalBackend, getBgTerminalBackendByName, selectBgTerminalBackend } from "./lib/bg-terminal.ts";
+import { getBgTerminalBackend, getBgTerminalBackendByName, listBgTerminalBackends, selectBgTerminalBackend } from "./lib/bg-terminal.ts";
+import { parseBgArgs } from "./lib/bg-args.ts";
 import { formatBuiltInProfilesList, toProfileLibrary, buildProfileLibrary, type ModelProfileLibrary, type ProfileLibraryBuildWarning } from "./lib/profiles.ts";
 import { discoverProfiles, rejectDuplicateProfileNames, DEFAULT_PROFILE_DISCOVERY_LIMITS, type ParsedProfile } from "./lib/profile-discovery.ts";
 import { addOrReplaceRegisteredProfile, findMatchingRegisteredProfile, type RegisteredProfile } from "./lib/registry.ts";
@@ -663,20 +664,45 @@ export async function handleBgCommand(
 	ctx: AgentsContext,
 	diagnostics: Awaited<ReturnType<typeof collectAgentDiagnostics>>,
 ): Promise<void> {
-	const selection = await selectBgTerminalBackend();
-	if (!selection.ok) {
-		if (selection.reason === "none-registered") {
-			ctx.ui.notify("No terminal backend installed. Load tmux-terminal or equivalent to use background agents.", "warning");
-		} else {
-			const probed = selection.probed.map((p) => p.name).join(", ");
-			ctx.ui.notify(`Terminal backends registered but unavailable: ${probed}`, "error");
-		}
+	const parse = parseBgArgs(args);
+	if (parse.backendFlagMissingValue) {
+		ctx.ui.notify("Usage: /agents bg <agent> <task> [--backend <name>]", "warning");
 		return;
 	}
-	const backend = selection.backend;
+	let backend;
+	if (parse.backendName !== undefined) {
+		const named = getBgTerminalBackendByName(parse.backendName);
+		if (!named) {
+			const names = listBgTerminalBackends().map((b) => b.name).join(", ");
+			ctx.ui.notify(`Unknown backend '${parse.backendName}'. Registered: ${names}`, "error");
+			return;
+		}
+		try {
+			if (typeof named.isAvailable === "function" && !(await named.isAvailable())) {
+				ctx.ui.notify(`Backend '${named.name}' is registered but unavailable.`, "error");
+				return;
+			}
+		} catch (err) {
+			ctx.ui.notify(`Backend '${named.name}' is registered but unavailable.`, "error");
+			return;
+		}
+		backend = named;
+	} else {
+		const selection = await selectBgTerminalBackend();
+		if (!selection.ok) {
+			if (selection.reason === "none-registered") {
+				ctx.ui.notify("No terminal backend installed. Load tmux-terminal or equivalent to use background agents.", "warning");
+			} else {
+				const probed = selection.probed.map((p) => p.name).join(", ");
+				ctx.ui.notify(`Terminal backends registered but unavailable: ${probed}`, "error");
+			}
+			return;
+		}
+		backend = selection.backend;
+	}
 	// Parse <agent> <task> (split on first whitespace; agent name
 	// is the first token, everything after is the task).
-	const tokens = args.split(/\s+/);
+	const tokens = parse.restArgs.split(/\s+/);
 	if (tokens.length < 2) {
 		ctx.ui.notify("Usage: /agents bg <agent> <task>", "warning");
 		return;
@@ -719,7 +745,7 @@ export async function handleBgCommand(
 			await writeBgResult(result.paths, { version: 1, runId: result.runId, status: "failed", error: launchResult.error ?? "unknown launch error" });
 			await markBgRunDone(result.paths);
 		} catch { /* best-effort; the reaper will catch it on next session */ }
-		ctx.ui.notify(`Launch failed: ${launchResult.error ?? "unknown error"}`, "error");
+		ctx.ui.notify(`Launch failed via ${backend.name}: ${launchResult.error ?? "unknown error"}`, "error");
 		await updateBgStatusLine(ctx);
 		return;
 	}
