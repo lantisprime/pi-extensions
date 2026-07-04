@@ -243,6 +243,21 @@ Completed and merged:
   - workspace/surface ref validation (regex-checked `workspace:N`, `pane:N`, `surface:N`)
   - bounded inputs (4 KB text, 5000-line read-screen)
 - **Dependency model**: same as tmux-control — `typebox` provided by pi's `jiti` + `virtualModules` at runtime; test runner auto-installs on first run.
+
+### P5E1 backend selector (COMPLETE — single slice MERGED via PR #137, commit `8e41670`)
+- First user-facing selection seam for terminal backends. Adds a positional, first-token `--backend <name>` flag to `/agents bg` so the user can explicitly select tmux vs cmux per launch, bypassing the preference-ordered automatic selector.
+- **Why**: with 2+ backends shipping (tmux-terminal + cmux-terminal), preference-based selection was no longer expressive enough. Prerequisite for cleanly testing P5b alternative backends (zellij/wezterm/headless) from the CLI.
+- **Single-slice ladder (MERGED)**:
+
+| Slice | Objective | Primary files | Tests | Status | Commit |
+|---|---|---|---|---|---|
+| `P5E1-1` | Positional `--backend <name>` selector on `/agents bg`: pure `parseBgArgs` (State A returns untrimmed `rawArgs` for byte-identical no-flag back-compat); 4 anchored edits to `handleBgCommand` (import, selection block with named-branch + else-fallback, `Launch failed via ${backend.name}` notification, `parse.restArgs.split`); `agents/lib/bg-terminal.ts` UNCHANGED (REQ-11) | `agents/lib/bg-args.ts` (NEW), `agents/index.ts` (modify), `agents/test-fixtures/test-bg-args.mjs` (NEW, 6 pure-parser tests), `agents/test-fixtures/test-bg.mjs` (APPEND 14 integration tests), `agents/test-fixtures/run-p5e1-tests.sh` (NEW), `agents/docs/P5E1_BACKEND_SELECTOR_PLAN.md` (NEW, 538 lines, executor-ready Appendix B) | 25 plan-mandated (20 new + 5 back-compat unmodified) + 17 other pre-existing = 42 ✓ | **MERGED (PR #137)** | `8e41670` |
+
+- **Contracts honored**: REQ-1..3 (named launch; unknown-name errors with registered list; named-but-unavailable errors, no fall-through), REQ-4 (notification names backend), REQ-5 (no-flag byte-identical), REQ-6/REQ-12 (`--backend` pair stripped before agent/task split; not in launch config or `BgRunManifest.task` — sentinel `zznoleak-probe`), REQ-9 (`ownerBackendName` persisted = user's `--backend <name>`), REQ-11 (`git diff --stat agents/lib/bg-terminal.ts | wc -l = 0`).
+- **Review trail (codex via cmux, gpt-5.5 high)**: Plan R1 (7 blockers) → R2 (2 new) → R3 (approve-with-nits, 0 blockers); PR review approve-with-nits, 0 blockers (2 nits fixed + amended).
+- **Design decision (load-bearing)**: positional-first, not greedy-anywhere. `/agents bg` has no quote-aware parser and no unknown-flag parser, so consuming `--backend` anywhere would strip legitimate task text and leave `--backend=cmux` / duplicate pairs silently becoming task text. Confining `--backend` to the literal first token sidesteps the whole class of ambiguity.
+- **Stats**: +1071/-12 across 6 files.
+- **Plan**: `agents/docs/P5E1_BACKEND_SELECTOR_PLAN.md` (538 lines, executor-ready Appendix B, 3-pass approved).
 - **REQ-13 import guard**: no `agents/lib` static imports outside `lib/resolve.ts`.
 - **Surface (planned v0.1)**:
   - 6 slash commands: `/cmux-list`, `/cmux-tree`, `/cmux-capture`, `/cmux-send`, `/cmux-launch`, `/cmux-split`, `/cmux-notify`, `/cmux-config`
