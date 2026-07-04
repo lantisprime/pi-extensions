@@ -2,7 +2,7 @@
 
 ## Status
 
-Planning only. Do not implement until this plan, plan review, and adversarial review are accepted. **Pass 1 + Pass 2 + Pass 3 reviews (codex, changes-requested) addressed; awaiting Pass 4.**
+Planning only. Do not implement until this plan, plan review, and adversarial review are accepted. **Pass 1 + Pass 2 + Pass 3 + Pass 4 reviews (codex, changes-requested) addressed; awaiting Pass 5.**
 
 ## Episode Search Summary
 
@@ -40,7 +40,7 @@ Both are read-by-the-launch path, so the reader must be fast, offline, and tampe
 | REQ-7 | `readOrCreateProjectTrustKey(projectDir)` mirrors `readOrCreateSessionMacKey` body verbatim (bg-state.ts:167-189): 32 random bytes at `<projectDir>/.pi/trust/.trust.mac`, 0600 (`mode: 0o600` with `flag: "wx"`), symlink-guarded via `assertNoSymlink` (throws, bg-state.ts:199). **Distinct key from the global session MAC** — never reads/writes `~/.pi/agent/bg/.session.mac` (bg-state.ts:138) and never imports `resolveTrustedHome`/`readOrCreateSessionMacKey`/`getBgStateDir`/`getBgSessionMacPath` from `bg-state.ts`. | `testProjectTrustKey_isDistinctFromSessionMac`, `testProjectTrustKey_symlinkGuard` (red-then-green: symlinked key → throws) | MUST | Per-project key = per-project authority root. Sharing the global key would let a project forge another project's trust. |
 | REQ-8 | When `--backend <name>` is omitted, the `/agents bg` path (`handleBgCommand`, index.ts:713 region) calls `resolveDefaultBackend(ctx.cwd)`; if non-null, uses that backend via `getBgTerminalBackendByName`; otherwise falls back to `selectBgTerminalBackend()` (current behavior). The explicit `--backend` branch (index.ts:695) is unchanged. | `testBgCommand_usesDefaultBackendWhenAbsent`, `testBgCommand_explicitBackendOverridesDefault_discriminating` | MUST | P5E1 explicit `--backend` always wins — this is the precedence contract. The discriminating fixture: default=`tmux`, explicit `--backend cmux`, BOTH registered/available, assert the cmux launch path is used (not the tmux default). |
 | REQ-9 | `preflightBgAgent` sets the existing `projectTrusted: boolean` manifest field (bg-state.ts:55 — confirmed `boolean`, not a snapshot struct) to `true` when `readProjectTrustStore(ctx.cwd)` returns `{ok:true, store}` (valid + root-bound), else `false`. The worker's existing boolean-snapshot logic (bg-worker.ts:202, :225) is **unchanged in shape**. Threading `projectRootSha256` + project `keyGenId` into the manifest snapshot is DEFERRED to P4R-PROJ (Non-Goal 2). | `testPreflight_recordsProjectTrustSnapshot_whenPresent` (true on valid), `testPreflight_recordsNull_whenAbsentOrForged` (false on forged/absent) | MUST | Composes with P5-NL-bg's existing `projectTrusted: boolean` field (bg-state.ts:51-55) — this feature only *sources the boolean from disk*. Forged-store case is the negative control. |
-| REQ-10 | A constant-time MAC compare is used (`verifyBgPayloadMac` already uses `timingSafeEqual`); `readProjectTrustStore` MUST NOT short-circuit on `projectRootSha256` before the MAC check — MAC verifies first (State G checked before State H), root compares after. | `testReadTrustStore_macCheckedBeforeRootCompare` — injects a mock comparator and asserts MAC-verify call precedes root-compare call | SHOULD | Automated (not `UNGUARDED-IN-CI`) — security-sensitive + easy to regress; the injected-mock ordering assertion is cheap. |
+| REQ-10 | A constant-time MAC compare is used (`verifyBgPayloadMac` already uses `timingSafeEqual`); `readProjectTrustStore` MUST verify MAC (State G) BEFORE root compare (State H) — source-order enforced in `bg-trust.ts`. | (1) `testReadTrustStore_macAndRootBothChecked` — automated: asserts a store with VALID mac + WRONG root → `{ok:false,reason:"forged"}` (State H) AND a store with WRONG mac + VALID root → `{ok:false,reason:"forged"}` (State G), proving BOTH checks execute. (2) `UNGUARDED-IN-CI` manual grep: `grep -n 'verifyBgPayloadMac\|projectRootSha256' agents/lib/bg-trust.ts` — assert the `verifyBgPayloadMac` call line number < the root-compare line number (source-order proof). | SHOULD | ORDERING (G-before-H) is mechanically unverifiable in plain ESM without a mock library, and REQ-11 forbids new runtime deps (so no mock framework). The automated test proves the weaker but honest "both checks execute" property; ORDERING itself is `UNGUARDED-IN-CI` via the named manual grep. |
 | REQ-11 | No new runtime dependencies; the trust module imports only `node:crypto`, `node:fs`, `node:path`, and the existing `bg-state.ts` primitives (`signBgPayload`, `verifyBgPayloadMac`, `keyGenIdFromKey`, `assertNoSymlink`, `readUtf8FileNoSymlink`). | `static: grep -nE "from ['\"](node:|\\./bg-state)" agents/lib/bg-trust.ts` returns ONLY those import sources (no third-party) | MUST | Mirrors the P5c-2 dependency invariant (typebox provided by pi's jiti). `UNGUARDED-IN-CI` is not acceptable here — the grep is the assertion and is fully automated. |
 
 **Priority legend:** MUST = blocker for first slice merge; SHOULD = required before feature complete (one slice may defer with named fallback); MAY = nice-to-have.
@@ -64,7 +64,7 @@ This feature **is** a security primitive (it seeds "which backend can launch ext
 | Forge a trust file to elevate a backend | High | HMAC verify with project MAC key; mismatch/malformed → `{ok:false, reason:"forged"|"malformed"}` (fail-closed to preference probe, never escalate). | `testReadTrustStore_rejectsTamperedMac`, `testReadTrustStore_rejectsMalformedMac`, `testReadTrustStore_keyAbsentTreatedAsForged` (REQ-3). |
 | Copy a trust file between projects to claim another project's authority | High | `projectRootSha256` binding (REQ-4); mismatch → `{ok:false, reason:"forged"}`. | `testReadTrustStore_rejectsForeignProjectRoot_withSharedKeySentinel` (REQ-4) — injects A's key into B so MAC passes, isolating root-binding failure. |
 | Use project key to forge another project (cross-project forgery) | High | Project MAC key is per-project, symlink-guarded, 0600, never written to the global path, never imported from `bg-state.ts`. | `testProjectTrustKey_isDistinctFromSessionMac` (REQ-7) + static grep `resolveTrustedHome|readOrCreateSessionMacKey|getBgStateDir|getBgSessionMacPath` MUST be empty in `bg-trust.ts`. |
-| Timing oracle on root comparison | Medium | MAC verified (State G) before root compare (State H); constant-time compare in `verifyBgPayloadMac`. | `testReadTrustStore_macCheckedBeforeRootCompare` (REQ-10, automated). |
+| Timing oracle on root comparison | Medium | MAC verified (State G) before root compare (State H); constant-time compare in `verifyBgPayloadMac` (`timingSafeEqual`). | `testReadTrustStore_macAndRootBothChecked` (REQ-10, automated both-checks) + `UNGUARDED-IN-CI` manual grep for source ordering. |
 | Forged file degrading loudly vs silently | Medium | REQ-3 returns the union `{ok:false,…}` (silent degrade) — escalation-by-failure is the wrong direction. | Negative-control assertions in REQ-3/REQ-5 cover "forged → falls back, never escalates". |
 | Atomic write torn half-way | Medium | `writeProjectTrustStore` uses temp + rename (0600); prior final file preserved on failure. | `testWrite_atomicTempRename`, `testWrite_atomicFailureLeavesFinalUntouched` (REQ-6). |
 
@@ -247,7 +247,7 @@ Group 1: readProjectTrustStore (10 tests)
   testReadTrustStore_rejectsMalformedMac                      (State F)
   testReadTrustStore_rejectsTamperedMac                       (State G)
   testReadTrustStore_rejectsForeignProjectRoot_withSharedKeySentinel  (State H, discriminating)
-  testReadTrustStore_macCheckedBeforeRootCompare              (REQ-10, ordering G-before-H)
+  testReadTrustStore_macAndRootBothChecked                    (REQ-10, both-checks G+H; ordering = UNGUARDED-IN-CI grep)
 
 Group 2: project MAC key (2 tests)
   testProjectTrustKey_isDistinctFromSessionMac
@@ -271,11 +271,12 @@ Group 5: /agents bg + preflight wiring (4 tests + 1 smoke)
   testPreflight_recordsNull_whenAbsentOrForged
   smoke: manual: /agents bg with a minted trust file → confirmed backend used   (UNGUARDED-IN-CI)
 
-Group 6: invariants (2 static)
+Group 6: invariants (2 static + 1 UNGUARDED-IN-CI manual)
   static: grep — no third-party imports in bg-trust.ts (REQ-11)
   static: grep — bg-trust.ts never imports resolveTrustedHome|readOrCreateSessionMacKey|getBgStateDir|getBgSessionMacPath (INV-2)
+  manual: grep — verifyBgPayloadMac call line < projectRootSha256 compare line in bg-trust.ts (REQ-10 ordering, UNGUARDED-IN-CI)
 
-Total: 23 unit tests + 2 static + 1 UNGUARDED-IN-CI smoke.
+Total: 23 unit tests + 2 static + 1 UNGUARDED-IN-CI manual grep (REQ-10) + 1 UNGUARDED-IN-CI smoke.
 ```
 
 ## Risk Analysis
@@ -297,7 +298,7 @@ Total: 23 unit tests + 2 static + 1 UNGUARDED-IN-CI smoke.
 ## Done Criteria
 
 - [ ] All MUST requirements (REQ-1–9, REQ-11) passing = done for P5F-1+P5F-2+P5F-3.
-- [ ] REQ-10 (SHOULD) automated ordering test passing.
+- [ ] REQ-10 (SHOULD) `testReadTrustStore_macAndRootBothChecked` passing (both-checks) + ordering `UNGUARDED-IN-CI` manual grep verified.
 - [ ] Existing P4R / P5 / P5E1 / P5-NL-bg suite still green (the new reader is additive; the only production edits are index.ts L713 preference-probe insertion site and bg-preflight.ts snapshot source).
 - [ ] `grep -n "resolveTrustedHome\|readOrCreateSessionMacKey\|getBgStateDir\|getBgSessionMacPath" agents/lib/bg-trust.ts` returns **nothing** (INV-2: project reader never touches the global substrate).
 
@@ -308,7 +309,8 @@ Total: 23 unit tests + 2 static + 1 UNGUARDED-IN-CI smoke.
 | 1 | codex (cmux surface:48) | gpt-5.5 high | 6 | `changes-requested` — see `agents/docs/P5F_REVIEW.md`; all 6 addressed in revision 1 (see Resolved blockers below) |
 | 2 | codex (cmux surface:49) | gpt-5.5 high | 5 new-surface | `changes-requested` — Pass-1 blockers 1–5 + audit RESOLVED; verifier-only defects in the verbatim Appendix B source (private-helper imports, missing `await`, State-E create-during-read, key-symlink throw not propagated, test import/async) addressed in revision 2 |
 | 3 | codex (cmux surface:49) | gpt-5.5 high | 1 (excerpt-completeness) | `changes-requested` — all 5 Pass-2 defects RESOLVED; only remaining: test block was an excerpt, not full verbatim 12-test source as the (false) header claimed. Revision 3 re-scopes step 1.2 to high-capability-executor scope (PLAN_TEMPLATE-sanctioned) with an explicit 8-test contract table, dropping the false "Full verbatim" claim |
-| 4 | _(pending)_ | — | — | pending |
+| 4 | codex (cmux surface:49) | gpt-5.5 high | 2 (Q3 REQ-10 contradiction + Q4 residual comments) | `changes-requested` — re-scope Q1+Q2 RESOLVED; Q3 NOT-RESOLVED (contract row for macCheckedBeforeRootCompare "punts ordering to manual grep" contradicted REQ-10's "automated mock-injection" claim); Q4 NOT-RESOLVED (residual "6 follow skeleton"/"8 more tests" comments inside the verbatim block). Revision 4 makes REQ-10 honest+consistent: renamed `macCheckedBeforeRootCompare` → `macAndRootBothChecked` (automated both-checks G+H); ORDERING → `UNGUARDED-IN-CI` manual grep consistently across REQ-10 row / Safety / catalog / contract table / Done Criteria / Group 6 (REQ-11 forbids mock deps, so no mock framework); residual verbatim-block comments fixed. |
+| 5 | _(pending)_ | — | — | pending |
 
 ### Resolved blockers (Pass 1 → revision 1)
 
@@ -318,7 +320,7 @@ Total: 23 unit tests + 2 static + 1 UNGUARDED-IN-CI smoke.
 | 2 | REQ-4/EC2 foreign-root fixture not discriminating (MAC fails before root compare) | Fixture rewritten: inject A's `.trust.mac` into B so MAC passes, assert A/B roots differ first, then assert cross-read returns `{ok:false, reason:"forged"}`. Test renamed `...withSharedKeySentinel`. |
 | 3 | REQ-1/2/3 contract inconsistent (return type + throw semantics) | Picked the union `ProjectTrustReadResult` everywhere. REQ-1 returns the union; REQ-2 trust-file symlink → `{ok:false, reason:"symlink"}` (NOT a throw); only the `.trust.mac` KEY symlink throws via `assertNoSymlink` (now explicit in Contract error-codes table). |
 | 4 | INV-2 cited wrong global MAC path (`~/.episodic-memory/.session.mac`) | Corrected: actual global path is `~/.pi/agent/bg/.session.mac` (bg-state.ts:134/138). INV-2, REQ-7, Non-Goal 3, hook-points table all updated. INV-2 grep guard now also blocks `getBgStateDir`/`getBgSessionMacPath` imports. |
-| 5 | 9-state read table not fully tested (C/D/E missing from catalog) | Group 1 expanded from 6 → 10 tests: added `rejectsCorruptJson` (C), `rejectsSchemaInvalid` (D), `keyAbsentTreatedAsForged` (E), `macCheckedBeforeRootCompare` (REQ-10 automated), `rejectsForeignProjectRoot_withSharedKeySentinel` (renamed, H). |
+| 5 | 9-state read table not fully tested (C/D/E missing from catalog) | Group 1 expanded from 6 → 10 tests: added `rejectsCorruptJson` (C), `rejectsSchemaInvalid` (D), `keyAbsentTreatedAsForged` (E), `macAndRootBothChecked` (REQ-10 both-checks; ordering UNGUARDED-IN-CI grep), `rejectsForeignProjectRoot_withSharedKeySentinel` (renamed, H). |
 | 6 | Appendix B P5F-1 not executor-ready (prose "Full source", "Decide resolveProjectRoot rule", wrong import path) | OD-1 resolved in-plan (no "Decide"). Step 1.1 now provides verbatim `bg-trust.ts` source. Step 1.3 test import path fixed to `../lib/bg-state.ts`. (P5F-2/P5F-3 step tables still deferred by design — noted as a deferred gate, not a blocker.) |
 | (audit) | Hook table cited `index.ts L685–691` for the bg handler; real `selectBgTerminalBackend` call is L713 | Hook table corrected: L685 `parseBgArgs`, L695 explicit `getBgTerminalBackendByName`, L713 `selectBgTerminalBackend` fallback. Done Criteria + Files-to-modify + Implementation sequence line refs updated. |
 
@@ -640,7 +642,7 @@ function writeStore(projectDir, store) {
   writeFileSync(path.join(dir, "default-backend.json"), JSON.stringify(store), { mode: 0o600 });
 }
 
-// --- Group 1 (10 tests; 4 red-then-green/discriminating shown verbatim, 6 follow the same skeleton) ---
+// --- Group 1 (10 tests; 3 verbatim shown below + 7 contracted per the 8-test contract table at end of block) ---
 
 test("testReadTrustStore_parsesValidFile", async () => {
   const d = tmpProject(); const s = await mintStore(d, "tmux"); writeStore(d, s);
@@ -679,10 +681,12 @@ test("testReadTrustStore_rejectsForeignProjectRoot_withSharedKeySentinel", async
   assert.strictEqual(r.ok, false); if (!r.ok) assert.strictEqual(r.reason, "forged"); // root mismatch → forged (State H), MAC passed
 });
 
-// ... 8 more tests (returnsNullWhenAbsent / rejectsCorruptJson / rejectsSchemaInvalid /
-//     keyAbsentTreatedAsForged / rejectsMalformedMac / rejectsTamperedMac / macCheckedBeforeRootCompare +
-//     testProjectTrustKey_isDistinctFromSessionMac / testProjectTrustKey_symlinkGuard) ...
-// Each asserts on captured {ok, reason} / captured hex / thrown error — no self-fulfilling prose.
+// ... 8 contracted tests (see the 8-test contract table at end of block for name + asserted state + flag):
+//     returnsNullWhenAbsent / rejectsCorruptJson / rejectsSchemaInvalid / keyAbsentTreatedAsForged /
+//     rejectsMalformedMac / rejectsTamperedMac / macAndRootBothChecked (Group 1, 7) +
+//     testProjectTrustKey_symlinkGuard (Group 2, 1). testProjectTrustKey_isDistinctFromSessionMac above is verbatim.
+// Each authored assert operates on captured {ok, reason} / captured hex / thrown error — no self-fulfilling prose.
+// BREAK=1 forces the foreign-root fixture to non-discriminating (identical roots) → assert.notStrictEqual fails → non-zero exit.
 
 // --- Group 2 (2 tests) ---
 
@@ -708,7 +712,7 @@ process.on("exit", () => { console.log(`${passed}/${passed+failed} passing`); if
 > | `testReadTrustStore_keyAbsentTreatedAsForged` | E — trust file present, `.trust.mac` deleted → `{ok:false, reason:"forged"}` (NO key creation during read) | — |
 > | `testReadTrustStore_rejectsMalformedMac` | F — `mac` not `/^[0-9a-f]{64}$/i` → `{ok:false, reason:"malformed"}` | — |
 > | `testReadTrustStore_rejectsTamperedMac` | G — valid-hex MAC that fails `verifyBgPayloadMac` → `{ok:false, reason:"forged"}` | — |
-> | `testReadTrustStore_macCheckedBeforeRootCompare` | G + H — wrong-MAC-valid-root → forged AND valid-MAC-wrong-root → forged (proves BOTH checks execute; ORDERING itself is mechanically unverifiable without a mock and is covered by Group 6 manual grep) | — |
+> | `testReadTrustStore_macAndRootBothChecked` | G + H — wrong-MAC-valid-root → `{ok:false,reason:"forged"}` AND valid-MAC-wrong-root → `{ok:false,reason:"forged"}` (proves BOTH checks execute; ORDERING G-before-H is `UNGUARDED-IN-CI` via Group 6 manual grep — mechanically unverifiable in plain ESM without a mock library, which REQ-11 forbids) | — |
 > | `testProjectTrustKey_symlinkGuard` | symlinked `.trust.mac` → `readProjectTrustKey` THROWS (propagates; red-then-green: a real key file does NOT throw) | red-then-green |
 >
 > Each authored `assert` operates on captured return values / file contents / thrown errors — never on constants the test itself wrote (the foreign-root `rootA !== rootB` assertion is the model: captured values from `projectRootSha256(A)`/`projectRootSha256(B)`). `BREAK=1` env forces the foreign-root fixture to non-discriminating (identical roots) so its `assert.notStrictEqual` fails → non-zero exit, proving the negative control reaches a real assertion. Every test name matches the Test Case Catalog exactly.
