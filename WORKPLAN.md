@@ -11,19 +11,19 @@ the source of truth; older entries in the chain are `superseded`.
 
 ## Current state
 
-**P5d cmux-control COMPLETE** (PRs #126, #128, #130, #131, #132) + **P5+ orphan reaper** bug fix merged (#134, codex v4 READY-TO-MERGE). **P5d closed; no next slice decided.**
+**P5E1 backend selector COMPLETE** (PR #137, commit `8e41670`). **P5d cmux-control COMPLETE** (PRs #126, #128, #130, #131, #132) + **P5+ orphan reaper** bug fix merged (#134). **P5d + P5E1 closed; no next slice decided.**
 
-- Chain head: `20260704-054011-post-merge-sync-p5d-cmux-control-complet-7ea6`
+- Chain head: `20260704-083722-post-merge-sync-p5e1-backend-selector-co-64a1`
 - Status: active
-- Revises: `20260703-153507-p5d-s3-merged-130-s4-pending-131-next-s5-a257`
-- Tags include: `canonical-workplan`, `workplan`, `p5d-s1-s2-s3-s4-s5-merged`, `p5d-complete`, `p5-plus-orphan-reaper-merged`, `cmux-control`, `post-merge-sync`
-- Summary: **Post-merge sync — P5d cmux-control COMPLETE.** S1 (#126) + S2 (#128) + S3 (#130) + S4 (#131) + S5 (#132) merged. P5+ orphan reaper bug fix (#134) merged. P5d closed.
+- Revises: `20260704-054011-post-merge-sync-p5d-cmux-control-complet-7ea6`
+- Tags include: `canonical-workplan`, `workplan`, `p5e1`, `p5e1-complete`, `backend-selector`, `post-merge-sync`, `roadmap`, `p5b-next`
+- Summary: **Post-merge sync — P5E1 backend selector COMPLETE (#137).** P5d + P5E1 closed; next natural: P5b alternative backends.
 
 ### Open follow-ups (none decided; details in canonical episode)
-- **P5b alternative terminal backends** — zellij/wezterm/headless. Next natural after P5d.
-- **`--backend` selector** — now timely (2+ backends ship: tmux-terminal, cmux-terminal).
-- **NL → `/agents bg` intent-gate workflow** — needs `background` workflow kind in `intent-gate.ts`.
+- **P5b alternative terminal backends** — zellij/wezterm/headless. Next natural; now cleanly testable from the CLI via the `--backend <name>` seam P5E1 shipped.
+- **NL → `/agents bg` intent-gate workflow** — needs `background` workflow kind in `intent-gate.ts`. Can now emit `--backend <name>` once an NLP mapping is added.
 - **P4R-PROJ Project Background Agents** — deferred (needs disk-backed trust reader).
+- **Persistent per-project default backend** — still deferred (needs trust reader); P5E1 is per-launch only.
 - **P5+ orphan reaper follow-ups**:
   - 15s poll now also calls the reaper (orphans caught in the currently-open session within 15s, not just at next restart).
   - `isAlive` seam is now `(reservation: BgReservation) => boolean | Promise<boolean>` — internal API change. Production callers use `buildReaperIsAlive` from `agents/index.ts`.
