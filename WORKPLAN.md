@@ -11,17 +11,17 @@ the source of truth; older entries in the chain are `superseded`.
 
 ## Current state
 
-**P5E1 backend selector COMPLETE** (PR #137, commit `8e41670`). **P5d cmux-control COMPLETE** (PRs #126, #128, #130, #131, #132) + **P5+ orphan reaper** bug fix merged (#134). **P5d + P5E1 closed; no next slice decided.**
+**P5 NL → /agents bg intent-gate workflow COMPLETE** (PR #141, commit `6d61802`). **P5b-2 zellij-terminal COMPLETE** (PR #139, commit `3c6e6b8`). **P5E1 backend selector COMPLETE** (PR #137, commit `8e41670`). **P5d cmux-control COMPLETE** (PRs #126, #128, #130, #131, #132) + **P5+ orphan reaper** bug fix merged (#134). **P5d + P5E1 + P5b-2 + P5-nl-bg closed; no next slice decided.**
 
-- Chain head: `20260704-083722-post-merge-sync-p5e1-backend-selector-co-64a1`
+- Chain head: `20260704-122521-post-merge-sync-p5-nl-agents-bg-intent-g-d94b`
 - Status: active
-- Revises: `20260704-054011-post-merge-sync-p5d-cmux-control-complet-7ea6`
-- Tags include: `canonical-workplan`, `workplan`, `p5e1`, `p5e1-complete`, `backend-selector`, `post-merge-sync`, `roadmap`, `p5b-next`
-- Summary: **Post-merge sync — P5E1 backend selector COMPLETE (#137).** P5d + P5E1 closed; next natural: P5b alternative backends.
+- Revises: `20260704-104711-post-merge-sync-p5b-2-zellij-terminal-ba-edce`
+- Tags include: `canonical-workplan`, `workplan`, `p5-nl-bg`, `p5-nl-bg-complete`, `background-agents`, `intent-gate`, `profile-pathway`, `post-merge-sync`, `roadmap`, `p5b-next`
+- Summary: **Post-merge sync — P5 NL → /agents bg intent-gate workflow COMPLETE (#141, commit 6d61802).** Multi-layer profile pathway threaded end-to-end; codex 4-round approve. WORKPLAN.md/P3-slices drift (still at P5E1) corrected.
 
 ### Open follow-ups (none decided; details in canonical episode)
 - **P5b alternative terminal backends** — zellij/wezterm/headless. Next natural; now cleanly testable from the CLI via the `--backend <name>` seam P5E1 shipped.
-- **NL → `/agents bg` intent-gate workflow** — needs `background` workflow kind in `intent-gate.ts`. Can now emit `--backend <name>` once an NLP mapping is added.
+- **Combined `--backend` + `--profile` in `parseBgArgs`** — still first-token-only for both flags, so a single bg launch can't pick BOTH a named backend and a named profile. Acceptable for v0.1; add when a real use case appears.
 - **P4R-PROJ Project Background Agents** — deferred (needs disk-backed trust reader).
 - **Persistent per-project default backend** — still deferred (needs trust reader); P5E1 is per-launch only.
 - **P5+ orphan reaper follow-ups**:
