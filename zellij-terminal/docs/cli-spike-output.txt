@@ -1,0 +1,139 @@
+# Zellij CLI spike — 2026-07-04, zellij 0.44.3 (brew install), macOS arm64
+
+Captured BEFORE P5b-2 zellij-terminal implementation, per the S0 CLI-spike discipline
+(mirrors P5b-1's S2.5 cmux spike). All commands run on a real zellij 0.44.3 install.
+This file is the contract the P5b-2 plan REQs commit to.
+
+## Top-level: zellij --help (OPTIONS + SUBCOMMANDS)
+
+USAGE:
+    zellij [OPTIONS] [SUBCOMMAND]
+
+OPTIONS (subset relevant to a backend):
+    -s, --session <SESSION>           Specify name of a new session
+    -l, --layout <LAYOUT>             Predefined layout name or path (adds tabs to existing session, or starts new)
+        --layout-string <LAYOUT_STRING>  Raw KDL layout string
+    -n, --new-session-with-layout <NAME>  Always start a new session with this layout
+
+SUBCOMMANDS (relevant subset):
+    run            Run a command in a new pane. Returns: Created pane ID (format: terminal_<id>)  [aliases: r]
+    action         Send actions to a specific session  [aliases: ac]
+    attach         Attach to a session  [aliases: a]
+    list-sessions  List active sessions  [aliases: ls]
+    kill-session   Kill a specific session  [aliases: k]   (terminates a RUNNING session)
+    delete-session Delete a specific session  [aliases: d] (removes a SAVED/dead session; -f force-kills first)
+    kill-all-sessions  [aliases: ka]
+    delete-all-sessions [aliases: da]
+    subscribe      Subscribe to pane render updates (viewport and scrollback)
+    watch          Watch a session (read-only)  [aliases: w]
+    web            Run a web server to serve terminal sessions
+    setup          Setup zellij and check its configuration
+
+## list-sessions output formats
+
+`zellij list-sessions -s` (--short): one session name per line, no decoration.
+    $ zellij list-sessions -s
+    pi-zellij-spiketest
+    pi-zellij-spiketest2
+
+`zellij list-sessions -n` (--no-formatting): name + age annotation.
+    $ zellij list-sessions -n
+    pi-zellij-spiketest [Created 2s ago]
+
+`zellij list-sessions` (no flags): ANSI-colored; same name+age shape.
+
+EXIT CODES:
+    - 0 when >=1 session is active.
+    - 1 with "No active zellij sessions found." when zero sessions.
+  => isAvailable() can use: `zellij list-sessions -s` exit 0 (or ENOENT => not installed).
+
+## CRITICAL: session targeting model
+
+`zellij run` and `zellij action <sub>` operate on the CURRENT session. When invoked
+from OUTSIDE a session (no ZELLIJ_SESSION_NAME env, not attached):
+    - with exactly ONE active session: they auto-target that session.
+    - with >1 active session: they REFUSE and print
+      "Please specify the session name to send actions to. The following sessions are active: ..."
+      (exit 0, but no action taken).
+    - with the top-level `-s <name>` flag: `zellij -s <name> run ...` and
+      `zellij -s <name> action <sub> ...` target the NAMED session. If the session
+      does NOT exist, they error: "Session '<name>' not found. The following sessions are active: ..."
+
+  => `-s <name>` on run/action means "TARGET existing session", NOT "create new session".
+     (Only the bare `zellij -s <name>` with NO subcommand creates+attaches a new session.)
+
+## VERIFIED LAUNCH FLOW (two-step, detached)
+
+STEP 1 — create a detached background session:
+    zellij attach -b <session-name>
+  -b / --create-background: "Create a detached session in the background if one does not exist."
+  The attaching client can be killed immediately (e.g. kill the process after 2s);
+  the session STAYS ALIVE in the ActiveDetached state.
+
+STEP 2 — run the worker command in a named pane, targeting the session:
+    zellij -s <session-name> run --name <pane-name> --cwd <cwd> --close-on-exit -- <cmd> <args...>
+  Returns the pane id on stdout: "terminal_<id>" (e.g. "terminal_1").
+  --close-on-exit: close the pane immediately when its command exits.
+  --cwd <dir>: set the working directory.
+  --name <pane-name>: name the pane (for later list-panes correlation).
+
+END-TO-END VERIFIED:
+    $ zellij attach -b pi-zellij-twostep   # then kill client after 2s
+    $ zellij -s pi-zellij-twostep run --name worker --cwd /tmp -- bash -c '<long-running loop writing to a sentinel file>'
+    terminal_1                              # pane id returned
+    # sentinel file grew to 3 lines over 3s => the command IS running detached.
+
+## list-panes (within a session, via -s targeting)
+
+    $ zellij -s pi-zellij-twostep action list-panes
+    PANE_ID  TYPE  TITLE
+    plugin_0  plugin  (.) - zellij:link
+    plugin_3  plugin  About Zellij
+    terminal_0  terminal  Pane #1
+    terminal_1  terminal  worker
+
+  - Header row: "PANE_ID  TYPE  TITLE"
+  - Pane ids: "terminal_<int>" or "plugin_<int>". The TITLE is the --name passed to `run`.
+  - Default sessions auto-create a status-bar plugin pane + a default terminal pane.
+
+## kill-session semantics (for kill())
+
+    $ zellij kill-session <existing-name>    # exit 0, session terminated
+    $ zellij kill-session <nonexistent-name>
+    No session named "<nonexistent-name>" found.
+    # exit 1
+  => kill() MUST treat "No session named ... found." stderr + exit 1 as ok (idempotent),
+     mirroring tmux's "can't find window" tolerance.
+
+## ZOMBIE-SESSION EDGE CASE (delete-session -f)
+
+Occasionally `kill-session` reports "No session named X found" but `list-sessions`
+still shows the session (stale saved state). `delete-session -f <name>` removes the
+saved state AND force-kills if running:
+    $ zellij delete-session -f pi-zellij-spiketest
+    Session: "pi-zellij-spiketest" successfully deleted.
+  => kill() fallback: if `kill-session` says "not found" but list-sessions still shows
+     the name, call `delete-session -f <name>` to clear the stale entry. Best-effort.
+
+## action subcommands available (for a FUTURE zellij-control extension — NOT P5b-2)
+
+Notable text-I/O actions (all target the current/named session):
+    action send-keys <KEYS>...        # e.g. "Ctrl a", "F1", "enter"; -p/--pane-id <id>
+    action write <BYTES>              # write raw bytes to the terminal
+    action write-chars <CHARS>        # write characters
+    action paste                      # paste text (bracketed paste mode)
+    action dump-screen                # dump viewport + scrollback to file/STDOUT
+    action list-panes / list-tabs / list-clients
+    action new-pane / close-pane / close-tab
+    action rename-pane / rename-tab / rename-session
+    action scroll-to-bottom / scroll-to-top / page-scroll-up / page-scroll-down
+    action detach / switch-session
+
+  A future zellij-control extension IS feasible (send-keys + dump-screen cover the
+  tmux-control surface). NOT in scope for P5b-2 (the backend slice).
+
+## Environment
+
+    zellij 0.44.3 (brew install, /opt/homebrew/bin/zellij)
+    macOS arm64 (Darwin 24.x)
+    Spike run by: pi-extensions session 2026-07-04
