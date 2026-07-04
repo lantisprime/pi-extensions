@@ -11,6 +11,8 @@ import {
 	getBgRunPaths,
 	createBgRunState,
 	writeBgResult,
+	reapStaleBgRuns,
+	updateBgReservationOwner,
 } from "../lib/bg-state.ts";
 
 import {
@@ -637,7 +639,54 @@ async function main() {
 	await test("P4-6: polling busy guard skips overlap", testPollingBusyGuardSkipsOverlappingTick);
 	await test("P4-6: polling no-ops without setStatus", testPollingNoOpWithoutSetStatus);
 	await test("P4-6: reset cleans polling state", testResetCleansState);
+	await test("P5+: status line clears orphaned reservation on session start", testStatusLineClearsOrphanedReservationOnSessionStart);
 	console.log("P4-5 bg-commands tests passed");
+}
+
+/** P5+ orphan regression: a reserved run whose persisted `ownerHandle` is
+ *  reported dead by the injected isAlive callback must NOT pin the status
+ *  line to "1 agent running". Reproduces the user-reported leak
+ *  ("status bar keeps saying 1 agent running but no agent is running")
+ *  by setting up an orphan via the real updateBgReservationOwner path
+ *  and exercising the reap+count sequence that session_start and the
+ *  15s poll both run. */
+async function testStatusLineClearsOrphanedReservationOnSessionStart() {
+	__resetBgStatusPolling();
+
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "p5-orphan-status-"));
+	const home = path.join(root, "home");
+	await fs.mkdir(home, { recursive: true });
+	try {
+		// Set up a real orphan: create a reservation as the launch path
+		// would (preflight), then patch it with an ownerHandle as the
+		// post-launch path does. The ownerHandle points at a "dead" window.
+		const state = await createBgRunState({ homeDir: home, runId: "bg-orphan-status-01", effectiveTimeoutSec: 86_400 });
+		await updateBgReservationOwner(state, {
+			ownerHandle: "win-dead-pane",
+			ownerBackendName: "tmux",
+		});
+
+		__setBgStatusHomeOverride(home);
+
+		// Simulate the session_start + 15s-poll sequence: reap (with the
+		// same buildReaperIsAlive shape that production uses — a callback
+		// that returns false for the dead window), then count.
+		const isAlive = async (reservation) => reservation.ownerHandle !== "win-dead-pane";
+		await reapStaleBgRuns(home, { isAlive });
+
+		const statuses = [];
+		const ctx = { ui: { setStatus(key, text) { statuses.push({ key, text }); } } };
+		await updateBgStatusLine(ctx);
+
+		const last = statuses[statuses.length - 1];
+		assert.ok(last, "setStatus should have been called");
+		assert.equal(last.text, undefined,
+			`orphan reservation must NOT show '1 agent running'; got '${last.text}'`);
+	} finally {
+		__resetBgStatusPolling();
+		__setBgStatusHomeOverride(undefined);
+		await fs.rm(root, { recursive: true, force: true }).catch(() => {});
+	}
 }
 
 main().catch((error) => { console.error(error); process.exit(1); });

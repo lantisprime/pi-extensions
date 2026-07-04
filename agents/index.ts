@@ -25,13 +25,13 @@ import { disposeBackgroundRuns } from "./lib/bg-run.ts";
 import { validateBuiltInAgentSpecs } from "./lib/specs.ts";
 import { registerSubagentTool } from "./lib/subagent-tool.ts";
 import { preflightBgAgent } from "./lib/bg-preflight.ts";
-import { getBgTerminalBackend, selectBgTerminalBackend } from "./lib/bg-terminal.ts";
+import { getBgTerminalBackend, getBgTerminalBackendByName, selectBgTerminalBackend } from "./lib/bg-terminal.ts";
 import { formatBuiltInProfilesList, toProfileLibrary, buildProfileLibrary, type ModelProfileLibrary, type ProfileLibraryBuildWarning } from "./lib/profiles.ts";
 import { discoverProfiles, rejectDuplicateProfileNames, DEFAULT_PROFILE_DISCOVERY_LIMITS, type ParsedProfile } from "./lib/profile-discovery.ts";
 import { addOrReplaceRegisteredProfile, findMatchingRegisteredProfile, type RegisteredProfile } from "./lib/registry.ts";
 import { runChainCommand } from "./lib/chain-runner.ts";
 import { loadGateConfig, classifyGateIntent, GATE_INSTRUCTIONS } from "./lib/intent-gate.ts";
-import { reapStaleBgRuns, resolveTrustedHome, listBgRuns, getBgRunPaths, readBgResult, writeBgResult, markBgRunDone, countActiveBgRuns } from "./lib/bg-state.ts";
+import { reapStaleBgRuns, resolveTrustedHome, listBgRuns, getBgRunPaths, readBgResult, writeBgResult, markBgRunDone, countActiveBgRuns, updateBgReservationOwner, type BgReservation } from "./lib/bg-state.ts";
 import os from "node:os";
 import path from "node:path";
 
@@ -101,6 +101,16 @@ export default function agentsExtension(pi: ExtensionAPI) {
 		// (which re-attaches it from sessionCtx in handleGateInput). Without this the gate path drops
 		// a completed run's findings silently.
 		attachDeliverResult(pi, ctx);
+		// P5+ orphan sweep: free reservations whose terminal pane died
+		// without writing `done` (e.g. crash, pane closed, tmux server
+		// killed). Without this, countActiveBgRuns below pins the status
+		// line to a stale "1 agent running" for the full
+		// effectiveTimeoutSec. Best-effort: if the reaper rejects, the
+		// 15s poll (which also calls the reaper) will self-correct on
+		// the next tick.
+		try {
+			await reapStaleBgRuns(resolveTrustedHome(), { isAlive: buildReaperIsAlive() });
+		} catch { /* best-effort */ }
 		// P4-6: show current background agent count in the footer on session start.
 		// Only start polling if there are active runs — avoid a throwaway timer on idle sessions.
 		if (await updateBgStatusLine(ctx) > 0) ensureBgStatusPolling(ctx);
@@ -507,6 +517,34 @@ async function handleProfileUnregister(target: string, ctx: AgentsContext, diagn
 const BG_STATUS_KEY = "agents:bg-count";
 const BG_STATUS_POLL_MS = 15_000; // refresh every 15s while runs are active
 let bgStatusPollTimer: ReturnType<typeof setInterval> | undefined;
+
+/** Build an `isAlive` callback for the bg-state reaper that routes each
+ *  reservation to the backend recorded in its `ownerBackendName`. Runs
+ *  without a persisted backend name fall back to age-only expiry (the
+ *  reaper's existing path). Backend `isAlive()` errors are treated as
+ *  "alive" (conservative: never reap a slot we cannot prove is dead). */
+function buildReaperIsAlive(): (reservation: BgReservation) => Promise<boolean> {
+	return async (reservation): Promise<boolean> => {
+		if (!reservation.ownerHandle) return true; // shouldn't happen (reaper guards), but be safe
+		// Route to the SPECIFIC backend persisted on the reservation, not
+		// "any backend that claims the handle is alive". Without this,
+		// a coincidental match in a sibling backend (or a missing named
+		// backend) can misclassify a live run as dead, or fail to reap a
+		// truly dead run when an unrelated backend throws first.
+		const backend = reservation.ownerBackendName
+			? getBgTerminalBackendByName(reservation.ownerBackendName)
+			: undefined;
+		if (!backend) return true; // no info => conservative "alive"
+		try {
+			if (typeof backend.isAlive !== "function") return true;
+			return await backend.isAlive(reservation.ownerHandle);
+		} catch {
+			// Per codex: backend errors are "unknown/alive" for that tick;
+			// the reaper will retry next session/poll.
+			return true;
+		}
+	};
+}
 let bgStatusPollBusy = false; // guard against pile-up when countActiveBgRuns is slow
 
 /** Test-only: override the home dir for countActiveBgRuns.  Production
@@ -540,6 +578,15 @@ export function __setBgStatusPollingDeps(deps: typeof __bgStatusPollingDeps): vo
 export async function updateBgStatusLine(ctx: AgentsContext): Promise<number> {
 	if (typeof ctx?.ui?.setStatus !== "function") return -1;
 	try {
+		// Reap orphans BEFORE counting so the status line reflects truth
+		// without waiting for the next session restart. Best-effort: a
+		// reaper failure is swallowed and the next poll will retry.
+		try {
+			await reapStaleBgRuns(
+				__bgStatusHomeOverride ?? resolveTrustedHome(),
+				{ isAlive: buildReaperIsAlive() },
+			);
+		} catch { /* best-effort */ }
 		const count = __bgStatusHomeOverride !== undefined
 			? await countActiveBgRuns(__bgStatusHomeOverride)
 			: await countActiveBgRuns();
@@ -569,7 +616,9 @@ export function ensureBgStatusPolling(ctx: AgentsContext): void {
 		bgStatusPollBusy = true;
 		try {
 			// Single countActiveBgRuns call feeds both the status line AND the
-			// stop decision — no TOCTOU gap between the two.
+			// stop decision — no TOCTOU gap between the two. updateBgStatusLine
+			// also runs the reaper so orphans are cleared within one poll
+			// interval (15s) instead of waiting for the next session start.
 			const count = await updateBgStatusLine(ctx);
 			if (count === 0 && bgStatusPollTimer !== undefined) {
 				clearInt(bgStatusPollTimer);
@@ -673,6 +722,19 @@ export async function handleBgCommand(
 		ctx.ui.notify(`Launch failed: ${launchResult.error ?? "unknown error"}`, "error");
 		await updateBgStatusLine(ctx);
 		return;
+	}
+
+	// Persist the backend's identity on the reservation so the reaper can
+	// recover the right backend across parent Pi restarts. Best-effort: a
+	// patch failure leaves the slot active and the reaper falls back to
+	// age-only expiry for that run.
+	if (launchResult.windowId) {
+		try {
+			await updateBgReservationOwner(result.paths, {
+				ownerHandle: launchResult.windowId,
+				ownerBackendName: backend.name,
+			});
+		} catch { /* best-effort; age-only fallback is acceptable */ }
 	}
 
 	ctx.ui.notify(`Background agent ${agentName} running (${result.runId.slice(0, 16)}…) via ${backend.name}.`, "info");
