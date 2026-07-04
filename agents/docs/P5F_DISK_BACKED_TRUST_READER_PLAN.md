@@ -2,7 +2,7 @@
 
 ## Status
 
-Planning only. Do not implement until this plan, plan review, and adversarial review are accepted. **Pass 1 review (codex, changes-requested) addressed; awaiting Pass 2.**
+Planning only. Do not implement until this plan, plan review, and adversarial review are accepted. **Pass 1 + Pass 2 reviews (codex, changes-requested) addressed; awaiting Pass 3.**
 
 ## Episode Search Summary
 
@@ -305,20 +305,31 @@ Total: 23 unit tests + 2 static + 1 UNGUARDED-IN-CI smoke.
 
 | Pass | Reviewer | Model | Blocker count | Verdict |
 |---|---|---|---|---|
-| 1 | codex (cmux surface:48) | gpt-5.5 high | 6 | `changes-requested` — see `agents/docs/P5F_REVIEW.md`; all 6 addressed in this revision (see Resolved blockers) |
-| 2 | _(pending)_ | — | — | pending |
+| 1 | codex (cmux surface:48) | gpt-5.5 high | 6 | `changes-requested` — see `agents/docs/P5F_REVIEW.md`; all 6 addressed in the first revision (see Resolved blockers below) |
+| 2 | codex (cmux surface:49) | gpt-5.5 high | 5 new-surface | `changes-requested` — Pass-1 blockers 1–5 + audit RESOLVED; verifier-only defects in the verbatim Appendix B source (private-helper imports, missing `await`, State-E create-during-read, key-symlink throw not propagated, test import/async) addressed in the second revision |
+| 3 | _(pending)_ | — | — | pending |
 
-### Resolved blockers (Pass 1 → this revision)
+### Resolved blockers (Pass 1 → revision 1)
 
-| # | Pass-1 blocker | Resolution in this revision |
+| # | Pass-1 blocker | Resolution in revision 1 |
 |---|---|---|
 | 1 | REQ-9 claimed to fill `projectTrusted` with `projectRootSha256` + `keyGenId`, but code shows `projectTrusted?: boolean` (bg-state.ts:55) | REQ-9 rewritten: source only the existing `boolean` (`true` on `{ok:true}`, `false` otherwise). Snapshot enrichment (`projectRootSha256`/`keyGenId`) explicitly deferred to P4R-PROJ (Non-Goal 2). |
 | 2 | REQ-4/EC2 foreign-root fixture not discriminating (MAC fails before root compare) | Fixture rewritten: inject A's `.trust.mac` into B so MAC passes, assert A/B roots differ first, then assert cross-read returns `{ok:false, reason:"forged"}`. Test renamed `...withSharedKeySentinel`. |
 | 3 | REQ-1/2/3 contract inconsistent (return type + throw semantics) | Picked the union `ProjectTrustReadResult` everywhere. REQ-1 returns the union; REQ-2 trust-file symlink → `{ok:false, reason:"symlink"}` (NOT a throw); only the `.trust.mac` KEY symlink throws via `assertNoSymlink` (now explicit in Contract error-codes table). |
 | 4 | INV-2 cited wrong global MAC path (`~/.episodic-memory/.session.mac`) | Corrected: actual global path is `~/.pi/agent/bg/.session.mac` (bg-state.ts:134/138). INV-2, REQ-7, Non-Goal 3, hook-points table all updated. INV-2 grep guard now also blocks `getBgStateDir`/`getBgSessionMacPath` imports. |
 | 5 | 9-state read table not fully tested (C/D/E missing from catalog) | Group 1 expanded from 6 → 10 tests: added `rejectsCorruptJson` (C), `rejectsSchemaInvalid` (D), `keyAbsentTreatedAsForged` (E), `macCheckedBeforeRootCompare` (REQ-10 automated), `rejectsForeignProjectRoot_withSharedKeySentinel` (renamed, H). |
-| 6 | Appendix B P5F-1 not executor-ready (prose "Full source", "Decide resolveProjectRoot rule", wrong import path) | OD-1 resolved in-plan (no "Decide"). Step 1.1 now provides verbatim `bg-trust.ts` source (every constant/regex/signature/error-string spelled out). Step 1.3 test import path fixed to `../lib/bg-state.ts` and test source provided verbatim. |
+| 6 | Appendix B P5F-1 not executor-ready (prose "Full source", "Decide resolveProjectRoot rule", wrong import path) | OD-1 resolved in-plan (no "Decide"). Step 1.1 now provides verbatim `bg-trust.ts` source. Step 1.3 test import path fixed to `../lib/bg-state.ts`. (P5F-2/P5F-3 step tables still deferred by design — noted as a deferred gate, not a blocker.) |
 | (audit) | Hook table cited `index.ts L685–691` for the bg handler; real `selectBgTerminalBackend` call is L713 | Hook table corrected: L685 `parseBgArgs`, L695 explicit `getBgTerminalBackendByName`, L713 `selectBgTerminalBackend` fallback. Done Criteria + Files-to-modify + Implementation sequence line refs updated. |
+
+### Resolved blockers (Pass 2 → revision 2)
+
+| # | Pass-2 new-surface defect | Resolution in revision 2 |
+|---|---|---|
+| 2.1 | Verbatim `bg-trust.ts` imported PRIVATE `assertNoSymlink`/`readUtf8FileNoSymlink` (bg-state.ts:619, L742 — not exported) | Inlined local equivalents `assertNoSymlinkLocal` + `readUtf8FileNoSymlinkLocal` in `bg-trust.ts` (mirrors of the private originals). Import block now imports ONLY exported `signBgPayload`/`verifyBgPayloadMac`/`keyGenIdFromKey`. Req-11 + INV-2 grep guards unchanged (still pass — the new helpers are local, not imported). |
+| 2.2 | Missing `await` on `readUtf8FileNoSymlink` (async) → States D–I bypassed (raw was a Promise) | Added `await` in `readProjectTrustStore`: `const raw = await readUtf8FileNoSymlinkLocal(...)`. States C–I now execute correctly. |
+| 2.3 | `readProjectTrustStore` called `readOrCreateProjectTrustKey` → absent key was CREATED (State E wrong side-effect; contradicts EC1 "forged") | Added read-only `readProjectTrustKey` (does NOT create). `readProjectTrustStore` now calls `readProjectTrustKey`; `readOrCreateProjectTrustKey` is reserved for the P5F-2 writer and delegates to `readProjectTrustKey`. State E: ENOENT → `{ok:false, reason:"forged"}`. |
+| 2.4 | Key-symlink throw contract not implemented (reader caught all key errors → `forged`, contradicting the Contract error-codes table that says `.trust.mac` symlink THROWS) | `readProjectTrustStore` now catches ONLY `ENOENT` (→ `forged`); all other errors (including the symlink throw from `assertNoSymlinkLocal`) propagate. Key-symlink throw is now honored. |
+| 2.5 | Test excerpt: missing `mkdirSync`/`readFileSync` imports; `mintStore` called async `readOrCreateProjectTrustKey` without `await` | Imports fixed (`mkdirSync`, `readFileSync` added). `mintStore` is now `async` + `await readOrCreateProjectTrustKey(...)`; all 3 call sites now `await mintStore(...)`. |
 
 ## Appendix: Implementation Plan
 
@@ -394,15 +405,14 @@ const RESOLVE_ROOT_ERR = "resolveProjectRoot: no .pi or .git ancestor for ";
 ```ts
 // agents/lib/bg-trust.ts
 import { createHash, randomBytes as cryptoRandomBytes } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, realpathSync, writeFileSync, renameSync } from "node:fs";
+import { constants, existsSync, lstatSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { lstat, open } from "node:fs/promises";
 import path from "node:path";
-import {
-  assertNoSymlink,
-  readUtf8FileNoSymlink,
-  signBgPayload,
-  verifyBgPayloadMac,
-  keyGenIdFromKey,
-} from "./bg-state.ts";
+// NOTE: assertNoSymlink + readUtf8FileNoSymlink are PRIVATE in bg-state.ts (L619, L742) and
+// NOT exported. bg-trust.ts inlines local equivalents (assertNoSymlinkLocal / readUtf8FileNoSymlinkLocal)
+// below — INV-2 forbids importing the private helpers. Only the EXPORTED signing primitives
+// (signBgPayload/verifyBgPayloadMac/keyGenIdFromKey, bg-state.ts:203/207/214) are imported.
+import { signBgPayload, verifyBgPayloadMac, keyGenIdFromKey } from "./bg-state.ts";
 
 export const PROJECT_TRUST_SCHEMA_VERSION = 1;
 export const PROJECT_TRUST_DIR = ".pi/trust";
@@ -460,27 +470,69 @@ function ensureProjectTrustDir(projectDir: string): string {
   return dir;
 }
 
+// Local no-follow helpers — mirrors of the PRIVATE assertNoSymlink (bg-state.ts:619-625)
+// and readUtf8FileNoSymlink (bg-state.ts:742-754). Inlined here because the originals
+// are module-private in bg-state.ts (NOT exported) and INV-2 forbids importing private
+// state. assertNoSymlinkLocal throws on symlink, no-ops on ENOENT. readUtf8FileNoSymlinkLocal
+// opens with O_NOFOLLOW and optionally enforces 0o077 perms (requirePrivate).
+async function assertNoSymlinkLocal(targetPath: string, label: string): Promise<void> {
+  try {
+    const s = await lstat(targetPath);
+    if (s.isSymbolicLink()) throw new Error(`refusing symlinked ${label}: ${targetPath}`);
+  } catch (error) {
+    if ((error as { code?: string }).code !== "ENOENT") throw error;
+  }
+}
+
+async function readUtf8FileNoSymlinkLocal(
+  filePath: string,
+  label: string,
+  options: { requirePrivate?: boolean } = {},
+): Promise<string> {
+  const handle = await open(filePath, constants.O_NOFOLLOW | constants.O_RDONLY);
+  try {
+    const s = await handle.stat();
+    if (!s.isFile()) throw new Error(`${label} is not a regular file: ${filePath}`);
+    if (options.requirePrivate && (s.mode & 0o077) !== 0) {
+      throw new Error(`${label} must not be readable by group or others: ${filePath}`);
+    }
+    return await handle.readFile({ encoding: "utf8" });
+  } finally {
+    await handle.close();
+  }
+}
+
+// READ-ONLY key read — used by readProjectTrustStore. Does NOT create (State E: absent
+// key → ENOENT → caller maps to "forged"). Symlinked key → throws (propagates per the
+// Contract error-codes table; distinct from the trust-file symlink → union value).
+export async function readProjectTrustKey(projectDir: string): Promise<Buffer> {
+  const keyPath = projectTrustMacPath(projectDir);
+  await assertNoSymlinkLocal(keyPath, "project trust MAC key");
+  const text = await readUtf8FileNoSymlinkLocal(keyPath, "project trust MAC key", { requirePrivate: true });
+  return parseTrustMac(text, keyPath);
+}
+
+// readOrCreateProjectTrustKey is the WRITER-side (P5F-2 writeProjectTrustStore). Mirrors
+// readOrCreateSessionMacKey (bg-state.ts:167-189) but delegates the READ path to
+// readProjectTrustKey above; on ENOENT it mints a new key (0600, flag wx). Declared here
+// for type-completeness — the READER never calls it.
 export async function readOrCreateProjectTrustKey(
   projectDir: string,
   randomBytes: (size: number) => Buffer = cryptoRandomBytes,
 ): Promise<Buffer> {
-  // Verbatim mirror of readOrCreateSessionMacKey (bg-state.ts:167-189), adapted to the project path + O_NOFOLLOW symlink guard on the key.
   ensureProjectTrustDir(projectDir);
-  const keyPath = projectTrustMacPath(projectDir);
   try {
-    return parseTrustMac(await readUtf8FileNoSymlink(keyPath, "project trust MAC key", { requirePrivate: true }), keyPath);
+    return await readProjectTrustKey(projectDir);
   } catch (error) {
     if ((error as { code?: string }).code !== "ENOENT") throw error;
   }
   const key = randomBytes(PROJECT_TRUST_MAC_BYTES);
   const text = `${key.toString("hex")}\n`;
   try {
-    writeFileSync(keyPath, text, { mode: 0o600, flag: "wx" });
+    writeFileSync(projectTrustMacPath(projectDir), text, { mode: 0o600, flag: "wx" });
     return key;
   } catch (error) {
-    if ((error as { code?: string }).code === "EEXIST") {
-      return parseTrustMac(await readUtf8FileNoSymlink(keyPath, "project trust MAC key", { requirePrivate: true }), keyPath);
-    }
+    if ((error as { code?: string }).code === "EEXIST") return await readProjectTrustKey(projectDir);
     throw error;
   }
 }
@@ -508,7 +560,7 @@ export async function readProjectTrustStore(projectDir: string): Promise<Project
   if (stat.isSymbolicLink()) return { ok: false, reason: "symlink" };
   let parsed: unknown;
   try {
-    const raw = readUtf8FileNoSymlink(filePath, "project trust store");
+    const raw = await readUtf8FileNoSymlinkLocal(filePath, "project trust store");
     parsed = JSON.parse(raw);
   } catch {
     return { ok: false, reason: "malformed" };
@@ -519,9 +571,13 @@ export async function readProjectTrustStore(projectDir: string): Promise<Project
   if (!MAC_HEX_RE.test(store.mac)) return { ok: false, reason: "malformed" };
   let projectKey: Buffer;
   try {
-    projectKey = await readOrCreateProjectTrustKey(projectDir);
-  } catch {
-    return { ok: false, reason: "forged" };
+    // READ-ONLY key read (does NOT create — State E: absent key → ENOENT → "forged").
+    // A symlinked key THROWS via assertNoSymlinkLocal (propagates; NOT caught here) per
+    // the Contract error-codes table (distinct from trust-file symlink → union).
+    projectKey = await readProjectTrustKey(projectDir);
+  } catch (error) {
+    if ((error as { code?: string }).code === "ENOENT") return { ok: false, reason: "forged" };
+    throw error;
   }
   const { mac, ...storeWithoutMac } = store;
   if (!verifyBgPayloadMac(storeWithoutMac, projectKey, mac)) {
@@ -553,7 +609,7 @@ function isValidTrustStoreShape(v: unknown): boolean {
 
 ```js
 // agents/test/test-bg-trust.mjs
-import { mkdtempSync, rmSync, writeFileSync, symlinkSync, chmodSync, existsSync, rmSync as rm } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, symlinkSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import assert from "node:assert";
@@ -563,8 +619,9 @@ import { signBgPayload, readOrCreateSessionMacKey } from "../lib/bg-state.ts";
 let passed = 0, failed = 0;
 function test(name, fn) { Promise.resolve(fn()).then(() => { passed++; console.log("ok " + name); }, (e) => { failed++; console.log("not ok " + name + ": " + (e?.message || e)); }); }
 function tmpProject() { const d = mkdtempSync(path.join(tmpdir(), "p5f-")); writeFileSync(path.join(d, ".git"), "", { mode: 0o644 }); return d; }
-function mintStore(projectDir, defaultBackend) {
-  const key = readOrCreateProjectTrustKey(projectDir);
+async function mintStore(projectDir, defaultBackend) {
+  // mintStore must be async + await readOrCreateProjectTrustKey (it is async — bg-state.ts:167 pattern mirrored).
+  const key = await readOrCreateProjectTrustKey(projectDir);
   const storeWithoutMac = {
     schemaVersion: 1,
     projectRootSha256: projectRootSha256(projectDir),
@@ -583,14 +640,14 @@ function writeStore(projectDir, store) {
 // --- Group 1 (10 tests; 4 red-then-green/discriminating shown verbatim, 6 follow the same skeleton) ---
 
 test("testReadTrustStore_parsesValidFile", async () => {
-  const d = tmpProject(); const s = mintStore(d, "tmux"); writeStore(d, s);
+  const d = tmpProject(); const s = await mintStore(d, "tmux"); writeStore(d, s);
   const r = await readProjectTrustStore(d);
   assert.strictEqual(r.ok, true); assert.deepStrictEqual(r.ok && r.store.defaultBackend, "tmux");
 });
 
 test("testReadTrustStore_rejectsSymlink", async () => {
   const d = tmpProject(); const real = path.join(d, ".pi/trust/default-backend.json");
-  writeStore(d, mintStore(d, "tmux"));
+  writeStore(d, await mintStore(d, "tmux"));
   const link = real + ".lnk"; if (existsSync(link)) rmSync(link);
   symlinkSync(real, link); // NOTE: plan declares symlink→{ok:false,reason:"symlink"}; this proves RED-when-symlink.
   // Replace the trust file with a symlink to prove the guard catches it.
@@ -598,7 +655,7 @@ test("testReadTrustStore_rejectsSymlink", async () => {
   const r = await readProjectTrustStore(d);
   assert.strictEqual(r.ok, false); if (!r.ok) assert.strictEqual(r.reason, "symlink");
   // GREEN control: replace with the real file and it returns ok:true (proves the failure was the symlink, not incidental).
-  rmSync(real); writeStore(d, mintStore(d, "tmux"));
+  rmSync(real); writeStore(d, await mintStore(d, "tmux"));
   const r2 = await readProjectTrustStore(d);
   assert.strictEqual(r2.ok, true);
 });
@@ -611,7 +668,7 @@ test("testReadTrustStore_rejectsForeignProjectRoot_withSharedKeySentinel", async
   assert.notStrictEqual(rootA, rootB, "sentinel: A/B roots must differ or the fixture is non-discriminating");
   if (process.env.BREAK === "1") { assert.strictEqual(rootA, rootB, "BREAK mode forces identical roots to prove the test fails"); }
   // Mint store in A, then read under B (B has NO trust file). To isolate root-binding from MAC failure, copy A's key into B.
-  const storeA = mintStore(A, "tmux"); writeStore(A, storeA);
+  const storeA = await mintStore(A, "tmux"); writeStore(A, storeA);
   const keyDirB = path.join(B, ".pi/trust"); if (!existsSync(keyDirB)) { mkdirSync(keyDirB, { recursive: true, mode: 0o700 }); }
   writeFileSync(path.join(keyDirB, ".trust.mac"), readFileSync(path.join(A, ".pi/trust/.trust.mac")), { mode: 0o600 });
   writeFileSync(path.join(keyDirB, "default-backend.json"), JSON.stringify(storeA), { mode: 0o600 });
