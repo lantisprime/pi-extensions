@@ -1,6 +1,7 @@
 // cmux-control: reference and workspace-name safety validation.
 
-export const DEFAULT_CMUX_PREFIX = "pi-cmux-";
+import { DEFAULT_CMUX_PREFIX } from "./constants.ts";
+export { DEFAULT_CMUX_PREFIX } from "./constants.ts";
 
 export interface CmuxRef {
 	type: "workspace" | "surface" | "pane";
