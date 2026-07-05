@@ -168,12 +168,14 @@ export async function readProjectTrustStore(projectDir: string): Promise<Project
   let projectKey: Buffer;
   try {
     // READ-ONLY key read (does NOT create — State E: absent key → ENOENT → "forged").
-    // A symlinked key THROWS via assertNoSymlinkLocal (propagates; NOT caught here) per
-    // the Contract error-codes table (distinct from trust-file symlink → union).
+    // The REQ-2 carve-out preserves the symlinked-key THROW (security boundary);
+    // all other non-ENOENT failures (malformed content from parseTrustMac, EACCES/EPERM,
+    // anything else) map to {ok:false, reason:"forged"} per REQ-1/REQ-3 fail-closed contract.
     projectKey = await readProjectTrustKey(projectDir);
   } catch (error) {
     if ((error as { code?: string }).code === "ENOENT") return { ok: false, reason: "forged" };
-    throw error;
+    if (error instanceof Error && error.message.startsWith("refusing symlinked ")) throw error;
+    return { ok: false, reason: "forged" };
   }
   const { mac, ...storeWithoutMac } = store;
   if (!verifyBgPayloadMac(storeWithoutMac, projectKey, mac)) {

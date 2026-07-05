@@ -109,6 +109,27 @@ test("testReadTrustStore_keyAbsentTreatedAsForged", async () => {
   if (!r.ok) assert.strictEqual(r.reason, "forged");
 });
 
+test("testReadTrustStore_rejectsMalformedKey", async () => {
+  // P1 FIX REGRESSION GUARD (REQ-1/REQ-3 fail-closed): a malformed .trust.mac MUST
+  // map to {ok:false, reason:"forged"} and MUST NOT throw. The ONLY intentional throw
+  // on the key-read path is the REQ-2 symlink carve-out. try/catch wrapper fails the
+  // test on any throw — explicit no-throw assertion per Q3 consensus.
+  const d = tmpProject();
+  // Mint a valid store first so the reader gets past lstat/parse/schema/MAC-regex to the key read.
+  const s = await mintStore(d, "tmux"); writeStore(d, s);
+  // Replace .trust.mac content with non-hex / wrong-length garbage (triggers parseTrustMac throw at L139).
+  const keyPath = path.join(d, ".pi/trust/.trust.mac");
+  writeFileSync(keyPath, "zzzz", { mode: 0o600 });
+  let r;
+  try {
+    r = await readProjectTrustStore(d);
+  } catch (e) {
+    assert.fail("readProjectTrustStore must not throw on malformed .trust.mac (REQ-1/REQ-3 fail-closed): " + (e?.message || e));
+  }
+  assert.strictEqual(r.ok, false);
+  if (!r.ok) assert.strictEqual(r.reason, "forged");
+});
+
 test("testReadTrustStore_rejectsMalformedMac", async () => {
   // State F: mac field present but does not match /^[0-9a-f]{64}$/i → {ok:false, reason:"malformed"}.
   const d = tmpProject();
