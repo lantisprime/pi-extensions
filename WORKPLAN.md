@@ -11,16 +11,17 @@ the source of truth; older entries in the chain are `superseded`.
 
 ## Current state
 
-**P5F disk-backed per-project trust reader PLAN ACCEPTED** via codex 5-pass consensus (PR #143, commit `0ca3ee6`) — planning-only merge, no implementation yet. **P5 NL → /agents bg intent-gate workflow COMPLETE** (PR #141, commit `6d61802`). **P5b-2 zellij-terminal COMPLETE** (PR #139, commit `3c6e6b8`). **P5E1 backend selector COMPLETE** (PR #137, commit `8e41670`). **P5d cmux-control COMPLETE** (PRs #126, #128, #130, #131, #132) + **P5+ orphan reaper** bug fix merged (#134). **Next: P5F-1 pure reader extraction (ready to slice).**
+**P5F-1 disk-backed per-project trust reader COMPLETE** via codex cmux consensus (PR #145, commit `08a9be6`) — pure extraction slice, zero production callers. **P5F plan ACCEPTED** via codex 5-pass consensus (PR #143, `0ca3ee6`). **P5 NL → /agents bg intent-gate workflow COMPLETE** (PR #141, commit `6d61802`). **P5b-2 zellij-terminal COMPLETE** (PR #139, commit `3c6e6b8`). **P5E1 backend selector COMPLETE** (PR #137, commit `8e41670`). **P5d cmux-control COMPLETE** (PRs #126, #128, #130, #131, #132) + **P5+ orphan reaper** bug fix merged (#134). **Next: P5F-2 writer+resolver step-tables (author + plan-review).**
 
-- Chain head: `20260704-141949-post-merge-sync-p5f-plan-accepted-via-co-a0b1`
+- Chain head: `20260705-130253-post-merge-sync-p5f-1-trust-reader-compl-a5b3`
 - Status: active
-- Revises: `20260704-122521-post-merge-sync-p5-nl-agents-bg-intent-g-d94b`
-- Tags include: `canonical-workplan`, `workplan`, `p5f`, `p5f-plan-accepted`, `trust-reader`, `post-merge-sync`, `roadmap`, `p5f-1-next`
-- Summary: **Post-merge sync — P5F plan ACCEPTED via codex 5-pass consensus (#143, commit 0ca3ee6).** Planning-only merge; P5F-1 pure reader extraction is next; milestone `20260704-141556-p5f-7968`.
+- Revises: `20260704-141949-post-merge-sync-p5f-plan-accepted-via-co-a0b1`
+- Tags include: `canonical-workplan`, `workplan`, `p5f`, `p5f-1`, `p5f-1-complete`, `trust-reader`, `post-merge-sync`, `roadmap`, `p5f-2-next`
+- Summary: **Post-merge sync — P5F-1 trust reader COMPLETE (#145, 08a9be6).** R1 found P1 malformed-key rethrow blocker; consensus fix shipped + R2 approve. Next: P5F-2 writer+resolver step-tables. Stale PR #140 closed as superseded.
 
 ### Open follow-ups (details in canonical episode)
-- **P5F-1 (NEXT)** — pure reader extraction (zero production callers). Appendix B step 1.1 has full verbatim `bg-trust.ts` source; step 1.2 has 4 verbatim tests + an 8-test contract table (high-capability executor scope per PLAN_TEMPLATE). Branch: `feat/p5f-1-trust-reader`. P5F-2 (writer + resolver) + P5F-3 (read-side wiring) step-tables deferred to post-P5F-1-review.
+- **P5F-1 COMPLETE** (PR #145, `08a9be6`) — pure reader extraction shipped. cmux codex consensus: R1 → P1 blocker (malformed-key rethrow violating REQ-1/REQ-3) → consensus fix (message-prefix symlink carve-out + map all other non-ENOENT key failures → `forged` + `testReadTrustStore_rejectsMalformedKey` regression guard) → R2 `approve`. 13/13 tests green. Milestones `20260705-123617-p5f-1-7b3e` (consensus) + `20260705-125409-p5f-1-6994` (R2 approve).
+- **P5F-2 (NEXT)** — writer + resolver. APPEND `writeProjectTrustStore` + `resolveDefaultBackend` to `agents/lib/bg-trust.ts` (imports P5F-1's read primitives). Appendix B P5F-2 step-tables deferred by design — author now (reader held up under the 13 P5F-1 tests), then codex 5-pass plan review, then implement. Unblocks read-side of persistent per-project default backend.
 - **P5b alternative terminal backends** — zellij shipped; wezterm/headless next natural; cleanly testable from the CLI via the `--backend <name>` seam P5E1 shipped.
 - **Combined `--backend` + `--profile` in `parseBgArgs`** — still first-token-only for both flags; add when a real use case appears.
 - **P4R-PROJ Project Background Agents** — deferred (needs disk-backed trust reader — NOW shipping via P5F; P4R-PROJ can consume `readProjectTrustStore` once P5F-2 writer lands).
