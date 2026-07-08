@@ -933,6 +933,21 @@ await new Promise((r) => setTimeout(r, 0));
 ```
 `REPLACE` (the 7 new tests + the original anchor, so the run summary remains LAST):
 ```js
+// Shared serial lock for the 2 registry-mutating resolver tests
+// (testResolveDefaultBackend_returnsTrustedName + testResolveDefaultBackend_fallsBackWhenStoreForged).
+// The fire-and-forget test() shim runs all tests concurrently; without serialization, one test's
+// __resetBgTerminalBackend() (which wipes the WHOLE registry — backends=[]) can clear another's
+// stub mid-resolve, flaking returnsTrustedName. The lock runs the critical sections back-to-back;
+// then(fn, fn) runs fn regardless of the prior run's outcome, and re-assigning registryLock to a
+// settled promise keeps the chain unbroken even if an assertion rejects. Each test still owns its
+// cleanup via try/finally INSIDE the lock.
+let registryLock = Promise.resolve();
+function withRegistryLock(fn) {
+  const run = registryLock.then(fn, fn);
+  registryLock = run.then(() => undefined, () => undefined);
+  return run;
+}
+
 // --- Group 3: writeProjectTrustStore (4 tests) ---
 // VERBATIM (2 load-bearing): testWrite_atomicFailureLeavesFinalUntouched (discriminating),
 //   testReadTrustStore_rejectsAfterKeyRotation (red-then-green).
@@ -1006,26 +1021,34 @@ test("testResolveDefaultBackend_fallsBackWhenStoreForged", async () => {
   // fail-closed path returns null BEFORE consulting the registry, because readProjectTrustStore
   // returns {ok:false, reason:"forged"} (State G MAC mismatch). Distinct from the absent path —
   // this fixture creates a valid store and forges it, so null here can ONLY come from !read.ok.
+  // Serialized via withRegistryLock + try/finally — this test and returnsTrustedName both mutate the
+  // global backend registry; under the concurrent test() shim, an unsynchronized reset would wipe
+  // the other's stub mid-resolve (flake). tmpProject() is outside the lock (isolated file state).
   const d = tmpProject();
-  __resetBgTerminalBackend();
-  registerBgTerminalBackend({ name: "__p5f-stub", preference: 0, isAvailable: async () => true });
-  await writeProjectTrustStore(d, { defaultBackend: "__p5f-stub" });
-  // Rotate the key so the store's MAC (signed with key1) no longer verifies under key2 → forged.
-  rmSync(path.join(d, ".pi/trust/.trust.mac"));
-  const key2 = await readOrCreateProjectTrustKey(d);
-  assert.ok(key2, "rotated key must mint");
-  const read = await readProjectTrustStore(d);
-  assert.strictEqual(read.ok, false);
-  assert.ok(!read.ok && read.reason === "forged", "store must read forged after key rotation");
-  const resolved = await resolveDefaultBackend(d);
-  assert.strictEqual(resolved, null, "forged store resolves to null even with backend registered");
-  __resetBgTerminalBackend();
+  await withRegistryLock(async () => {
+    try {
+      __resetBgTerminalBackend();
+      registerBgTerminalBackend({ name: "__p5f-stub", preference: 0, isAvailable: async () => true });
+      await writeProjectTrustStore(d, { defaultBackend: "__p5f-stub" });
+      // Rotate the key so the store's MAC (signed with key1) no longer verifies under key2 → forged.
+      rmSync(path.join(d, ".pi/trust/.trust.mac"));
+      const key2 = await readOrCreateProjectTrustKey(d);
+      assert.ok(key2, "rotated key must mint");
+      const read = await readProjectTrustStore(d);
+      assert.strictEqual(read.ok, false);
+      assert.ok(!read.ok && read.reason === "forged", "store must read forged after key rotation");
+      const resolved = await resolveDefaultBackend(d);
+      assert.strictEqual(resolved, null, "forged store resolves to null even with backend registered");
+    } finally {
+      __resetBgTerminalBackend();
+    }
+  });
 });
 
 // Run summary:
 await new Promise((r) => setTimeout(r, 0));
 ```
-> **Executor note:** the 4 verbatim bodies above implement their contract-table rows directly; author the remaining 3 (`testWriteThenRead_roundtrip`, `testWrite_atomicTempRename`, `testResolveDefaultBackend_returnsTrustedName`) per the Group-3/4 tables below, then leave `// Run summary:` LAST so trailing async tests settle before the exit handler prints `passed/failed`. Tests run concurrently (the `test()` shim fires-and-forgets each `Promise`); each fixture must use its own `tmpProject()` dir to avoid shared-state races. The two Group-4 resolver tests that touch the global backend registry (`testResolveDefaultBackend_returnsTrustedName`, `testResolveDefaultBackend_fallsBackWhenStoreForged`) MUST `__resetBgTerminalBackend()` before/after to avoid bleeding registry state into other tests.
+> **Executor note:** the 4 verbatim bodies above implement their contract-table rows directly; author the remaining 3 (`testWriteThenRead_roundtrip`, `testWrite_atomicTempRename`, `testResolveDefaultBackend_returnsTrustedName`) per the Group-3/4 tables below, then leave `// Run summary:` LAST so trailing async tests settle before the exit handler prints `passed/failed`. Tests run concurrently (the `test()` shim fires-and-forgets each `Promise`); each fixture must use its own `tmpProject()` dir to avoid shared-state races. The two Group-4 resolver tests that touch the global backend registry (`testResolveDefaultBackend_returnsTrustedName`, `testResolveDefaultBackend_fallsBackWhenStoreForged`) MUST serialize on the shared `withRegistryLock` + `try { … } finally { __resetBgTerminalBackend(); }` (defined at the top of the appended block) — the `test()` shim is concurrent and `__resetBgTerminalBackend()` wipes the whole registry, so unsynchronized before/after resets flake `returnsTrustedName`.
 
 #### Group-3 contract — `writeProjectTrustStore` (4 tests)
 
@@ -1040,11 +1063,11 @@ await new Promise((r) => setTimeout(r, 0));
 
 | Test name | Asserted property | Flag |
 |---|---|---|
-| `testResolveDefaultBackend_returnsTrustedName` | `__resetBgTerminalBackend()`; register a stub `{ name: "__p5f-stub", preference: 0, isAvailable: async()=>true }`; `writeProjectTrustStore(d,{defaultBackend:"__p5f-stub"})`; `await resolveDefaultBackend(d)` → `"__p5f-stub"` (store valid + name registered). Restore registry (`__resetBgTerminalBackend()`) at test end. | — |
+| `testResolveDefaultBackend_returnsTrustedName` | Wrap the body in `await withRegistryLock(async () => { try { … } finally { __resetBgTerminalBackend(); } })` (serialize vs `testResolveDefaultBackend_fallsBackWhenStoreForged` — both mutate the global registry under the concurrent `test()` shim). Inside the lock: `__resetBgTerminalBackend()`; register stub `{ name: "__p5f-stub", preference: 0, isAvailable: async()=>true }`; `writeProjectTrustStore(d,{defaultBackend:"__p5f-stub"})`; `await resolveDefaultBackend(d)` → `"__p5f-stub"` (store valid + name registered). The `finally` reset guarantees the registry is clean for the next test even if an assertion rejects. | — |
 | `testResolveDefaultBackend_fallsBackWhenBackendUnregistered` | `writeProjectTrustStore(d,{defaultBackend:"__nonexistent-xyz"})`; `await resolveDefaultBackend(d)` → `null` (store `{ok:true}` and MAC+root valid, but `getBgTerminalBackendByName("__nonexistent-xyz")` is undefined → EC3 fallback). NB: no registry mutation needed. | discriminating (proves non-null REQUIRES a registered backend, not merely a valid store) |
 | `testResolveDefaultBackend_fallsBackWhenStoreForged` | **VERBATIM body above** (discriminating). Register stub `{name:"__p5f-stub",...}`; `writeProjectTrustStore(d,{defaultBackend:"__p5f-stub"})` (valid store); key-rotate (rm `.trust.mac` + `readOrCreateProjectTrustKey(d)` → key2) so `readProjectTrustStore(d)` → `{ok:false, reason:"forged"}` (State G MAC mismatch); `await resolveDefaultBackend(d)` → `null` (INV-3 fail-closed — null EVEN THOUGH the backend is registered; a fail-open bug would return the name). Reset registry at end. | discriminating (registered+forged→null proves fail-closed keys on `read.ok`, not on registry presence — absent-vs-forged must NOT collapse) |
 
-> Use the process-global **`__resetBgTerminalBackend()` test-only reset** (bg-terminal.ts exports it) to isolate the resolver stub in `testResolveDefaultBackend_returnsTrustedName` — it does NOT clash with real backends because the test process registers none by default, and the reset runs before+after. The stub name `__p5f-stub` is deliberately non-colliding with real backend names (`tmux`/`cmux`/`zellij`).
+> The two resolver tests that register a stub (`testResolveDefaultBackend_returnsTrustedName` + `testResolveDefaultBackend_fallsBackWhenStoreForged`) both mutate the **process-global** backend registry via `__resetBgTerminalBackend()` (bg-terminal.ts — test-only; wipes `backends=[]`). Because the `test()` shim is fire-and-forget (concurrent), they MUST serialize on the shared `withRegistryLock` (defined at the top of the appended block) and own cleanup via `try { … } finally { __resetBgTerminalBackend(); }`; otherwise one test's reset wipes the other's `__p5f-stub` mid-resolve and `returnsTrustedName` flakes. The test process registers no real backends, and `__p5f-stub` is deliberately non-colliding with `tmux`/`cmux`/`zellij`.
 
 **Verify (step 2.2 — whole slice green):**
 ```bash
