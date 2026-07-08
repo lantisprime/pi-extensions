@@ -899,17 +899,17 @@ grep -nE '^import .* from (node:|\./bg-state|\./bg-terminal)' agents/lib/bg-trus
 
 ### Step 2.2 — APPEND Group 3 + Group 4 tests to `agents/test/test-bg-trust.mjs`
 
-The new tests are appended to the SAME test file, mirroring P5F-1 step 1.2's precedent (high-capability executor scope): **3 verbatim load-bearing bodies** are given below — the 2 discriminating / red-then-green Group-3 cases (`testWrite_atomicFailureLeavesFinalUntouched`, `testReadTrustStore_rejectsAfterKeyRotation`) and the discriminating Group-4 case (`testResolveDefaultBackend_fallsBackWhenBackendUnregistered`); the remaining 4 are authored per the Group-3/4 contract tables below. **Three edits to ONE file:** two import edits (a.1 node:fs + a.2 bg-trust/bg-terminal) + one insert immediately ABOVE the `// Run summary:` block (b).
+The new tests are appended to the SAME test file, mirroring P5F-1 step 1.2's precedent (high-capability executor scope): **4 verbatim load-bearing bodies** are given below — the 2 discriminating / red-then-green Group-3 cases (`testWrite_atomicFailureLeavesFinalUntouched`, `testReadTrustStore_rejectsAfterKeyRotation`) and the 2 discriminating Group-4 cases (`testResolveDefaultBackend_fallsBackWhenBackendUnregistered` for the unregistered-backend negative control, `testResolveDefaultBackend_fallsBackWhenStoreForged` for the forged-store fail-closed negative control — absent-vs-forged must NOT collapse); the remaining 3 are authored per the Group-3/4 contract tables below. **Three edits to ONE file:** two import edits (a.1 node:fs + a.2 bg-trust/bg-terminal) + one insert immediately ABOVE the `// Run summary:` block (b).
 
-**(a.1) EDIT — add `lstatSync`, `readdirSync`, `statSync` to the `node:fs` import.** Needed by `testWrite_atomicTempRename` and `testWrite_atomicFailureLeavesFinalUntouched` (final-file stat + orphaned-temp glob).
+**(a.1) EDIT — add `lstatSync`, `readdirSync` to the `node:fs` import.** Needed by `testWrite_atomicTempRename` (final-file `lstatSync` for isFile + 0600-mode check) and `testWrite_atomicTempRename` + `testWrite_atomicFailureLeavesFinalUntouched` (`readdirSync` for the orphaned-temp glob).
 
 `ANCHOR` (exact, verbatim — line 2 of the shipped test file):
 ```js
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, symlinkSync, existsSync } from "node:fs";
 ```
-`REPLACE` (add the three missing fs helpers):
+`REPLACE` (add the two missing fs helpers):
 ```js
-import { lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, symlinkSync, existsSync } from "node:fs";
+import { lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, symlinkSync, existsSync } from "node:fs";
 ```
 
 **(a.2) EDIT — add `writeProjectTrustStore` + `resolveDefaultBackend` to the bg-trust import, and add `__resetBgTerminalBackend` + `registerBgTerminalBackend` to a NEW bg-terminal import.**
@@ -984,9 +984,10 @@ test("testReadTrustStore_rejectsAfterKeyRotation", async () => {
 });
 
 // --- Group 4: resolveDefaultBackend (3 tests) ---
-// VERBATIM (1 discriminating load-bearing): testResolveDefaultBackend_fallsBackWhenBackendUnregistered.
-// Contract-driven (author per Group-4 table):
-//   testResolveDefaultBackend_returnsTrustedName, testResolveDefaultBackend_fallsBackWhenStoreForged.
+// VERBATIM (2 discriminating load-bearing): testResolveDefaultBackend_fallsBackWhenBackendUnregistered
+//   (unregistered-backend → null) + testResolveDefaultBackend_fallsBackWhenStoreForged (forged-store → null).
+//   Together they isolate the two independent null paths; absent-vs-forged must NOT collapse.
+// Contract-driven (author per Group-4 table): testResolveDefaultBackend_returnsTrustedName.
 
 test("testResolveDefaultBackend_fallsBackWhenBackendUnregistered", async () => {
   const d = tmpProject();
@@ -998,17 +999,40 @@ test("testResolveDefaultBackend_fallsBackWhenBackendUnregistered", async () => {
   assert.strictEqual(resolved, null);
 });
 
+test("testResolveDefaultBackend_fallsBackWhenStoreForged", async () => {
+  // Discriminating fail-closed control: a store that is FORGED (MAC invalid via key rotation)
+  // MUST resolve to null EVEN WHEN its named backend IS currently registered. A fail-open bug
+  // (returning the stored name on read failure) would hand back "__p5f-stub" here; the correct
+  // fail-closed path returns null BEFORE consulting the registry, because readProjectTrustStore
+  // returns {ok:false, reason:"forged"} (State G MAC mismatch). Distinct from the absent path —
+  // this fixture creates a valid store and forges it, so null here can ONLY come from !read.ok.
+  const d = tmpProject();
+  __resetBgTerminalBackend();
+  registerBgTerminalBackend({ name: "__p5f-stub", preference: 0, isAvailable: async () => true });
+  await writeProjectTrustStore(d, { defaultBackend: "__p5f-stub" });
+  // Rotate the key so the store's MAC (signed with key1) no longer verifies under key2 → forged.
+  rmSync(path.join(d, ".pi/trust/.trust.mac"));
+  const key2 = await readOrCreateProjectTrustKey(d);
+  assert.ok(key2, "rotated key must mint");
+  const read = await readProjectTrustStore(d);
+  assert.strictEqual(read.ok, false);
+  assert.ok(!read.ok && read.reason === "forged", "store must read forged after key rotation");
+  const resolved = await resolveDefaultBackend(d);
+  assert.strictEqual(resolved, null, "forged store resolves to null even with backend registered");
+  __resetBgTerminalBackend();
+});
+
 // Run summary:
 await new Promise((r) => setTimeout(r, 0));
 ```
-> **Executor note:** the 3 verbatim bodies above implement their contract-table rows directly; author the remaining 4 (`testWriteThenRead_roundtrip`, `testWrite_atomicTempRename`, `testResolveDefaultBackend_returnsTrustedName`, `testResolveDefaultBackend_fallsBackWhenStoreForged`) per the Group-3/4 tables below, then leave `// Run summary:` LAST so trailing async tests settle before the exit handler prints `passed/failed`. Tests run concurrently (the `test()` shim fires-and-forgets each `Promise`); each fixture must use its own `tmpProject()` dir to avoid shared-state races.
+> **Executor note:** the 4 verbatim bodies above implement their contract-table rows directly; author the remaining 3 (`testWriteThenRead_roundtrip`, `testWrite_atomicTempRename`, `testResolveDefaultBackend_returnsTrustedName`) per the Group-3/4 tables below, then leave `// Run summary:` LAST so trailing async tests settle before the exit handler prints `passed/failed`. Tests run concurrently (the `test()` shim fires-and-forgets each `Promise`); each fixture must use its own `tmpProject()` dir to avoid shared-state races. The two Group-4 resolver tests that touch the global backend registry (`testResolveDefaultBackend_returnsTrustedName`, `testResolveDefaultBackend_fallsBackWhenStoreForged`) MUST `__resetBgTerminalBackend()` before/after to avoid bleeding registry state into other tests.
 
 #### Group-3 contract — `writeProjectTrustStore` (4 tests)
 
 | Test name | Asserted property | Flag |
 |---|---|---|
 | `testWriteThenRead_roundtrip` | `writeProjectTrustStore(d, {defaultBackend:"tmux"})` resolves to a `ProjectTrustStore`; `readProjectTrustStore(d)` returns `{ok:true, store}` with `store.defaultBackend==="tmux"`, `store.schemaVersion===1`, `store.mac` matches `/^[0-9a-f]{64}$/i`, `store.projectRootSha256===projectRootSha256(d)`, `store.keyGenId` is 8 hex chars. | — |
-| `testWrite_atomicTempRename` | After `writeProjectTrustStore(d,{defaultBackend:"cmux"})`: `lstatSync(trustFilePath).isFile()===true` AND `isSymbolicLink()===false`; file mode is 0600 (`(stat.mode & 0o077) === 0`); a `readdirSync(.pi/trust)` contains NO entry matching `/default-backend\.json\.tmp\./` (leftover temp absent — proves temp was renamed away); re-`readProjectTrustStore(d)` → `{ok:true,"cmux"}`. | — |
+| `testWrite_atomicTempRename` | After `writeProjectTrustStore(d,{defaultBackend:"cmux"})`: `const final = path.join(d,".pi/trust/default-backend.json")`; `lstatSync(final).isFile()===true` AND `.isSymbolicLink()===false`; `(lstatSync(final).mode & 0o077) === 0` (0600); `readdirSync(path.join(d,".pi/trust")).filter(n => /default-backend\.json\.tmp\./.test(n))` is empty (leftover temp absent — proves temp was renamed away); re-`readProjectTrustStore(d)` → `{ok:true,"cmux"}`. NB `trustFilePath` is module-private/unexported — spell the path literal (P2 fix). | — |
 | `testWrite_atomicFailureLeavesFinalUntouched` | Pre-write v1 (`defaultBackend:"tmux"`) → read `{ok:true,"tmux"}`. Call `writeProjectTrustStore(d,{defaultBackend:"cmux"},{now:()=>{throw new Error("inject-now")}})` inside `try/catch` — it MUST throw. THEN re-`readProjectTrustStore(d)` → STILL `{ok:true,"tmux"}` (prior final unchanged). AND `readdirSync(.pi/trust)` has NO `*.tmp.*` entry (no orphaned temp). | discriminating (failing `now` proves the writer computes the FULL store BEFORE any write — a streaming-to-final impl would leave a torn final here) |
 | `testReadTrustStore_rejectsAfterKeyRotation` | `writeProjectTrustStore(d,{defaultBackend:"tmux"})` → read `{ok:true}`. Save `key1Hex = readFileSync(.trust.mac)`. Delete `.trust.mac`; mint a fresh key (e.g. another `readOrCreateProjectTrustKey(d)` → `key2`), assert `key2.toString("hex") !== key1Hex.trim()` (rotation actually happened). Read → `{ok:false, reason:"forged"}` (State G — MAC signed w/ key1 fails under key2). **Red-then-green:** restore key1 (write `key1Hex` back to `.trust.mac`, 0600) → read → `{ok:true,"tmux"}`. | red-then-green |
 
@@ -1018,7 +1042,7 @@ await new Promise((r) => setTimeout(r, 0));
 |---|---|---|
 | `testResolveDefaultBackend_returnsTrustedName` | `__resetBgTerminalBackend()`; register a stub `{ name: "__p5f-stub", preference: 0, isAvailable: async()=>true }`; `writeProjectTrustStore(d,{defaultBackend:"__p5f-stub"})`; `await resolveDefaultBackend(d)` → `"__p5f-stub"` (store valid + name registered). Restore registry (`__resetBgTerminalBackend()`) at test end. | — |
 | `testResolveDefaultBackend_fallsBackWhenBackendUnregistered` | `writeProjectTrustStore(d,{defaultBackend:"__nonexistent-xyz"})`; `await resolveDefaultBackend(d)` → `null` (store `{ok:true}` and MAC+root valid, but `getBgTerminalBackendByName("__nonexistent-xyz")` is undefined → EC3 fallback). NB: no registry mutation needed. | discriminating (proves non-null REQUIRES a registered backend, not merely a valid store) |
-| `testResolveDefaultBackend_fallsBackWhenStoreForged` | Do NOT write any store (absent). `await resolveDefaultBackend(d)` → `null` (readProjectTrustStore returns `{ok:false, reason:"absent"}` → INV-3 fail-closed). | — |
+| `testResolveDefaultBackend_fallsBackWhenStoreForged` | **VERBATIM body above** (discriminating). Register stub `{name:"__p5f-stub",...}`; `writeProjectTrustStore(d,{defaultBackend:"__p5f-stub"})` (valid store); key-rotate (rm `.trust.mac` + `readOrCreateProjectTrustKey(d)` → key2) so `readProjectTrustStore(d)` → `{ok:false, reason:"forged"}` (State G MAC mismatch); `await resolveDefaultBackend(d)` → `null` (INV-3 fail-closed — null EVEN THOUGH the backend is registered; a fail-open bug would return the name). Reset registry at end. | discriminating (registered+forged→null proves fail-closed keys on `read.ok`, not on registry presence — absent-vs-forged must NOT collapse) |
 
 > Use the process-global **`__resetBgTerminalBackend()` test-only reset** (bg-terminal.ts exports it) to isolate the resolver stub in `testResolveDefaultBackend_returnsTrustedName` — it does NOT clash with real backends because the test process registers none by default, and the reset runs before+after. The stub name `__p5f-stub` is deliberately non-colliding with real backend names (`tmux`/`cmux`/`zellij`).
 
