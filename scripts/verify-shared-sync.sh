@@ -7,6 +7,7 @@ TARGETS=(
   "$ROOT/prompt-shield/lib/security-scan.ts"
   "$ROOT/web-search/lib/security-scan.ts"
   "$ROOT/agents/lib/security-scan.ts"
+  "$ROOT/mcp-gateway/lib/security-scan.ts"
 )
 
 for target in "${TARGETS[@]}"; do
