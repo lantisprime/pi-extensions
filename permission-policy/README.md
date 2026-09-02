@@ -12,6 +12,7 @@ A Pi extension that asks before allowing sensitive operations and stores persist
 - Destructive-looking shell commands via `bash` and user `!` commands, as a more specific category
 - Git commands via `bash` and user `!` commands, detected broadly with `\bgit\b`, as a more specific category
 - Web/search/fetch-style tools by tool name
+- MCP server tool calls via the dedicated `mcp` category — any tool from the MCP bridge extension (namespace `mcp_<server>_<tool>`) requires the `Call MCP server tools` permission; names are never misclassified as web just because the underlying MCP tool name contains "search"
 
 ## Permission choices
 
@@ -52,7 +53,7 @@ Use the current LLM to classify bash/git commands. Commands classified as `SAFE`
 /permissions mode yolo
 ```
 
-Dangerous YOLO mode. Automatically allows permission requests by default, including bash/git/web/write/outside-read categories, without prompting. The extension still hard-blocks `rm -f`/`rm -rf` style commands and commands that appear to delete the repository or its `.git` metadata.
+Dangerous YOLO mode. Automatically allows permission requests by default, including bash/git/web/write/outside-read/MCP categories, without prompting. The extension still hard-blocks `rm -f`/`rm -rf` style commands and commands that appear to delete the repository or its `.git` metadata.
 
 When enabling YOLO mode, Pi shows an explicit warning and confirmation prompt. Use YOLO only in disposable or fully trusted workspaces.
 
@@ -66,6 +67,7 @@ If `prompt-shield` reports active unapproved suspicious/dangerous project or glo
 - web/search/fetch
 - write/edit
 - reads outside the project
+- MCP server tool calls
 
 Prompt Shield state is read from:
 
