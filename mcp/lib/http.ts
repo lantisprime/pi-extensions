@@ -205,17 +205,21 @@ export class HttpTransport implements Transport {
 				const read = await reader.read();
 				if (read.done) break;
 				buffer += decoder.decode(read.value, { stream: true });
-				let boundary: number;
-				while ((boundary = buffer.indexOf("\n\n")) !== -1) {
-					const block = buffer.slice(0, boundary);
-					buffer = buffer.slice(boundary + 2);
+				let boundary = findSseBoundary(buffer);
+				while (boundary !== null) {
+					const block = buffer.slice(0, boundary.end);
+					buffer = buffer.slice(boundary.next);
 					const data = parseSseBlock(block);
-					if (data === null) continue;
+					if (data === null) {
+						boundary = findSseBoundary(buffer);
+						continue;
+					}
 					const parsed = this.dispatchText(data);
 					if (parsed !== undefined && isTerminal(parsed)) {
 						done = true;
 						break;
 					}
+					boundary = findSseBoundary(buffer);
 				}
 			}
 		} catch (error) {
@@ -251,6 +255,19 @@ export class HttpTransport implements Transport {
 		this.messageHandler?.(parsed);
 		return parsed;
 	}
+}
+
+/**
+ * Find the earliest SSE event boundary. Servers in the wild emit both LF
+ * ("\n\n") and CRLF ("\r\n\r\n") terminators (the SSE spec allows both);
+ * only scanning for "\n\n" silently drops CRLF events.
+ */
+function findSseBoundary(buffer: string): { end: number; next: number } | null {
+	const lf = buffer.indexOf("\n\n");
+	const crlf = buffer.indexOf("\r\n\r\n");
+	if (crlf !== -1 && (lf === -1 || crlf < lf)) return { end: crlf, next: crlf + 4 };
+	if (lf !== -1) return { end: lf, next: lf + 2 };
+	return null;
 }
 
 function parseSseBlock(block: string): string | null {

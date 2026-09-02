@@ -131,5 +131,52 @@ await check("401 without refreshHeaders surfaces as error", async () => {
 await client.close();
 server.close();
 
+// --- SSE responses with CRLF line endings must parse (LiteLLM-style) --------
+
+const crlfServer = http.createServer((req, res) => {
+	let raw = "";
+	req.on("data", (chunk) => (raw += chunk));
+	req.on("end", () => {
+		const message = JSON.parse(raw);
+		const reply = (result) => {
+			const data = JSON.stringify({ jsonrpc: "2.0", id: message.id, result });
+			res.writeHead(200, { "Content-Type": "text/event-stream" });
+			res.write(`event: message\r\ndata: ${data}\r\n\r\n`);
+			res.end();
+		};
+		if (message.method === "initialize") {
+			reply({ protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "crlf-server", version: "1" } });
+		} else if (message.method === "tools/list") {
+			reply({ tools: [{ name: "echo", description: "echo", inputSchema: { type: "object" } }] });
+		} else if (message.method === "notifications/initialized") {
+			res.writeHead(200, { "Content-Type": "text/event-stream" });
+			res.end();
+		} else {
+			res.writeHead(400);
+			res.end();
+		}
+	});
+});
+await new Promise((resolve) => crlfServer.listen(0, "127.0.0.1", resolve));
+const crlfUrl = `http://127.0.0.1:${crlfServer.address().port}/mcp`;
+const crlfClient = new McpClient(new HttpTransport({ url: crlfUrl }), {
+	clientName: "crlf-test",
+	clientVersion: "0.0.1",
+	requestTimeoutMs: 3000,
+});
+
+await check("initialize parses SSE with CRLF line endings", async () => {
+	await crlfClient.connect();
+	assert.equal(crlfClient.serverInfo.name, "crlf-server");
+});
+
+await check("tools/list parses SSE with CRLF line endings", async () => {
+	const tools = await crlfClient.listTools();
+	assert.equal(tools.length, 1);
+});
+
+await crlfClient.close();
+crlfServer.close();
+
 console.log(failed === 0 ? "\nAll headers tests passed" : `\n${failed} test(s) FAILED`);
 process.exit(failed === 0 ? 0 : 1);
