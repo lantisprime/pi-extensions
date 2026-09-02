@@ -36,3 +36,10 @@ jobs:
 
       - name: Run permission-policy classification unit tests
         run: npx --yes tsx permission-policy/test-fixtures/test-classification.ts
+
+      - name: Run MCP bridge protocol tests
+        run: |
+          npx --yes tsx mcp/test/run-config-test.mjs
+          npx --yes tsx mcp/test/run-headers-test.mjs
+          npx --yes tsx mcp/test/run-client-test.mjs
+          npx --yes tsx mcp/test/run-http-test.mjs
