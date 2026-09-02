@@ -15,6 +15,7 @@ This project contains custom [Pi](https://pi.dev) extensions.
   - [Secure Web Search](#secure-web-search)
   - [P3 Agents](#p3-agents)
   - [Tool Context Loader](#tool-context-loader)
+  - [MCP Bridge](#mcp-bridge)
 
 ## How they work together
 
@@ -49,6 +50,10 @@ cp -R agents/index.ts agents/lib ~/.pi/agent/extensions/agents/
 
 mkdir -p ~/.pi/agent/extensions/tool-context-loader
 cp tool-context-loader/index.ts ~/.pi/agent/extensions/tool-context-loader/index.ts
+
+mkdir -p ~/.pi/agent/extensions/mcp
+cp mcp/index.ts ~/.pi/agent/extensions/mcp/index.ts
+cp -R mcp/lib ~/.pi/agent/extensions/mcp/lib
 ```
 
 Then in Pi:
@@ -444,3 +449,49 @@ Commands:
 ```
 
 See [`tool-context-loader/README.md`](tool-context-loader/README.md) for details.
+
+### MCP Bridge
+
+Connects [Model Context Protocol](https://modelcontextprotocol.io) servers to pi. Every tool an MCP server exposes becomes a native pi tool (`mcp_<server>_<tool>`), whether the server runs locally over stdio (`command`) or remotely over Streamable HTTP (`url`).
+
+Files:
+
+```text
+mcp/index.ts
+mcp/lib/
+```
+
+Install globally:
+
+```bash
+mkdir -p ~/.pi/agent/extensions/mcp
+cp mcp/index.ts ~/.pi/agent/extensions/mcp/index.ts
+cp -R mcp/lib ~/.pi/agent/extensions/mcp/lib
+```
+
+Declare servers in `~/.pi/agent/mcp.json` (global) or `.pi/mcp.json` (project):
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/projects"]
+    },
+    "docs": {
+      "url": "https://docs.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${DOCS_TOKEN}" }
+    }
+  }
+}
+```
+
+Commands:
+
+```text
+/mcp
+/mcp reconnect <server>
+/mcp tools [server]
+```
+
+Project-local configs are honored only in trusted projects. See [`mcp/README.md`](mcp/README.md) for the full config format, behavior details, and tests.
