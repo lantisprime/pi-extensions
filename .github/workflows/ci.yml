@@ -43,3 +43,6 @@ jobs:
           npx --yes tsx mcp/test/run-headers-test.mjs
           npx --yes tsx mcp/test/run-client-test.mjs
           npx --yes tsx mcp/test/run-http-test.mjs
+
+      - name: Run herdr-control tests
+        run: bash herdr-control/test-fixtures/run-tests.sh
