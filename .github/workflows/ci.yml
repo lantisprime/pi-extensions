@@ -22,6 +22,20 @@ jobs:
         with:
           node-version: '22'
 
+      # The suites invoke tools via npx (tsx, typescript@6). Cold registry
+      # downloads dominated CI time (7-12 min runs when npm is slow); cache
+      # the npx store and warm both tools in one step.
+      - name: Cache npx tool store
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm/_npx
+          key: npx-${{ runner.os }}-tsx-typescript6-v1
+
+      - name: Warm npx tools
+        run: |
+          npx --yes tsx --version
+          npx --yes -p typescript@6 tsc --version
+
       - name: Verify shared scanner vendored copies are in sync
         run: scripts/verify-shared-sync.sh
 
@@ -43,3 +57,6 @@ jobs:
           npx --yes tsx mcp/test/run-headers-test.mjs
           npx --yes tsx mcp/test/run-client-test.mjs
           npx --yes tsx mcp/test/run-http-test.mjs
+
+      - name: Run herdr-control tests
+        run: bash herdr-control/test-fixtures/run-tests.sh
