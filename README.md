@@ -16,6 +16,7 @@ This project contains custom [Pi](https://pi.dev) extensions.
   - [P3 Agents](#p3-agents)
   - [Tool Context Loader](#tool-context-loader)
   - [MCP Bridge](#mcp-bridge)
+  - [Herdr Control](#herdr-control)
 
 ## How they work together
 
@@ -27,6 +28,7 @@ This project contains custom [Pi](https://pi.dev) extensions.
 | Review pipeline | P3 Agents (chain) | `/agents chain scout,planner,reviewer <task>` |
 | Safe web research | Web Search | Use `secure_web_search` tool (no raw `curl`) |
 | Command guidance | Tool Context Loader | Drop a `.pi/runbooks/*.md` file → `/tool-context-loader rescan` |
+| Subagent delegation via herdr | Herdr Control | `herdr spawn pi-herdr-worker <task>` or the `herdr_spawn` tool |
 | Full safety stack | All five | Load all extensions → see [docs/USER_MANUAL.md](docs/USER_MANUAL.md) |
 
 ## Installing extensions globally
@@ -495,3 +497,22 @@ Commands:
 ```
 
 Project-local configs are honored only in trusted projects. See [`mcp/README.md`](mcp/README.md) for the full config format, behavior details, and tests.
+
+### Herdr Control
+
+Launches and coordinates subagents through [herdr](https://herdr.dev), the agent-aware terminal multiplexer. Spawns a subagent (pi, claude, codex, …) in a sibling pane, submits its task, waits for the agent to actually settle via herdr's lifecycle detection (`idle`/`done`/`blocked` — not keystroke guessing), and reads the transcript back.
+
+Files:
+
+```text
+herdr-control/index.ts
+herdr-control/lib/
+```
+
+Install globally (symlink, so edits in this repo take effect on `/reload`):
+
+```bash
+ln -sfn "$(pwd)/herdr-control" ~/.pi/agent/extensions/herdr-control
+```
+
+Requires pi to run inside a herdr pane (`HERDR_ENV=1`) and herdr ≥ 0.8. Tools: `herdr_agents`, `herdr_spawn`, `herdr_prompt`, `herdr_read`, `herdr_send_keys` (user-confirmed), `herdr_close` (registry-gated to panes this session spawned), `herdr_terminal` (plain shell pane/tab/workspace, optional command). Commands: `/herdr-list`, `/herdr-spawn`, `/herdr-term`, `/herdr-config`. Spawn names are prefix-gated (`pi-herdr-` by default); blocked approval dialogs are surfaced, never auto-answered. See [`herdr-control/README.md`](herdr-control/README.md) and [`herdr-control/PLAN.md`](herdr-control/PLAN.md).

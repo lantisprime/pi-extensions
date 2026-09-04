@@ -1,0 +1,22 @@
+{
+  "name": "herdr-control",
+  "version": "0.1.0",
+  "description": "Launch and coordinate subagents through herdr from inside pi. Sibling-pane spawn pipeline, lifecycle-aware waits, registry-gated cleanup.",
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "test": "bash test-fixtures/run-tests.sh"
+  },
+  "keywords": ["pi", "extension", "herdr", "subagents", "agents"],
+  "license": "MIT",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "//peer": "typebox is provided by pi's extension loader (jiti virtualModules) at runtime, like tmux-control. We declare it as a devDependency for the test runner, which runs via `node --experimental-strip-types` and does not have access to pi's loader context. We intentionally avoid a runtime import of @earendil-works/pi-ai: lib/string-enum.ts replicates its Google-compatible StringEnum schema shape locally.",
+  "devDependencies": {
+    "typebox": "^1.1.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
