@@ -2,7 +2,7 @@
 
 ## Status
 
-Planning only — **plan review consensus REACHED (codex APPROVE, Pass 5)**. Plan ACCEPTED for slicing P5F-1 by a high-capability executor. P5F-2/P5F-3 step tables still deferred by design (authored after P5F-1 review).
+Planning + execution tracking. **Plan review consensus REACHED (codex APPROVE, Pass 5)**; plan ACCEPTED. **P5F-1 MERGED** (#145, `08a9be6`). **P5F-2 step-tables AUTHORED below** (post-P5F-1-merge, anchored against the shipped reader at `agents/lib/bg-trust.ts`). **P5F-3** step-tables still deferred (authored after P5F-2 review).
 
 ## Episode Search Summary
 
@@ -153,7 +153,7 @@ resolveDefaultBackend(projectDir=ctx.cwd)
 
 | Slice | Objective | Primary files | Key deliverables | Tests | Hard stops |
 |---|---|---|---|---|---|
-| `P5F-1` | Pure extraction: project MAC key + read primitives (no writers, no wiring). Zero behavior change. | `agents/lib/bg-trust.ts` (new), `agents/test/test-bg-trust.mjs` (new), `agents/test/run-bg-trust-tests.sh` (new) | `resolveProjectRoot`, `projectRootSha256`, `sha256Hex`, `readOrCreateProjectTrustKey`, `readProjectTrustStore` (REQ-1/2/3/4/7/10/11). | 12 unit tests (Group 1 = 10 incl. C/D/E + mac-ordering; Group 2 = 2). | No production caller; existing suite green. |
+| `P5F-1` | Pure extraction: project MAC key + read primitives (no writers, no wiring). Zero behavior change. | `agents/lib/bg-trust.ts` (new), `agents/test/test-bg-trust.mjs` (new), `agents/test/run-bg-trust-tests.sh` (new) | `resolveProjectRoot`, `projectRootSha256`, `sha256Hex`, `readOrCreateProjectTrustKey`, `readProjectTrustStore` (REQ-1/2/3/4/7/10/11). | 13 unit tests (Group 1 = 11 incl. C/D/E + mac-ordering + malformed-key guard from R1; Group 2 = 2). | No production caller; existing suite green. |
 | `P5F-2` | Writer + default-backend resolver. | `agents/lib/bg-trust.ts` (APPEND writer + resolver), `agents/test/test-bg-trust.mjs` (APPEND tests) | `writeProjectTrustStore` (REQ-6), `resolveDefaultBackend` (REQ-5/8). | 7 unit tests (Group 3 = 4 incl. atomic-failure; Group 4 = 3). | Writer invoked only by tests; no command path yet. |
 | `P5F-3` | `/agents bg` read-side wiring + preflight snapshot source. | `agents/index.ts` (EDIT), `agents/lib/bg-preflight.ts` (EDIT), `agents/test/test-bg-preflight.mjs` (APPEND) | REQ-8 (default backend consulted), REQ-9 (`projectTrusted` sourced from disk). | 4 unit tests (Group 5) + 1 smoke (UNGUARDED-IN-CI). | Explicit `--backend` still wins (regression guard). |
 
@@ -276,7 +276,7 @@ Group 6: invariants (2 static + 1 UNGUARDED-IN-CI manual)
   static: grep — bg-trust.ts never imports resolveTrustedHome|readOrCreateSessionMacKey|getBgStateDir|getBgSessionMacPath (INV-2)
   manual: grep — verifyBgPayloadMac call line < projectRootSha256 compare line in bg-trust.ts (REQ-10 ordering, UNGUARDED-IN-CI)
 
-Total: 23 unit tests + 2 static + 1 UNGUARDED-IN-CI manual grep (REQ-10) + 1 UNGUARDED-IN-CI smoke.
+Total: 24 unit tests + 2 static + 1 UNGUARDED-IN-CI manual grep (REQ-10) + 1 UNGUARDED-IN-CI smoke.  (P5F-1 shipped 13, not 12 — the R1 fix added `testReadTrustStore_rejectsMalformedKey`; 13 + P5F-2's 7 + P5F-3's 4 = 24.)
 ```
 
 ## Risk Analysis
@@ -339,7 +339,7 @@ Total: 23 unit tests + 2 static + 1 UNGUARDED-IN-CI manual grep (REQ-10) + 1 UNG
 ### Files to create
 
 1. `agents/lib/bg-trust.ts` — trust store types, project MAC key, reader, writer, resolver (REQ-1–11). P5F-1 creates primitives; P5F-2 APPENDs writer + resolver.
-2. `agents/test/test-bg-trust.mjs` — Groups 1–4 (23 unit tests + 2 static).
+2. `agents/test/test-bg-trust.mjs` — Groups 1–4 (20 unit tests + 2 static)  (P5F-1's 13 + P5F-2's 7 = 20).
 3. `agents/test/run-bg-trust-tests.sh` — slice test runner (mirrors `tmux-control/test-fixtures/run-control-tests.sh` pattern).
 
 ### Files to modify
@@ -353,8 +353,8 @@ Total: 23 unit tests + 2 static + 1 UNGUARDED-IN-CI manual grep (REQ-10) + 1 UNG
 
 | Step | Action | Validation |
 |---|---|---|
-| 1 (P5F-1) | Implement `resolveProjectRoot` (rule resolved in OD-1) + `sha256Hex` + `projectRootSha256` + `readOrCreateProjectTrustKey` + `readProjectTrustStore` + 12 Group-1/2 tests (incl. C/D/E + mac-ordering). | `bash agents/test/run-bg-trust-tests.sh` → 12 green; existing suite green; `grep -n "resolveTrustedHome\|readOrCreateSessionMacKey\|getBgStateDir\|getBgSessionMacPath" agents/lib/bg-trust.ts` empty. |
-| 2 (P5F-2) | APPEND `writeProjectTrustStore` + `resolveDefaultBackend` + 7 Group-3/4 tests (incl. EC5 rotation + atomic-failure). | Slice runner → 19 green. |
+| 1 (P5F-1) | Implement `resolveProjectRoot` (rule resolved in OD-1) + `sha256Hex` + `projectRootSha256` + `readOrCreateProjectTrustKey` + `readProjectTrustStore` + 13 Group-1/2 tests (incl. C/D/E + mac-ordering + malformed-key guard from R1). | `bash agents/test/run-bg-trust-tests.sh` → 13 green; existing suite green; `grep -n "resolveTrustedHome\|readOrCreateSessionMacKey\|getBgStateDir\|getBgSessionMacPath" agents/lib/bg-trust.ts` empty. |
+| 2 (P5F-2) | APPEND `writeProjectTrustStore` + `resolveDefaultBackend` + the atomic-write helper + 7 Group-3/4 tests (incl. EC5 rotation + atomic-failure). | Slice runner → **20 green** (P5F-1 shipped 13, not 12 — the R1 fix added `testReadTrustStore_rejectsMalformedKey`). |
 | 3 (P5F-3) | EDIT `index.ts` (default-backend consultation, L713 region) + EDIT `bg-preflight.ts` (boolean source) + 4 Group-5 tests + approve the `UNGUARDED-IN-CI` smoke. | Full `agents` test suite green; explicit-overrides-default discriminating regression green. |
 
 ### Risks (impl)
@@ -380,7 +380,7 @@ Total: 23 unit tests + 2 static + 1 UNGUARDED-IN-CI manual grep (REQ-10) + 1 UNG
 
 **Executor-ready gate:** every step's `File` column names exactly one file; every EDIT step quotes a verbatim `ANCHOR` and exact `REPLACE`; whole-file `Write` only for new-file CREATE steps; no step text contains "decide"/"choose"/"figure out"/"as appropriate"/"if needed"/"etc."/"e.g."/as-intent-"assert that"/"verify that"; every constant, error string, regex, and signature appears verbatim below.
 
-**Scope clause (P5F-1 step 1.2 — high-capability executor):** the test file targets a **high-capability executor** (the orchestrator's default pi model — e.g. `minimax/MiniMax-M3` per the `cmux-orchestrator` skill — NOT a low-capability sub-agent). Per the `PLAN_TEMPLATE`, Appendix B's executor-ready gate may be scoped to high-capability-only when the plan will not be implemented by a low-capability model. P5F-1 step 1.2 therefore provides 4 load-bearing verbatim test bodies + an explicit 8-test contract (name, asserted read-state, red-then-green/discriminating flag) for the remaining tests; it is NOT a full 12-test verbatim file. P5F-1 step 1.1 (`bg-trust.ts` source) IS full verbatim and IS executor-ready for a low-capability model. P5F-2/P5F-3 step tables remain deferred by design (noted at the end of step 1.3).
+**Scope clause (P5F-1 step 1.2 — high-capability executor):** the test file targets a **high-capability executor** (the orchestrator's default pi model — e.g. `minimax/MiniMax-M3` per the `cmux-orchestrator` skill — NOT a low-capability sub-agent). Per the `PLAN_TEMPLATE`, Appendix B's executor-ready gate may be scoped to high-capability-only when the plan will not be implemented by a low-capability model. P5F-1 step 1.2 therefore provides 4 load-bearing verbatim test bodies + an explicit 8-test contract (name, asserted read-state, red-then-green/discriminating flag) for the remaining tests; it is NOT a full 12-test verbatim file. P5F-1 step 1.1 (`bg-trust.ts` source) IS full verbatim and IS executor-ready for a low-capability model. **P5F-2 step-tables are now authored** in the `### P5F-2` section below (post-P5F-1-merge); P5F-3 step tables remain deferred by design (noted at the end of step 1.3).
 
 ### Shared constants / types (add once)
 
@@ -403,7 +403,7 @@ const RESOLVE_ROOT_ERR = "resolveProjectRoot: no .pi or .git ancestor for ";
 | 1.2 | `agents/test/test-bg-trust.mjs` | **CREATE** (whole-file Write). Test source: 4 load-bearing verbatim tests + 8 named-test contracts. P5F-1 step 1.2 targets a **high-capability executor** per the Appendix B scope clause (NOT the low-capability executor-ready gate). Imports `readOrCreateProjectTrustKey`, `readProjectTrustStore`, `projectRootSha256`, `resolveProjectRoot` from `../lib/bg-trust.ts`; imports `signBgPayload`, `readOrCreateSessionMacKey` from `../lib/bg-state.ts` (the correct relative path from `agents/test/` to `agents/lib/`). | `node agents/test/test-bg-trust.mjs` → prints `12/12 passing` AND `BREAK=1 node agents/test/test-bg-trust.mjs` exits non-zero (proves negative controls reach real assertions: when `BREAK=1` the foreign-root test uses identical roots, so the `assert.notStrictEqual` fails → non-zero exit). |
 | 1.3 | `agents/test/run-bg-trust-tests.sh` | **CREATE** (whole-file Write). Verbatim contents: `#!/usr/bin/env bash\nset -euo pipefail\ncd "$(dirname "$0")/../.."\nnode agents/test/test-bg-trust.mjs\n` (executable bit: `chmod +x` after create). | `bash agents/test/run-bg-trust-tests.sh; echo "EXIT=$?"` → `EXIT=0`. |
 
-**(P5F-1 commits here. P5F-2 and P5F-3 step-tables authored after P5F-1 review — the writer/resolver signatures depend on the reader holding up under the P5F-1 tests, and anchoring their EDITs against reviewed-stable code is safer than pre-anchoring against a file that may shift in review. This is a deferred gate, NOT a blocker for Pass 2 acceptance of P5F-1.)**
+**(P5F-1 commits here. P5F-1 review COMPLETE — PR #145 merged (`08a9be6`); reader held up under 13 tests incl. the R1 fix `testReadTrustStore_rejectsMalformedKey`. P5F-2 step-tables are now authored in the `### P5F-2` section below, anchored against the shipped `bg-trust.ts` (no P5F-1 edits beyond additive imports + append). P5F-3 step-tables remain deferred — authored after P5F-2 review.)**
 
 ### P5F-1 step 1.1 — verbatim `bg-trust.ts` source
 
@@ -727,4 +727,368 @@ process.on("exit", () => { console.log(`${passed}/${passed+failed} passing`); if
 
 ### Definition of done (whole plan)
 
-`bash agents/test/run-bg-trust-tests.sh` prints all 23 unit tests + 2 static passing; `grep -nE "resolveTrustedHome\|readOrCreateSessionMacKey\|getBgStateDir\|getBgSessionMacPath" agents/lib/bg-trust.ts` returns empty (INV-2 invariant grep); the existing `agents`/`tmux-control`/`tmux-terminal`/`agents`-preflight suites all green; and the `testBgCommand_explicitBackendOverridesDefault_discriminating` regression test green (P5E1 contract preserved).
+`bash agents/test/run-bg-trust-tests.sh` prints all 24 unit tests + 2 static passing; `grep -nE "resolveTrustedHome\|readOrCreateSessionMacKey\|getBgStateDir\|getBgSessionMacPath" agents/lib/bg-trust.ts` returns empty (INV-2 invariant grep); the existing `agents`/`tmux-control`/`tmux-terminal`/`agents`-preflight suites all green; and the `testBgCommand_explicitBackendOverridesDefault_discriminating` regression test green (P5E1 contract preserved).
+
+---
+
+## Appendix B (P5F-2): Writer + Default-Backend Resolver — mechanical execution spec
+
+**Authored post-P5F-1-merge** (anchored against the shipped `agents/lib/bg-trust.ts` at commit `08a9be6`, NOT the pre-review verbatim block above). P5F-1 review confirmed the reader holds up under 13 tests; the writer/resolver signatures below compose with the shipped reader's exported + module-private primitives. **Additive only:** P5F-2 makes three targeted edits to `bg-trust.ts` (two import edits + one append) and appends tests to `test-bg-trust.mjs`. No P5F-1 body code is rewritten.
+
+**Executor:** high-capability (orchestrator's default pi model, e.g. `minimax/MiniMax-M3` per the `cmux-orchestrator` skill). Step 2.1 source is full-verbatim, copy-pasteable; step 2.2 is a contract table (author tests to match name + asserted property + flag).
+
+**Load-bearing KEY TYPES (already exported by P5F-1, reused unchanged):** `ProjectTrustStore`, `ProjectTrustReadResult`. **Load-bearing MODULE-PRIVATE primitives (in-scope, same file):** `trustFilePath`, `ensureProjectTrustDir`, `readProjectTrustKey`, `readOrCreateProjectTrustKey`, `projectRootSha256`, and the constants `PROJECT_TRUST_SCHEMA_VERSION`/`PROJECT_TRUST_DIR`/`PROJECT_TRUST_FILE`/`PROJECT_TRUST_MAC_BYTES`. **Load-bearing IMPORTED primitives:** `signBgPayload`, `keyGenIdFromKey` from `./bg-state.ts` (INV-5 — no second HMAC scheme; `verifyBgPayloadMac` not needed by the writer), and a NEW import `getBgTerminalBackendByName` from `./bg-terminal.ts` (REQ-5).
+
+### REQ-11 EXTENSION (P5F-2)
+
+REQ-11 was a P5F-1 invariant scoped to the **reader** (`node:crypto`, `node:fs`, `node:path`, `./bg-state.ts`). P5F-2 EXTENDS the allowed import set to include `./bg-terminal.ts` (the resolver's `getBgTerminalBackendByName`, REQ-5). The INV-2 grep (`resolveTrustedHome|readOrCreateSessionMacKey|getBgStateDir|getBgSessionMacPath`) still MUST return empty — `./bg-terminal.ts` does not export those (confirmed: it exports `registerBgTerminalBackend`, `getBgTerminalBackend`, `getBgTerminalBackendByName`, `selectBgTerminalBackend`, `__resetBgTerminalBackend`). The updated static grep for P5F-2 is:
+
+```bash
+grep -nE '^import .* from (node:|\./bg-state|\./bg-terminal)' agents/lib/bg-trust.ts
+# EXPECTED: exactly node:crypto, node:fs, node:fs/promises, node:path, ./bg-state.ts, ./bg-terminal.ts — nothing third-party.
+```
+
+### Step 2.1 — APPEND writer + atomic-write helper + resolver to `agents/lib/bg-trust.ts`
+
+Three edits to ONE file. Apply (a), (b), (c) in order.
+
+**(a) EDIT — add `renameSync` to the `node:fs` import.**
+
+`ANCHOR` (exact, verbatim, in `bg-trust.ts`):
+```ts
+import { constants, existsSync, lstatSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+```
+`REPLACE` (same line, `renameSync` inserted in alphabetical position):
+```ts
+import { constants, existsSync, lstatSync, mkdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+```
+
+**(b) EDIT — add the `./bg-terminal.ts` import after the `./bg-state.ts` import.**
+
+`ANCHOR` (exact, verbatim):
+```ts
+import { signBgPayload, verifyBgPayloadMac, keyGenIdFromKey } from "./bg-state.ts";
+```
+`REPLACE` (the anchor line + the new import line beneath it):
+```ts
+import { signBgPayload, verifyBgPayloadMac, keyGenIdFromKey } from "./bg-state.ts";
+// P5F-2 (REQ-5/INV-3): resolveDefaultBackend consults the term-backend registry. INV-2
+// still holds — bg-terminal.ts exports only the registry fns, never resolveTrustedHome /
+// readOrCreateSessionMacKey / getBgStateDir / getBgSessionMacPath.
+import { getBgTerminalBackendByName } from "./bg-terminal.ts";
+```
+
+**(c) APPEND — writer + atomic-write helper + resolver, appended after `isValidTrustStoreShape` (the last function in the shipped file).**
+
+`ANCHOR` (exact, verbatim — the file's terminal function; the new source is appended immediately after its closing brace):
+```ts
+function isValidTrustStoreShape(v: unknown): boolean {
+  if (typeof v !== "object" || v === null) return false;
+  const o = v as Record<string, unknown>;
+  return (
+    o.schemaVersion === PROJECT_TRUST_SCHEMA_VERSION &&
+    typeof o.projectRootSha256 === "string" &&
+    typeof o.defaultBackend === "string" &&
+    typeof o.grantedAtMs === "number" &&
+    typeof o.keyGenId === "string" &&
+    typeof o.mac === "string"
+  );
+}
+```
+`APPEND` (verbatim source — copy verbatim after the anchor's closing brace):
+```ts
+
+// ─── P5F-2: writer + default-backend resolver (REQ-5/6/8) ───────────────────
+// Atomic write + the sole trust-store writer + the read-side default-backend
+// resolver. All compose with the shipped P5F-1 reader primitives (same module).
+// The writer IS the sole key-creator (readOrCreateProjectTrustKey mints on ENOENT);
+// the reader never creates. INV-2/INV-3/INV-5 all hold — see REQ-11 EXTENSION above.
+
+function tempTrustFilePath(projectDir: string): string {
+  // Per-process, per-write unique temp-name suffix (6 random bytes hex). Collisions
+  // between concurrent writers for the same project are negligible; on the off chance
+  // of a collision, writeFileSync's {flag:"wx"} semantics are NOT used here (the temp
+  // path includes randomness, so the orphaned-temp contract (REQ-6) tolerates any
+  // leftover 0600 tmpfile — the reader never reads the temp, only the renamed final).
+  const suffix = cryptoRandomBytes(6).toString("hex");
+  return path.join(projectDir, PROJECT_TRUST_DIR, `${PROJECT_TRUST_FILE}.tmp.${suffix}`);
+}
+
+// REQ-6 atomic write: temp file (0600) → renameSync. On any failure (writeFileSync
+// throws, renameSync throws, disk full, ENOSPC mid-write) the prior FINAL file is
+// left unchanged because the final path is only ever mutated by the atomic rename.
+// An orphaned 0600 temp file is acceptable per REQ-6 — the reader ignores temps
+// (it reads trustFilePath, which never matches the `*.tmp.<hex>` suffix).
+// Exported (testable directly) but not part of the public P5F surface outside this module.
+export function atomicWriteTrustStoreSync(projectDir: string, store: ProjectTrustStore): void {
+  ensureProjectTrustDir(projectDir);
+  const finalPath = trustFilePath(projectDir);
+  const tmpPath = tempTrustFilePath(projectDir);
+  writeFileSync(tmpPath, JSON.stringify(store), { mode: 0o600 });
+  renameSync(tmpPath, finalPath);
+}
+
+// REQ-6: the ONLY writer. Mints a trust grant: computes projectRootSha256, stamps
+// grantedAtMs, reads-or-mints the project MAC key, signs the store-minus-mac with
+// signBgPayload (canonicalJson — key-order-independent, so the reader's
+// verifyBgPayloadMac over the parsed JSON reproduces the same MAC), writes
+// atomically (temp + rename, 0600). options.randomBytes / options.now are TEST
+// injection seams mirroring readOrCreateProjectTrustKey's existing randomBytes param
+// (the codebase's DI convention); they default to the real crypto and Date.now().
+export async function writeProjectTrustStore(
+  projectDir: string,
+  grant: { defaultBackend: string },
+  options: { randomBytes?: (size: number) => Buffer; now?: () => number } = {},
+): Promise<ProjectTrustStore> {
+  if (typeof projectDir !== "string" || !path.isAbsolute(projectDir)) {
+    throw new TypeError("writeProjectTrustStore: projectDir must be an absolute path");
+  }
+  if (typeof grant?.defaultBackend !== "string" || grant.defaultBackend.length === 0) {
+    throw new TypeError("writeProjectTrustStore: grant.defaultBackend must be a non-empty string");
+  }
+  // Compute the FULL store BEFORE any write. A failure here (no .pi/.git ancestor in
+  // projectRootSha256, an injected-throwing now()/randomBytes on key mint) leaves the
+  // prior final file untouched and creates NO temp file — the atomic-rename contract.
+  const rootSha = projectRootSha256(projectDir);
+  const projectKey = await readOrCreateProjectTrustKey(projectDir, options.randomBytes);
+  const storeWithoutMac = {
+    schemaVersion: PROJECT_TRUST_SCHEMA_VERSION,
+    projectRootSha256: rootSha,
+    defaultBackend: grant.defaultBackend,
+    grantedAtMs: options.now ? options.now() : Date.now(),
+    keyGenId: keyGenIdFromKey(projectKey),
+  };
+  const mac = signBgPayload(storeWithoutMac, projectKey);
+  const store: ProjectTrustStore = { ...storeWithoutMac, mac };
+  atomicWriteTrustStoreSync(projectDir, store);
+  return store;
+}
+
+// REQ-5 / INV-3: read-side resolver. Returns a registered backend name ONLY when
+// readProjectTrustStore returns ok:true (valid + MAC + root-bound) AND the named
+// backend is currently registered. Any read failure (absent/forged/malformed/
+// symlink) OR an unregistered backend name → null; the caller falls back to
+// selectBgTerminalBackend() (the preference probe, current behavior at
+// bg-terminal.ts:175). INV-4 (explicit overrides default) is enforced by the CALLER
+// (index.ts L695 explicit --backend branch short-circuits before calling this);
+// resolveDefaultBackend is consulted only in the flag-absent branch (index.ts L713).
+// (P5F-3 wires the caller — P5F-2 ships the primitive + tests, zero production callers.)
+export async function resolveDefaultBackend(projectDir: string): Promise<string | null> {
+  if (typeof projectDir !== "string" || !path.isAbsolute(projectDir)) {
+    throw new TypeError("resolveDefaultBackend: projectDir must be an absolute path");
+  }
+  const read = await readProjectTrustStore(projectDir);
+  if (!read.ok) return null;                            // INV-3 fail-closed → preference probe
+  const backend = getBgTerminalBackendByName(read.store.defaultBackend);
+  return backend ? read.store.defaultBackend : null;    // EC3: unregistered → null
+}
+```
+
+**Verify (step 2.1):**
+```bash
+node -e "import('./agents/lib/bg-trust.ts').then(m=>console.log(Object.keys(m).join(',')))"
+# EXPECTED keys include: writeProjectTrustStore, resolveDefaultBackend, atomicWriteTrustStoreSync
+#   (plus the P5F-1 exports readProjectTrustStore, readOrCreateProjectTrustKey,
+#    readProjectTrustKey, sha256Hex, resolveProjectRoot, projectRootSha256, + constants)
+grep -nE "resolveTrustedHome|readOrCreateSessionMacKey|getBgStateDir|getBgSessionMacPath" agents/lib/bg-trust.ts
+# EXPECTED: empty (INV-2 still holds after the new ./bg-terminal.ts import).
+grep -nE '^import .* from (node:|\./bg-state|\./bg-terminal)' agents/lib/bg-trust.ts
+# EXPECTED: node:crypto, node:fs, node:fs/promises, node:path, ./bg-state.ts, ./bg-terminal.ts ONLY.
+```
+(The slice runner is NOT yet green after step 2.1 alone — the new exports are unused until step 2.2's tests are appended. That is expected; the existing 13 tests still pass.)
+
+### Step 2.2 — APPEND Group 3 + Group 4 tests to `agents/test/test-bg-trust.mjs`
+
+The new tests are appended to the SAME test file, mirroring P5F-1 step 1.2's precedent (high-capability executor scope): **4 verbatim load-bearing bodies** are given below — the 2 discriminating / red-then-green Group-3 cases (`testWrite_atomicFailureLeavesFinalUntouched`, `testReadTrustStore_rejectsAfterKeyRotation`) and the 2 discriminating Group-4 cases (`testResolveDefaultBackend_fallsBackWhenBackendUnregistered` for the unregistered-backend negative control, `testResolveDefaultBackend_fallsBackWhenStoreForged` for the forged-store fail-closed negative control — absent-vs-forged must NOT collapse); the remaining 3 are authored per the Group-3/4 contract tables below. **Three edits to ONE file:** two import edits (a.1 node:fs + a.2 bg-trust/bg-terminal) + one insert immediately ABOVE the `// Run summary:` block (b).
+
+**(a.1) EDIT — add `lstatSync`, `readdirSync` to the `node:fs` import.** Needed by `testWrite_atomicTempRename` (final-file `lstatSync` for isFile + 0600-mode check) and `testWrite_atomicTempRename` + `testWrite_atomicFailureLeavesFinalUntouched` (`readdirSync` for the orphaned-temp glob).
+
+`ANCHOR` (exact, verbatim — line 2 of the shipped test file):
+```js
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, symlinkSync, existsSync } from "node:fs";
+```
+`REPLACE` (add the two missing fs helpers):
+```js
+import { lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, symlinkSync, existsSync } from "node:fs";
+```
+
+**(a.2) EDIT — add `writeProjectTrustStore` + `resolveDefaultBackend` to the bg-trust import, and add `__resetBgTerminalBackend` + `registerBgTerminalBackend` to a NEW bg-terminal import.**
+
+`ANCHOR` (exact, verbatim — the bg-trust import line of the test file):
+```js
+import { readOrCreateProjectTrustKey, readProjectTrustStore, projectRootSha256, readProjectTrustKey, sha256Hex } from "../lib/bg-trust.ts";
+```
+`REPLACE` (extend that import + add the bg-terminal import beneath it):
+```js
+import { readOrCreateProjectTrustKey, readProjectTrustStore, projectRootSha256, readProjectTrustKey, sha256Hex, writeProjectTrustStore, resolveDefaultBackend } from "../lib/bg-trust.ts";
+import { registerBgTerminalBackend, __resetBgTerminalBackend } from "../lib/bg-terminal.ts";
+```
+
+**(b) APPEND — insert the 7 new tests immediately BEFORE the `// Run summary:` line.**
+
+`ANCHOR` (exact, verbatim — the run-summary sentinel in the shipped test file):
+```js
+// Run summary:
+await new Promise((r) => setTimeout(r, 0));
+```
+`REPLACE` (the 7 new tests + the original anchor, so the run summary remains LAST):
+```js
+// Shared serial lock for the 2 registry-mutating resolver tests
+// (testResolveDefaultBackend_returnsTrustedName + testResolveDefaultBackend_fallsBackWhenStoreForged).
+// The fire-and-forget test() shim runs all tests concurrently; without serialization, one test's
+// __resetBgTerminalBackend() (which wipes the WHOLE registry — backends=[]) can clear another's
+// stub mid-resolve, flaking returnsTrustedName. The lock runs the critical sections back-to-back;
+// then(fn, fn) runs fn regardless of the prior run's outcome, and re-assigning registryLock to a
+// settled promise keeps the chain unbroken even if an assertion rejects. Each test still owns its
+// cleanup via try/finally INSIDE the lock.
+let registryLock = Promise.resolve();
+function withRegistryLock(fn) {
+  const run = registryLock.then(fn, fn);
+  registryLock = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+// --- Group 3: writeProjectTrustStore (4 tests) ---
+// VERBATIM (2 load-bearing): testWrite_atomicFailureLeavesFinalUntouched (discriminating),
+//   testReadTrustStore_rejectsAfterKeyRotation (red-then-green).
+// Contract-driven (author per Group-3 table): testWriteThenRead_roundtrip, testWrite_atomicTempRename.
+// NOTE: the shared `mintStore()` helper hardcodes keyGenId="UNUSED_IN_FIXTURE" — use it ONLY for
+// forged-negative fixtures; `testWriteThenRead_roundtrip` MUST call `writeProjectTrustStore` so
+// that `keyGenId` is the real 8-hex derived id (asserted by that test's contract).
+
+test("testWrite_atomicFailureLeavesFinalUntouched", async () => {
+  const d = tmpProject();
+  await writeProjectTrustStore(d, { defaultBackend: "tmux" });
+  let r = await readProjectTrustStore(d);
+  assert.ok(r.ok, "pre-write v1 must read ok");
+  assert.strictEqual(r.ok && r.store.defaultBackend, "tmux");
+  // Inject a throwing now() during store assembly — BEFORE any write. A streaming-to-final
+  // impl would leave a torn final; the temp+rename contract MUST leave the prior final
+  // untouched and create no temp file.
+  await assert.rejects(
+    writeProjectTrustStore(d, { defaultBackend: "cmux" }, { now: () => { throw new Error("inject-now"); } }),
+    /inject-now/,
+  );
+  r = await readProjectTrustStore(d);
+  assert.strictEqual(r.ok, true, "after failed write the prior final must still read ok");
+  assert.strictEqual(r.ok && r.store.defaultBackend, "tmux");
+  const leftovers = readdirSync(path.join(d, ".pi/trust")).filter((n) => /\.tmp\./.test(n));
+  assert.deepStrictEqual(leftovers, [], "no orphaned temp file must remain");
+});
+
+test("testReadTrustStore_rejectsAfterKeyRotation", async () => {
+  const d = tmpProject();
+  await writeProjectTrustStore(d, { defaultBackend: "tmux" });
+  let r = await readProjectTrustStore(d);
+  assert.ok(r.ok, "post-write read must be ok");
+  const keyPath = path.join(d, ".pi/trust/.trust.mac");
+  const key1Hex = readFileSync(keyPath, "utf8");
+  // Rotate: delete .trust.mac + mint a fresh key. The store's MAC was signed with key1,
+  // so under key2 it MUST read forged (State G MAC mismatch). Then restore key1 → ok (green).
+  rmSync(keyPath);
+  const key2 = await readOrCreateProjectTrustKey(d);
+  assert.notStrictEqual(key2.toString("hex"), key1Hex.trim(), "rotation must mint a distinct key");
+  r = await readProjectTrustStore(d);
+  assert.strictEqual(r.ok, false);
+  assert.ok(!r.ok && r.reason === "forged", "rotated key must invalidate the MAC");
+  // RED-then-GREEN: restore key1 → MAC recomputes valid → ok:true.
+  writeFileSync(keyPath, key1Hex, { mode: 0o600 });
+  r = await readProjectTrustStore(d);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.ok && r.store.defaultBackend, "tmux");
+});
+
+// --- Group 4: resolveDefaultBackend (3 tests) ---
+// VERBATIM (2 discriminating load-bearing): testResolveDefaultBackend_fallsBackWhenBackendUnregistered
+//   (unregistered-backend → null) + testResolveDefaultBackend_fallsBackWhenStoreForged (forged-store → null).
+//   Together they isolate the two independent null paths; absent-vs-forged must NOT collapse.
+// Contract-driven (author per Group-4 table): testResolveDefaultBackend_returnsTrustedName.
+
+test("testResolveDefaultBackend_fallsBackWhenBackendUnregistered", async () => {
+  const d = tmpProject();
+  await writeProjectTrustStore(d, { defaultBackend: "__nonexistent-xyz" });
+  // Store reads ok:true (valid MAC + root-bound) and the name is syntactically fine, BUT
+  // getBgTerminalBackendByName("__nonexistent-xyz") is undefined (never registered).
+  // resolveDefaultBackend MUST return null (EC3 fallback), NOT the stored name.
+  const resolved = await resolveDefaultBackend(d);
+  assert.strictEqual(resolved, null);
+});
+
+test("testResolveDefaultBackend_fallsBackWhenStoreForged", async () => {
+  // Discriminating fail-closed control: a store that is FORGED (MAC invalid via key rotation)
+  // MUST resolve to null EVEN WHEN its named backend IS currently registered. A fail-open bug
+  // (returning the stored name on read failure) would hand back "__p5f-stub" here; the correct
+  // fail-closed path returns null BEFORE consulting the registry, because readProjectTrustStore
+  // returns {ok:false, reason:"forged"} (State G MAC mismatch). Distinct from the absent path —
+  // this fixture creates a valid store and forges it, so null here can ONLY come from !read.ok.
+  // Serialized via withRegistryLock + try/finally — this test and returnsTrustedName both mutate the
+  // global backend registry; under the concurrent test() shim, an unsynchronized reset would wipe
+  // the other's stub mid-resolve (flake). tmpProject() is outside the lock (isolated file state).
+  const d = tmpProject();
+  await withRegistryLock(async () => {
+    try {
+      __resetBgTerminalBackend();
+      registerBgTerminalBackend({ name: "__p5f-stub", preference: 0, isAvailable: async () => true });
+      await writeProjectTrustStore(d, { defaultBackend: "__p5f-stub" });
+      // Rotate the key so the store's MAC (signed with key1) no longer verifies under key2 → forged.
+      rmSync(path.join(d, ".pi/trust/.trust.mac"));
+      const key2 = await readOrCreateProjectTrustKey(d);
+      assert.ok(key2, "rotated key must mint");
+      const read = await readProjectTrustStore(d);
+      assert.strictEqual(read.ok, false);
+      assert.ok(!read.ok && read.reason === "forged", "store must read forged after key rotation");
+      const resolved = await resolveDefaultBackend(d);
+      assert.strictEqual(resolved, null, "forged store resolves to null even with backend registered");
+    } finally {
+      __resetBgTerminalBackend();
+    }
+  });
+});
+
+// Run summary:
+await new Promise((r) => setTimeout(r, 0));
+```
+> **Executor note:** the 4 verbatim bodies above implement their contract-table rows directly; author the remaining 3 (`testWriteThenRead_roundtrip`, `testWrite_atomicTempRename`, `testResolveDefaultBackend_returnsTrustedName`) per the Group-3/4 tables below, then leave `// Run summary:` LAST so trailing async tests settle before the exit handler prints `passed/failed`. Tests run concurrently (the `test()` shim fires-and-forgets each `Promise`); each fixture must use its own `tmpProject()` dir to avoid shared-state races. The two Group-4 resolver tests that touch the global backend registry (`testResolveDefaultBackend_returnsTrustedName`, `testResolveDefaultBackend_fallsBackWhenStoreForged`) MUST serialize on the shared `withRegistryLock` + `try { … } finally { __resetBgTerminalBackend(); }` (defined at the top of the appended block) — the `test()` shim is concurrent and `__resetBgTerminalBackend()` wipes the whole registry, so unsynchronized before/after resets flake `returnsTrustedName`.
+
+#### Group-3 contract — `writeProjectTrustStore` (4 tests)
+
+| Test name | Asserted property | Flag |
+|---|---|---|
+| `testWriteThenRead_roundtrip` | `writeProjectTrustStore(d, {defaultBackend:"tmux"})` resolves to a `ProjectTrustStore`; `readProjectTrustStore(d)` returns `{ok:true, store}` with `store.defaultBackend==="tmux"`, `store.schemaVersion===1`, `store.mac` matches `/^[0-9a-f]{64}$/i`, `store.projectRootSha256===projectRootSha256(d)`, `store.keyGenId` is 8 hex chars. | — |
+| `testWrite_atomicTempRename` | After `writeProjectTrustStore(d,{defaultBackend:"cmux"})`: `const final = path.join(d,".pi/trust/default-backend.json")`; `lstatSync(final).isFile()===true` AND `.isSymbolicLink()===false`; `(lstatSync(final).mode & 0o077) === 0` (0600); `readdirSync(path.join(d,".pi/trust")).filter(n => /default-backend\.json\.tmp\./.test(n))` is empty (leftover temp absent — proves temp was renamed away); re-`readProjectTrustStore(d)` → `{ok:true,"cmux"}`. NB `trustFilePath` is module-private/unexported — spell the path literal (P2 fix). | — |
+| `testWrite_atomicFailureLeavesFinalUntouched` | Pre-write v1 (`defaultBackend:"tmux"`) → read `{ok:true,"tmux"}`. Call `writeProjectTrustStore(d,{defaultBackend:"cmux"},{now:()=>{throw new Error("inject-now")}})` inside `try/catch` — it MUST throw. THEN re-`readProjectTrustStore(d)` → STILL `{ok:true,"tmux"}` (prior final unchanged). AND `readdirSync(.pi/trust)` has NO `*.tmp.*` entry (no orphaned temp). | discriminating (failing `now` proves the writer computes the FULL store BEFORE any write — a streaming-to-final impl would leave a torn final here) |
+| `testReadTrustStore_rejectsAfterKeyRotation` | `writeProjectTrustStore(d,{defaultBackend:"tmux"})` → read `{ok:true}`. Save `key1Hex = readFileSync(.trust.mac)`. Delete `.trust.mac`; mint a fresh key (e.g. another `readOrCreateProjectTrustKey(d)` → `key2`), assert `key2.toString("hex") !== key1Hex.trim()` (rotation actually happened). Read → `{ok:false, reason:"forged"}` (State G — MAC signed w/ key1 fails under key2). **Red-then-green:** restore key1 (write `key1Hex` back to `.trust.mac`, 0600) → read → `{ok:true,"tmux"}`. | red-then-green |
+
+#### Group-4 contract — `resolveDefaultBackend` (3 tests)
+
+| Test name | Asserted property | Flag |
+|---|---|---|
+| `testResolveDefaultBackend_returnsTrustedName` | Wrap the body in `await withRegistryLock(async () => { try { … } finally { __resetBgTerminalBackend(); } })` (serialize vs `testResolveDefaultBackend_fallsBackWhenStoreForged` — both mutate the global registry under the concurrent `test()` shim). Inside the lock: `__resetBgTerminalBackend()`; register stub `{ name: "__p5f-stub", preference: 0, isAvailable: async()=>true }`; `writeProjectTrustStore(d,{defaultBackend:"__p5f-stub"})`; `await resolveDefaultBackend(d)` → `"__p5f-stub"` (store valid + name registered). The `finally` reset guarantees the registry is clean for the next test even if an assertion rejects. | — |
+| `testResolveDefaultBackend_fallsBackWhenBackendUnregistered` | `writeProjectTrustStore(d,{defaultBackend:"__nonexistent-xyz"})`; `await resolveDefaultBackend(d)` → `null` (store `{ok:true}` and MAC+root valid, but `getBgTerminalBackendByName("__nonexistent-xyz")` is undefined → EC3 fallback). NB: no registry mutation needed. | discriminating (proves non-null REQUIRES a registered backend, not merely a valid store) |
+| `testResolveDefaultBackend_fallsBackWhenStoreForged` | **VERBATIM body above** (discriminating). Register stub `{name:"__p5f-stub",...}`; `writeProjectTrustStore(d,{defaultBackend:"__p5f-stub"})` (valid store); key-rotate (rm `.trust.mac` + `readOrCreateProjectTrustKey(d)` → key2) so `readProjectTrustStore(d)` → `{ok:false, reason:"forged"}` (State G MAC mismatch); `await resolveDefaultBackend(d)` → `null` (INV-3 fail-closed — null EVEN THOUGH the backend is registered; a fail-open bug would return the name). Reset registry at end. | discriminating (registered+forged→null proves fail-closed keys on `read.ok`, not on registry presence — absent-vs-forged must NOT collapse) |
+
+> The two resolver tests that register a stub (`testResolveDefaultBackend_returnsTrustedName` + `testResolveDefaultBackend_fallsBackWhenStoreForged`) both mutate the **process-global** backend registry via `__resetBgTerminalBackend()` (bg-terminal.ts — test-only; wipes `backends=[]`). Because the `test()` shim is fire-and-forget (concurrent), they MUST serialize on the shared `withRegistryLock` (defined at the top of the appended block) and own cleanup via `try { … } finally { __resetBgTerminalBackend(); }`; otherwise one test's reset wipes the other's `__p5f-stub` mid-resolve and `returnsTrustedName` flakes. The test process registers no real backends, and `__p5f-stub` is deliberately non-colliding with `tmux`/`cmux`/`zellij`.
+
+**Verify (step 2.2 — whole slice green):**
+```bash
+bash agents/test/run-bg-trust-tests.sh
+# EXPECTED: prints "20/20 passing" (P5F-1 shipped 13; P5F-2 appends Group 3 (4) + Group 4 (3) = 7), EXIT=0.
+grep -nE 'refusing symlinked|writeFileSync' agents/lib/bg-trust.ts | head   # sanity (optional)
+```
+
+### P5F-2 UNGUARDED-IN-CI manual grep (atomicity)
+
+Per the same honesty convention as REQ-10 ordering, the atomic temp+rename implementation is verified by a named manual grep (mechanically unverifiable in plain ESM without a mock library, which REQ-11 forbids — a thrown-between-writeFileSync-and-renameSync fault cannot be injected without a banned mock or a third dependency-injected `renameSync` seam that would violate the keep-it-minimal DI convention):
+```bash
+grep -nE 'tmp\.|renameSync|writeFileSync' agents/lib/bg-trust.ts
+# EXPECTED: tempTrustFilePath produces a `${PROJECT_TRUST_FILE}.tmp.<hex>` path; atomicWriteTrustStoreSync
+# does writeFileSync(tmpPath,…,{mode:0o600}) THEN renameSync(tmpPath, finalPath). Both present in source.
+```
+The mechanically-verifiable atomicity signals are `testWriteThenRead_roundtrip` (happy-path complete + correct), `testWrite_atomicTempRename` (final is a regular 0600 file, no orphaned temp, reads back ok:true), and `testWrite_atomicFailureLeavesFinalUntouched` (a pre-write failure via injected throwing `now()` leaves the prior final unchanged + creates no temp). The source-order temp-then-rename is the manual-grep row.
+
+### P5F-2 done gate
+
+- `bash agents/test/run-bg-trust-tests.sh` → `20/20 passing`, EXIT=0.
+- INV-2 grep empty; REQ-11 (extended) grep shows only the 6 allowed import sources.
+- `grep -rln 'from.*bg-trust' agents/lib/ agents/index.ts` → STILL no matches (P5F-2 ships **zero production callers**; the resolver is wired by P5F-3, the writer by a future `P5F-GRANT` UX — both out of this slice's scope, per Non-Goals 1 & the INV-4 caller note).
+- Existing P5F-1 tests (13) untouched; existing `agents`/`tmux-control`/`tmux-terminal`/`agents`-preflight suites still green.
