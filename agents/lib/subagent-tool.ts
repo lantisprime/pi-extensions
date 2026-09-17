@@ -12,6 +12,7 @@ import { formatChildAgentRunResult, runBuiltInChildAgent, runChildAgent, type Ch
 import { parseAgentMarkdownFile } from "./agent-markdown.ts";
 import { resolveExplicitToolContextLoaderPath, resolveRegisteredRunTarget } from "./run-resolver.ts";
 import { prepareAgentTask } from "./context-providers/prepare-task.ts";
+import type { ModelProfileLibrary } from "./profiles.ts";
 
 // --- Types ---
 
@@ -22,6 +23,10 @@ export type SubagentRunContext = {
 	piCommand?: string;
 	childRunner?: ChildAgentRunner;
 	explicitToolContextLoaderPath?: string;
+	/** Profile library for spec `profile:` resolution (parity with /agents run).
+	 *  Without it, a registered spec declaring `profile:` fails closed in the child
+	 *  runner with "profile requested but no profile library is available". */
+	profileLibrary?: ModelProfileLibrary;
 };
 
 export type SubagentRunDetails = {
@@ -133,7 +138,7 @@ export async function executeSubagentRun(agent: string, task: string, runCtx: Su
 		try {
 			const result = runCtx.childRunner
 				? await runCtx.childRunner(validatedAgent, prepared.task, childOptions)
-				: await runBuiltInChildAgent(validatedAgent, prepared.task, childOptions);
+				: await runBuiltInChildAgent(validatedAgent, prepared.task, childOptions, runCtx.profileLibrary);
 			const { text, details } = compactResult(result);
 			return { ok: result.status === "completed", text, details, isError: result.status !== "completed" };
 		} catch (error) {
@@ -199,9 +204,18 @@ export async function executeSubagentRun(agent: string, task: string, runCtx: Su
 	// single-seam invariant (N6) and forward-compat with a future frontmatter `context:` field.
 	const prepared = await prepareAgentTask(currentParsed.spec, validatedTask, { cwd: runCtx.cwd });
 	try {
+		// Mirror executeChildRunResult (run-resolver.ts): the direct-runner path gets project
+		// trust material (for the project-profile trust check) and the profile library (for
+		// spec `profile:` resolution). The childRunner DI seam keeps the plain childOptions
+		// contract (it receives the spec and resolves profiles itself).
+		const directRunnerOptions = {
+			...childOptions,
+			projectTrusted: runCtx.projectTrusted,
+			projectRegistry: diagnostics.projectRegistry,
+		};
 		const result = runCtx.childRunner
 			? await runCtx.childRunner(currentParsed.spec, prepared.task, childOptions)
-			: await runChildAgent(currentParsed.spec, prepared.task, childOptions);
+			: await runChildAgent(currentParsed.spec, prepared.task, directRunnerOptions, runCtx.profileLibrary);
 		const { text, details } = compactResult(result);
 		return { ok: result.status === "completed", text, details, isError: result.status !== "completed" };
 	} catch (error) {

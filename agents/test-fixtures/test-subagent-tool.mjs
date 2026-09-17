@@ -848,6 +848,185 @@ async function testBuiltInPathParityWithAgentsRun() {
 	assert.equal(subResult.isError, false);
 }
 
+// --- Group 9: Profile parity — tool path vs /agents run ---
+// Regression: executeSubagentRun previously called runChildAgent WITHOUT the profile
+// library or project trust material, so any registered spec declaring `profile:` always
+// failed with "profile requested but no profile library is available" via run_subagent,
+// while the same agent ran fine via /agents run (run-resolver threads ctx.profileLibrary).
+
+function makeProfileLibrary(profiles) {
+	return { profiles };
+}
+
+async function writeAndRegisterUserSpec(dirName, specBody) {
+	const userDir = await fs.mkdtemp(path.join(os.tmpdir(), dirName));
+	const userAgentsDir = path.join(userDir, ".pi", "agent", "agents");
+	await fs.mkdir(userAgentsDir, { recursive: true });
+	const specPath = path.join(userAgentsDir, "profiled.md");
+	await fs.writeFile(specPath, specBody);
+	const { registerAgent } = await import("../lib/registration.ts");
+	const regResult = await registerAgent(specPath, { cwd: userDir, homeDir: userDir, projectTrusted: false, hasUI: true, ui: confirmAllUi() });
+	assert.equal(regResult.status, "registered");
+	return userDir;
+}
+
+async function testRegisteredProfileSpecWithoutLibraryStillFailsClosed() {
+	const userDir = await writeAndRegisterUserSpec("subagent-prof-nolib-", `---
+name: profiled
+description: d
+source: user
+tools: [read]
+profile: fast
+prompt: p
+---
+b
+`);
+	// No profileLibrary on the run context, and no childRunner seam → the direct
+	// runner path must fail closed BEFORE any process spawn (durationMs 0).
+	const result = await executeSubagentRun("profiled", "x", baseCtx({
+		cwd: userDir, homeDir: userDir,
+	}));
+	assert.equal(result.isError, true);
+	assert.equal(result.details.status, "spawn-error");
+	assert.equal(result.details.durationMs, 0, "must fail before spawn (durationMs 0)");
+	assert.ok(result.text.includes("profile 'fast' requested but no profile library is available"), `unexpected text: ${result.text}`);
+	await fs.rm(userDir, { recursive: true, force: true });
+}
+
+async function testRegisteredProfileSpecWithUnknownProfileFailsClosed() {
+	const userDir = await writeAndRegisterUserSpec("subagent-prof-unknown-", `---
+name: profiled
+description: d
+source: user
+tools: [read]
+profile: nope
+prompt: p
+---
+b
+`);
+	// Library provided but missing the requested profile → resolution now RUNS in the
+	// tool path (previously the library never reached the runner) and fails closed.
+	const result = await executeSubagentRun("profiled", "x", baseCtx({
+		cwd: userDir, homeDir: userDir,
+		profileLibrary: makeProfileLibrary([{ name: "other", model: "m" }]),
+	}));
+	assert.equal(result.isError, true);
+	assert.equal(result.details.status, "spawn-error");
+	assert.equal(result.details.durationMs, 0, "must fail before spawn (durationMs 0)");
+	assert.ok(result.text.includes("profile 'nope' not found in library"), `unexpected text: ${result.text}`);
+	await fs.rm(userDir, { recursive: true, force: true });
+}
+
+async function testRegisteredProfileSpecResolvesProfileAndReachesSpawn() {
+	const userDir = await writeAndRegisterUserSpec("subagent-prof-resolve-", `---
+name: profiled
+description: d
+source: user
+tools: [read]
+profile: fast
+prompt: p
+---
+b
+`);
+	// Profile resolves → runChildAgent proceeds past profile resolution to spawn.
+	// piCommand is a syntactically-safe token that does not exist, so the spawn fails
+	// fast with ENOENT (no real child process). Differential proof: the pre-fix failure
+	// was "no profile library is available" and never reached the spawn stage.
+	const result = await executeSubagentRun("profiled", "x", baseCtx({
+		cwd: userDir, homeDir: userDir,
+		piCommand: "no-such-pi-binary-xyz",
+		profileLibrary: makeProfileLibrary([{ name: "fast", model: "test-model-xyz", sourceOrigin: "user" }]),
+	}));
+	assert.equal(result.isError, true);
+	assert.ok(result.text.includes("ENOENT"), `expected spawn-stage ENOENT, got: ${result.text}`);
+	assert.ok(!result.text.includes("no profile library is available"), `profile library must now reach the runner: ${result.text}`);
+	// The profile's model must be applied to the child argv through the tool path.
+	const argv = result.details.invocation?.argv ?? [];
+	const modelIdx = argv.indexOf("--model");
+	assert.ok(modelIdx !== -1, `expected --model in child argv: ${JSON.stringify(argv)}`);
+	assert.equal(argv[modelIdx + 1], "test-model-xyz");
+	await fs.rm(userDir, { recursive: true, force: true });
+}
+
+async function writeAndRegisterProjectSpecWithProfile(dirName, profileName) {
+	const projDir = await fs.mkdtemp(path.join(os.tmpdir(), dirName));
+	const projAgentsDir = path.join(projDir, ".pi", "agents");
+	await fs.mkdir(projAgentsDir, { recursive: true });
+	const specPath = path.join(projAgentsDir, "pprofiled.md");
+	const specBody = `---
+name: pprofiled
+description: d
+source: project
+tools: [read]
+profile: ${profileName}
+prompt: p
+---
+b
+`;
+	await fs.writeFile(specPath, specBody);
+	const { registerProjectAgents } = await import("../lib/registration.ts");
+	await registerProjectAgents({ cwd: projDir, homeDir: projDir, projectTrusted: true, hasUI: true, ui: confirmAllUi(), allSafe: true });
+	return projDir;
+}
+
+async function testProjectProfileTrustCheckRunsInToolPath() {
+	const projDir = await writeAndRegisterProjectSpecWithProfile("subagent-prof-projunreg-", "projp");
+	// Library carries a project-source profile, but the project registry does not
+	// contain it → the profile trust check (which needs projectTrusted + projectRegistry
+	// threaded into the runner options) must deny. Pre-fix, this check never ran in the
+	// tool path at all (the library was never passed).
+	const sha = "a".repeat(64);
+	const result = await executeSubagentRun("pprofiled", "x", baseCtx({
+		cwd: projDir, homeDir: projDir, projectTrusted: true,
+		profileLibrary: makeProfileLibrary([{ name: "projp", model: "m", sourceOrigin: "project", canonicalPath: "/fake/projp.md", rawBytesSha256: sha }]),
+	}));
+	assert.equal(result.isError, true);
+	assert.equal(result.details.status, "spawn-error");
+	assert.ok(result.text.includes("profile 'projp' is not registered in the project registry"), `unexpected text: ${result.text}`);
+	await fs.rm(projDir, { recursive: true, force: true });
+}
+
+async function testProjectProfileRegisteredAndTrustedReachesSpawn() {
+	const projDir = await writeAndRegisterProjectSpecWithProfile("subagent-prof-projok-", "projp");
+	// Register the project profile in the project registry (same path the
+	// /agents profiles register flow uses) so the trust check passes and the
+	// run proceeds to the (failing, ENOENT) spawn — proving the whole
+	// project-profile chain now works through the tool path.
+	const sha = "b".repeat(64);
+	const canonicalPath = path.join(projDir, ".pi", "profiles", "projp.json");
+	const { readProjectRegistry, writeProjectRegistry, addOrReplaceRegisteredProfile } = await import("../lib/registry.ts");
+	const registry = await readProjectRegistry(projDir, projDir);
+	const updated = addOrReplaceRegisteredProfile(registry, {
+		name: "projp", source: "project", canonicalPath, rawBytesSha256: sha, approvedAt: new Date().toISOString(), approvedBy: "user",
+	});
+	await writeProjectRegistry(updated, projDir, projDir);
+	const result = await executeSubagentRun("pprofiled", "x", baseCtx({
+		cwd: projDir, homeDir: projDir, projectTrusted: true,
+		piCommand: "no-such-pi-binary-xyz",
+		profileLibrary: makeProfileLibrary([{ name: "projp", model: "m", sourceOrigin: "project", canonicalPath, rawBytesSha256: sha }]),
+	}));
+	assert.equal(result.isError, true);
+	assert.ok(result.text.includes("ENOENT"), `expected spawn-stage ENOENT (trust check passed), got: ${result.text}`);
+	assert.ok(!result.text.includes("project trust"), `trust check must have passed: ${result.text}`);
+	assert.ok(!result.text.includes("no profile library is available"), `profile library must now reach the runner: ${result.text}`);
+	await fs.rm(projDir, { recursive: true, force: true });
+}
+
+async function testBuiltInRunWithProfileLibraryStillWorks() {
+	// Passing a profile library to the built-in path must remain a no-op
+	// (built-in specs declare no `profile:`) and must not break the run.
+	let runnerCalled = false;
+	const result = await executeSubagentRun("scout", "inspect", baseCtx({
+		profileLibrary: makeProfileLibrary([{ name: "fast", model: "m" }]),
+		childRunner: async (agent, task) => {
+			runnerCalled = true;
+			return makeCompleteResult(agent, "ok");
+		},
+	}));
+	assert.equal(result.isError, false, result.text);
+	assert.equal(runnerCalled, true);
+}
+
 // --- Main ---
 
 async function main() {
@@ -894,6 +1073,12 @@ async function main() {
 		testTrustedLoaderPathSourcePopulatesSessionContext,
 		testToolDeniesWhenSessionContextUndefined,
 		testBuiltInPathParityWithAgentsRun,
+		testRegisteredProfileSpecWithoutLibraryStillFailsClosed,
+		testRegisteredProfileSpecWithUnknownProfileFailsClosed,
+		testRegisteredProfileSpecResolvesProfileAndReachesSpawn,
+		testProjectProfileTrustCheckRunsInToolPath,
+		testProjectProfileRegisteredAndTrustedReachesSpawn,
+		testBuiltInRunWithProfileLibraryStillWorks,
 	];
 	for (const t of tests) {
 		await t();
