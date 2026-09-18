@@ -1,0 +1,152 @@
+// monitor-threads end-to-end test — real child processes, real spool files,
+// real registry persistence, and the model-facing tool executed for real.
+//
+//   1. supervisor: start a real detached thread → running, pid alive, tail works
+//   2. wake policy: plain output does NOT wake; ERROR output does; frame is
+//      bounded + carries the untrusted preamble and tool orientation
+//   3. watermark: drained lines are not re-injected; offsets persist across
+//      supervisor reload
+//   4. reconcile: a thread whose process dies flips to exited
+//   5. stop: SIGTERM kills the process, registry records stopped
+//   6. cron: registerCron + pure crontab line build/remove round-trip
+//   7. tool: prompt surfaces present; execute list/start/tail/doctor/stop for
+//      real against the supervisor
+//   8. prompt section: orientation text present
+import assert from "node:assert/strict";
+import { promises as fs } from "node:fs";
+import { Supervisor, drainBuffer, frameMonitorEvent, pidAlive, MAX_WAKE_LINES } from "../lib/supervisor.ts";
+import { buildCronLine, removeCronLines, managedCronNames } from "../lib/cron.ts";
+import { registerThreadsTool, threadsPromptSection } from "../lib/threads-tool.ts";
+import { runDoctor } from "../lib/doctor.ts";
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const home = await fs.mkdtemp("/tmp/monitors-e2e-");
+const supervisor = new Supervisor({ homeDir: home });
+await supervisor.load();
+const sleepMs = (ms: number) => sleep(ms);
+
+// --- 1. start a real detached thread ---
+const startMsg = await supervisor.start("disk-watch", "echo hello; echo boot done; sleep 30", { cwd: home, notify: "error" });
+assert.match(startMsg, /started 'disk-watch' \(pid \d+\)/);
+await sleepMs(300); // let the child flush
+
+const rows = supervisor.list();
+assert.equal(rows.length, 1);
+assert.equal(rows[0].name, "disk-watch");
+assert.equal(rows[0].status, "running");
+assert.ok(rows[0].pid && pidAlive(rows[0].pid), "pid should be alive");
+const tail = await supervisor.tail("disk-watch");
+assert.ok(tail.includes("hello") && tail.includes("boot done"), `tail should show output: ${tail}`);
+
+// --- 2. wake policy: plain lines don't wake; errors do ---
+const quiet = await supervisor.drain("disk-watch");
+assert.equal(quiet.notable, false, "plain output must not wake (notify=error)");
+// Notable line appended by an external writer (cron-style direct spool write).
+await fs.appendFile(supervisor.spoolPath("disk-watch"), `ERROR disk 95% full\n`);
+await sleepMs(50);
+const hot = await supervisor.drain("disk-watch");
+assert.equal(hot.notable, true, "ERROR line must wake");
+assert.ok(hot.lines.some((l) => l.includes("disk 95%")), `lines should include the error: ${JSON.stringify(hot.lines)}`);
+const frame = frameMonitorEvent(hot.record!, hot.lines);
+assert.ok(frame.includes("BEGIN MONITOR EVENT") && frame.includes("END MONITOR EVENT"), "frame boundaries");
+assert.ok(frame.includes("untrusted data"), "untrusted preamble");
+assert.ok(frame.includes("monitor_threads tool"), "tool orientation in frame");
+assert.ok(frame.includes("thread: disk-watch"), "thread header");
+
+// --- 3. watermark: no re-injection; offsets persist across reload ---
+const reDrain = await supervisor.drain("disk-watch");
+assert.equal(reDrain.lines.length, 0, "already-drained lines must not re-inject");
+const reloaded = new Supervisor({ homeDir: home });
+await reloaded.load();
+const reDrain2 = await reloaded.drain("disk-watch");
+assert.equal(reDrain2.lines.length, 0, "offset must persist across supervisor reload");
+
+// --- drainBuffer edge cases (pure) ---
+const capped = drainBuffer(Array.from({ length: MAX_WAKE_LINES + 5 }, (_, i) => `line-${i}`).join("\n") + "\n", 0, "always");
+assert.equal(capped.lines.length, MAX_WAKE_LINES + 1, "cap + suppression note");
+assert.ok(capped.lines[0].includes("suppressed"));
+const partial = drainBuffer("complete line\npartial-without-newline", 0, "always");
+assert.equal(partial.lines.length, 1, "partial trailing line must wait");
+assert.ok(partial.newOffset <= "complete line\n".length, "offset must not pass the partial line");
+
+// --- 4. reconcile: process dies → exited ---
+await supervisor.start("mayfly", "echo bye", { cwd: home });
+await sleepMs(400); // echo exits, pid goes away
+const reconciled = supervisor.list();
+const mayfly = reconciled.find((r) => r.name === "mayfly")!;
+assert.equal(mayfly.status, "exited", `dead pid must reconcile to exited: ${mayfly.status}`);
+
+// --- 5. stop: SIGTERM ---
+const stopMsg = await supervisor.stop("disk-watch");
+assert.match(stopMsg, /stopped 'disk-watch'/);
+await sleepMs(200);
+assert.equal(pidAlive(rows[0].pid!), false, "SIGTERM must kill the sleep");
+assert.equal(supervisor.list().find((r) => r.name === "disk-watch")!.status, "stopped");
+
+// --- 6. cron registry + pure crontab round-trip ---
+await supervisor.registerCron("backup", "0 3 * * *", "/usr/local/bin/backup.sh");
+const cronLine = buildCronLine("backup", "0 3 * * *", "/usr/local/bin/backup.sh");
+assert.ok(cronLine.includes("# pi-monitor: backup"));
+const crontab = `SHELL=/bin/bash\n${cronLine}\n# unrelated\n`;
+const { kept, removedCount } = removeCronLines(crontab, "backup");
+assert.equal(removedCount, 1);
+assert.ok(!kept.includes("pi-monitor: backup") && kept.includes("SHELL=") && kept.includes("unrelated"));
+assert.deepEqual(managedCronNames(crontab), ["backup"]);
+const reloaded2 = new Supervisor({ homeDir: home }); // fresh load sees the cron
+await reloaded2.load();
+assert.ok(reloaded2.list().find((r) => r.name === "backup")?.schedule === "0 3 * * *");
+
+// --- 7. tool: surfaces + real execution ---
+let capturedDef: any = null;
+const fakePi = { registerTool: (def: any) => { capturedDef = def; } };
+registerThreadsTool(fakePi as any, { supervisor });
+
+assert.equal(capturedDef.name, "monitor_threads");
+assert.ok(capturedDef.description.includes("cron"), "tool description advertises crons");
+assert.ok(capturedDef.promptSnippet.includes("monitor"), "promptSnippet present");
+assert.equal(capturedDef.promptGuidelines.length, 3);
+for (const g of capturedDef.promptGuidelines) assert.ok(g.includes("monitor_threads"), `guideline must self-name the tool: ${g}`);
+
+const exec = (params: any) => capturedDef.execute("t1", params, undefined, undefined, { cwd: home });
+
+const listResult = await exec({ action: "list" });
+const listText = listResult.content[0].text;
+assert.ok(listText.includes("disk-watch") && listText.includes("stopped"), `list shows threads: ${listText}`);
+assert.ok(listText.includes("backup") && listText.includes("0 3 * * *"), "list shows cron schedule");
+
+const startResult = await exec({ action: "start", name: "tool-spawned", script: "echo from-the-model; sleep 10", notify: "always" });
+assert.match(startResult.content[0].text, /started 'tool-spawned'/);
+await sleepMs(200);
+const tailResult = await exec({ action: "tail", name: "tool-spawned" });
+assert.ok(tailResult.content[0].text.includes("from-the-model"));
+const awake = await supervisor.drain("tool-spawned");
+assert.equal(awake.notable, true, "notify=always wakes on plain lines");
+
+const doctorResult = await exec({ action: "doctor" });
+assert.ok(doctorResult.content[0].text.startsWith("doctor —"), `doctor report: ${doctorResult.content[0].text}`);
+
+const stopResult = await exec({ action: "stop", name: "tool-spawned" });
+assert.match(stopResult.content[0].text, /stopped 'tool-spawned'/);
+await sleepMs(150);
+assert.equal(pidAlive(supervisor.list().find((r) => r.name === "tool-spawned")!.pid!), false);
+
+// doctor with the real probes flags the crashed mayfly
+const realDoctor = runDoctor(supervisor.list(), {
+	pidAlive: (pid) => pidAlive(pid),
+	spoolFileExists: (name) => true,
+	crontabHasEntry: () => true,
+});
+const mayflyFinding = realDoctor.find((f) => f.message.includes("mayfly"));
+// mayfly reconciled to exited (not failed) — no crash finding; that's correct:
+assert.equal(mayflyFinding, undefined, "reconciled-exited threads are not crash findings");
+
+// --- 8. prompt section ---
+const section = threadsPromptSection();
+assert.ok(section.includes("## Background threads"));
+assert.ok(section.includes("monitor_threads"));
+assert.ok(section.includes("untrusted"));
+
+// cleanup: make sure no stray processes survive the test
+for (const r of supervisor.list()) if (r.status === "running" && r.pid) { try { process.kill(r.pid, "SIGKILL"); } catch {} }
+await fs.rm(home, { recursive: true, force: true });
+console.log("E2E PASSED: threads start/run/wake/stop through supervisor, spool, and tool");
