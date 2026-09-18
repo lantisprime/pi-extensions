@@ -13,11 +13,13 @@
 //      real against the supervisor
 //   8. prompt section: orientation text present
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { promises as fs } from "node:fs";
-import { Supervisor, drainBuffer, frameMonitorEvent, pidAlive, MAX_WAKE_LINES } from "../lib/supervisor.ts";
+import { Supervisor, drainBuffer, frameMonitorEvent, pidAlive, groupAlive, terminateProcessTree, MAX_WAKE_LINES } from "../lib/supervisor.ts";
 import { buildCronLine, removeCronLines, managedCronNames } from "../lib/cron.ts";
 import { registerThreadsTool, threadsPromptSection } from "../lib/threads-tool.ts";
 import { runDoctor } from "../lib/doctor.ts";
+import { computeUsageStats, buildFooterSegments, bandFor, shortModelName, formatWindow } from "../lib/telemetry.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const home = await fs.mkdtemp("/tmp/monitors-e2e-");
@@ -146,7 +148,75 @@ assert.ok(section.includes("## Background threads"));
 assert.ok(section.includes("monitor_threads"));
 assert.ok(section.includes("untrusted"));
 
+// --- 8.5 footer layout: usage stats, segments, bands ---
+const usageEntries = [
+	{ type: "message", message: { role: "assistant", usage: { input: 100, output: 50, cacheRead: 700, cacheWrite: 200, totalTokens: 1050, cost: { total: 0.01 } } } },
+	{ type: "message", message: { role: "assistant", usage: { input: 50, output: 30, cacheRead: 1000, cacheWrite: 0, totalTokens: 1080, cost: { total: 0.02 } } } },
+];
+const stats = computeUsageStats(usageEntries);
+assert.equal(stats.cacheHitPct, Math.round(100 * 1700 / 2050), "cache hit = reads/(reads+writes+input)");
+assert.ok(Math.abs(stats.costTotal - 0.03) < 1e-9);
+const noCache = computeUsageStats([{ type: "message", message: { role: "assistant", usage: { input: 500, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 520, cost: { total: 0.004 } } } }]);
+assert.equal(noCache.cacheHitPct, null, "no cache tokens reported -> hide ratio");
+assert.equal(shortModelName("anthropic/claude-sonnet-4-5"), "claude-sonnet-4-5");
+assert.equal(shortModelName("pi/minimax"), "minimax");
+assert.equal(formatWindow(200000), "200k");
+assert.equal(formatWindow(1000000), "1m");
+assert.equal(bandFor(90, true), "error");
+assert.equal(bandFor(30, true), "success");
+assert.equal(bandFor(85, false), "success");
+assert.equal(bandFor(30, false), "error");
+const segs = buildFooterSegments({
+	project: "pi-extensions", branch: "main", modelId: "litellm/glm-5.3-flash", thinking: "high",
+	ctxPercent: 57, cacheHitPct: 83, costTotal: 0.31, monitorsRunning: 1, crons: 0,
+});
+const line = segs.map((s2) => s2.text).join("");
+for (const expect of ["pi-extensions", "⎇ main", "glm-5.3-flash \u00b7 high", "ctx 57%", "cache 83%", "$0.31", "⛏ 1 mon · 0 cron", " \u2502 "]) {
+	assert.ok(line.includes(expect), `footer line missing "${expect}": ${line}`);
+}
+assert.ok(!line.includes("5h") && !line.includes("7d"), "no 5h/7d cost windows");
+const ctxSeg = segs.find((s2) => s2.text === "ctx 57%");
+assert.equal(ctxSeg?.color, "accent", "ctx 57% is warm band");
+const cacheSeg = segs.find((s2) => s2.text === "cache 83%");
+assert.equal(cacheSeg?.color, "success", "cache 83% is good band");
+console.log("[ok] footer layout: project/branch/model+think/ctx/cache/$/monitors, color bands, no 5h/7d");
+
+// --- 9. process-group stop: piped threads die entirely (regression: tail|grep orphans) ---
+const groupMembers = (pgid: number): number[] => {
+	try {
+		return execFileSync("pgrep", ["-g", String(pgid)], { encoding: "utf8" }).split("\n").filter(Boolean).map(Number);
+	} catch { return []; }
+};
+await supervisor.start("piped", "echo piped-ready; sleep 30 | grep hello", { cwd: home });
+await sleepMs(250);
+const pipeRow = supervisor.list().find((r) => r.name === "piped")!;
+assert.ok(pipeRow.pid, "piped thread must have a pid");
+const membersBefore = groupMembers(pipeRow.pid!);
+assert.ok(membersBefore.length >= 3, `pipeline needs ≥3 group members (bash + sleep + grep), got ${membersBefore.length}`);
+await supervisor.stop("piped");
+await sleepMs(150);
+assert.equal(pidAlive(pipeRow.pid!), false, "wrapper must be dead after stop");
+const membersAfter = groupMembers(pipeRow.pid!);
+assert.equal(membersAfter.length, 0, `ALL group members must be dead after stop, left: ${membersAfter}`);
+console.log(`[ok] group stop: ${membersBefore.length} members SIGTERMed, 0 remain`);
+
+// --- 10. orphan reconcile: wrapper killed manually → group reaped on next list() ---
+await supervisor.start("orphan", "sleep 30 | grep orphans", { cwd: home });
+await sleepMs(250);
+const orphanRow = supervisor.list().find((r) => r.name === "orphan")!;
+assert.ok(orphanRow.pid);
+assert.ok(groupAlive(orphanRow.pid!), "orphan group should be alive before wrapper kill");
+process.kill(orphanRow.pid!, "SIGKILL"); // recreate the old bug's leftover state: wrapper dead, children alive
+await sleepMs(120);
+assert.ok(groupAlive(orphanRow.pid!), "children must still be alive right after wrapper SIGKILL");
+const afterOrphan = supervisor.list().find((r) => r.name === "orphan")!;
+assert.equal(afterOrphan.status, "exited", "dead wrapper reconciles to exited");
+await sleepMs(1_600); // give the fire-and-forget reaper its grace period
+const membersLeft = groupMembers(orphanRow.pid!);
+assert.equal(membersLeft.length, 0, `orphaned group must be reaped by reconcile, left: ${membersLeft}`);
+console.log("[ok] orphan reconcile: dead wrapper → exited + group reaped in background");
+
 // cleanup: make sure no stray processes survive the test
-for (const r of supervisor.list()) if (r.status === "running" && r.pid) { try { process.kill(r.pid, "SIGKILL"); } catch {} }
+for (const r of supervisor.list()) if (r.status === "running" && r.pid) await terminateProcessTree(r.pid);
 await fs.rm(home, { recursive: true, force: true });
 console.log("E2E PASSED: threads start/run/wake/stop through supervisor, spool, and tool");
