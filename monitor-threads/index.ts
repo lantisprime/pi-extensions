@@ -14,7 +14,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Supervisor, frameMonitorEvent, type ThreadRecord } from "./lib/supervisor.ts";
+import { Supervisor, frameMonitorEvent, formatTailHeader, type ThreadRecord } from "./lib/supervisor.ts";
 import { crontabHasEntry } from "./lib/cron.ts";
 import { runDoctor, formatDoctorReport } from "./lib/doctor.ts";
 import { registerThreadsTool, threadsPromptSection } from "./lib/threads-tool.ts";
@@ -38,12 +38,18 @@ export default function (pi: ExtensionAPI) {
 	function renderTail(): void {
 		if (!lastUi?.hasUI) return;
 		if (!pinned) { lastUi.ui.setWidget("monitor-tail", undefined); return; }
-		void supervisor.tail(pinned, TAIL_LINES).then((output) => {
+		// Status-aware: a stopped/exited thread shows its status in the header
+		// (it can't masquerade as an active monitor), an unregistered thread
+		// auto-unpins, and every non-running render carries the unpin hint.
+		const rec = supervisor.list().find((r) => r.name === pinned);
+		if (!rec) { pinned = null; lastUi.ui.setWidget("monitor-tail", undefined); return; }
+		void supervisor.tail(rec.name, TAIL_LINES).then((output) => {
 			if (!lastUi?.hasUI || pinned === null) return;
-			const lines = output.split("\n");
+			const lines = output.split("\n").map((l) => `  ${l}`);
+			if (rec.status !== "running") lines.push("  (no new lines — the thread has ended)");
 			lastUi.ui.setWidget("monitor-tail", [
-				`⛏ ${pinned} (bg)`,
-				...lines.map((l) => `  ${l}`),
+				formatTailHeader(rec.name, rec.status, rec.pid),
+				...lines,
 			], { placement: "aboveEditor" });
 		}).catch(() => { /* tail is best-effort */ });
 	}
@@ -148,6 +154,16 @@ export default function (pi: ExtensionAPI) {
 			pinned = picked.name;
 			renderTail();
 			ctx.ui.notify(`Pinned '${picked.name}' to the tail widget (ctrl+↑/ctrl+↓ to scroll).`, "info");
+		},
+	});
+
+	pi.registerCommand("monitor-unpin", {
+		description: "Clear the pinned monitor tail widget",
+		handler: async (_args, ctx) => {
+			track(ctx);
+			pinned = null;
+			renderTail(); // clears the widget
+			ctx.ui.notify("Monitor tail unpinned.", "info");
 		},
 	});
 
