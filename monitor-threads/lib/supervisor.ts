@@ -8,6 +8,7 @@
 // --experimental-strip-types.
 
 import { spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -56,6 +57,38 @@ export function pidAlive(pid: number): boolean {
 	} catch {
 		return false;
 	}
+}
+
+/** Are any processes left in the process group `pgid`? Detached threads make
+ *  the wrapper's pgid equal its pid, so pipelines (tail | grep) stay in that
+ *  group even after the wrapper dies. */
+export function groupAlive(pgid: number): boolean {
+	try {
+		execFileSync("pgrep", ["-g", String(pgid)], { stdio: "pipe" });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Terminate a detached thread's WHOLE process group. SIGTERM the group
+ *  (negative pid — reaches pipeline children like `tail | grep` that a
+ *  plain-pid kill orphans), escalate to SIGKILL after a grace period, and
+ *  cover both orders (group may outlive the wrapper, or vice versa). */
+export async function terminateProcessTree(pid: number, forceAfterMs = 1_000): Promise<void> {
+	if (!pidAlive(pid) && !groupAlive(pid)) return;
+	const signalGroup = (sig: NodeJS.Signals) => {
+		try { process.kill(-pid, sig); } catch { /* group gone */ }
+		try { process.kill(pid, sig); } catch { /* pid gone */ }
+	};
+	signalGroup("SIGTERM");
+	const deadline = Date.now() + forceAfterMs;
+	while ((pidAlive(pid) || groupAlive(pid)) && Date.now() < deadline) {
+		await sleep(50);
+	}
+	if (pidAlive(pid) || groupAlive(pid)) signalGroup("SIGKILL");
 }
 
 // --- Pure helpers (exported for tests) ---
@@ -141,12 +174,17 @@ export class Supervisor {
 		return path.join(this.paths.spool, `${name}.log`);
 	}
 
-	/** Registry rows, with pid liveness reconciled (running + dead pid → exited). */
+	/** Registry rows, with pid liveness reconciled (running + dead pid → exited).
+	 *  If pipeline members outlived the dead wrapper (orphaned group), they are
+	 *  reaped best-effort in the background — list() stays non-blocking. */
 	list(): ThreadRecord[] {
 		for (const r of this.records) {
 			if (r.status === "running" && r.pid !== undefined && !pidAlive(r.pid)) {
 				r.status = "exited";
 				r.updatedAtMs = Date.now();
+				if (groupAlive(r.pid)) {
+					void terminateProcessTree(r.pid).catch(() => { /* best-effort reap */ });
+				}
 			}
 		}
 		return this.records.map((r) => ({ ...r }));
@@ -200,8 +238,10 @@ export class Supervisor {
 	async stop(name: string): Promise<string> {
 		const r = this.find(name);
 		if (!r) return `no thread named '${name}'`;
-		if (r.pid !== undefined && pidAlive(r.pid)) {
-			try { process.kill(r.pid, "SIGTERM"); } catch { /* already gone */ }
+		if (r.pid !== undefined) {
+			// Kill the whole process group — a plain-pid SIGTERM on the bash wrapper
+			// orphans pipeline children (tail | grep) which then keep running.
+			await terminateProcessTree(r.pid);
 		}
 		r.status = "stopped";
 		r.updatedAtMs = Date.now();

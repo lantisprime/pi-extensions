@@ -13,8 +13,9 @@
 //      real against the supervisor
 //   8. prompt section: orientation text present
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { promises as fs } from "node:fs";
-import { Supervisor, drainBuffer, frameMonitorEvent, pidAlive, MAX_WAKE_LINES } from "../lib/supervisor.ts";
+import { Supervisor, drainBuffer, frameMonitorEvent, pidAlive, groupAlive, terminateProcessTree, MAX_WAKE_LINES } from "../lib/supervisor.ts";
 import { buildCronLine, removeCronLines, managedCronNames } from "../lib/cron.ts";
 import { registerThreadsTool, threadsPromptSection } from "../lib/threads-tool.ts";
 import { runDoctor } from "../lib/doctor.ts";
@@ -146,7 +147,42 @@ assert.ok(section.includes("## Background threads"));
 assert.ok(section.includes("monitor_threads"));
 assert.ok(section.includes("untrusted"));
 
+// --- 9. process-group stop: piped threads die entirely (regression: tail|grep orphans) ---
+const groupMembers = (pgid: number): number[] => {
+	try {
+		return execFileSync("pgrep", ["-g", String(pgid)], { encoding: "utf8" }).split("\n").filter(Boolean).map(Number);
+	} catch { return []; }
+};
+await supervisor.start("piped", "echo piped-ready; sleep 30 | grep hello", { cwd: home });
+await sleepMs(250);
+const pipeRow = supervisor.list().find((r) => r.name === "piped")!;
+assert.ok(pipeRow.pid, "piped thread must have a pid");
+const membersBefore = groupMembers(pipeRow.pid!);
+assert.ok(membersBefore.length >= 3, `pipeline needs ≥3 group members (bash + sleep + grep), got ${membersBefore.length}`);
+await supervisor.stop("piped");
+await sleepMs(150);
+assert.equal(pidAlive(pipeRow.pid!), false, "wrapper must be dead after stop");
+const membersAfter = groupMembers(pipeRow.pid!);
+assert.equal(membersAfter.length, 0, `ALL group members must be dead after stop, left: ${membersAfter}`);
+console.log(`[ok] group stop: ${membersBefore.length} members SIGTERMed, 0 remain`);
+
+// --- 10. orphan reconcile: wrapper killed manually → group reaped on next list() ---
+await supervisor.start("orphan", "sleep 30 | grep orphans", { cwd: home });
+await sleepMs(250);
+const orphanRow = supervisor.list().find((r) => r.name === "orphan")!;
+assert.ok(orphanRow.pid);
+assert.ok(groupAlive(orphanRow.pid!), "orphan group should be alive before wrapper kill");
+process.kill(orphanRow.pid!, "SIGKILL"); // recreate the old bug's leftover state: wrapper dead, children alive
+await sleepMs(120);
+assert.ok(groupAlive(orphanRow.pid!), "children must still be alive right after wrapper SIGKILL");
+const afterOrphan = supervisor.list().find((r) => r.name === "orphan")!;
+assert.equal(afterOrphan.status, "exited", "dead wrapper reconciles to exited");
+await sleepMs(1_600); // give the fire-and-forget reaper its grace period
+const membersLeft = groupMembers(orphanRow.pid!);
+assert.equal(membersLeft.length, 0, `orphaned group must be reaped by reconcile, left: ${membersLeft}`);
+console.log("[ok] orphan reconcile: dead wrapper → exited + group reaped in background");
+
 // cleanup: make sure no stray processes survive the test
-for (const r of supervisor.list()) if (r.status === "running" && r.pid) { try { process.kill(r.pid, "SIGKILL"); } catch {} }
+for (const r of supervisor.list()) if (r.status === "running" && r.pid) await terminateProcessTree(r.pid);
 await fs.rm(home, { recursive: true, force: true });
 console.log("E2E PASSED: threads start/run/wake/stop through supervisor, spool, and tool");
