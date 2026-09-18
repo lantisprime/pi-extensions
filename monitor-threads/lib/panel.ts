@@ -313,7 +313,7 @@ class MonitorPanel {
 		});
 
 		if (rows.filter((r) => r.type === "thread").length === 0) {
-			lines.push(theme.fg("dim", "  (no threads — start one with /monitors start <script>)"));
+			lines.push(theme.fg("dim", "  (no threads — ask the model to start one via the monitor_threads tool)"));
 		}
 
 		// Footer hints — two short lines so they never collide with the border.

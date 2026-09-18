@@ -8,7 +8,8 @@
 //     they are framed as untrusted MONITOR EVENT data and injected with
 //     pi.sendMessage({ triggerTurn: true }) — waking this session.
 //   - The model drives threads through the monitor_threads tool; humans get
-//     /monitors (expandable panel), /monitor-doctor, and an 8-line tail widget.
+//     /monitors (expandable panel), /monitors-doctor, /monitors-unpin, and an
+//     8-line tail widget (singular /monitor-* spellings kept as aliases).
 //   - before_agent_start appends a short "Background threads" section so the
 //     model is oriented even before its first tool call.
 
@@ -157,24 +158,23 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("monitor-unpin", {
-		description: "Clear the pinned monitor tail widget",
-		handler: async (_args, ctx) => {
-			track(ctx);
-			pinned = null;
-			renderTail(); // clears the widget
-			ctx.ui.notify("Monitor tail unpinned.", "info");
-		},
-	});
+	const unpinHandler = async (_args: string, ctx: { ui: ExtensionAPI["ui"]; hasUI?: boolean }) => {
+		track(ctx);
+		pinned = null;
+		renderTail(); // clears the widget
+		ctx.ui.notify("Monitor tail unpinned.", "info");
+	};
+	// Canonical set groups under /monitors*; singular forms stay as aliases.
+	pi.registerCommand("monitors-unpin", { description: "Clear the pinned monitor tail widget", handler: unpinHandler });
+	pi.registerCommand("monitor-unpin", { description: "Alias of /monitors-unpin", handler: unpinHandler });
 
-	pi.registerCommand("monitor-doctor", {
-		description: "Troubleshoot monitoring threads and crons",
-		handler: async (_args, ctx) => {
-			track(ctx);
-			const provider = panelProvider();
-			ctx.ui.notify(formatDoctorReport(provider.runDoctor!()).join("\n"), "info");
-		},
-	});
+	const doctorHandler = async (_args: string, ctx: { ui: ExtensionAPI["ui"]; hasUI?: boolean }) => {
+		track(ctx);
+		const provider = panelProvider();
+		ctx.ui.notify(formatDoctorReport(provider.runDoctor!()).join("\n"), "info");
+	};
+	pi.registerCommand("monitors-doctor", { description: "Troubleshoot monitoring threads and crons", handler: doctorHandler });
+	pi.registerCommand("monitor-doctor", { description: "Alias of /monitors-doctor", handler: doctorHandler });
 
 	pi.registerShortcut("ctrl+up", {
 		description: "Scroll monitor tail up",
