@@ -12,6 +12,7 @@ const PERMISSION_LABELS: Record<string, string> = {
 	git: "Run git commands",
 	web: "Search or fetch from the web",
 	writeFiles: "Write or edit files",
+	mcp: "Call MCP server tools",
 };
 
 const WEB_TOOL_NAMES = new Set(["web_search", "search_web", "web", "browser", "fetch", "http_get"]);
@@ -112,6 +113,9 @@ function classifyToolCall(toolName: string, input: Record<string, unknown>, proj
 	}
 	if (toolName === "write" || toolName === "edit") return ["writeFiles"];
 	if (toolName === "bash") return classifyBashCommand(String(input.command || ""));
+	// MCP bridge tools (mcp_<server>_<tool>) are user-configured integrations
+	// with their own "mcp" permission key; do not classify them as web by name.
+	if (toolName.startsWith("mcp_")) return ["mcp"];
 	if (WEB_TOOL_NAMES.has(toolName) || /(^|_)(web|search|browser)(_|$)/i.test(toolName)) return ["web"];
 	return [];
 }
@@ -262,6 +266,13 @@ check("search_web -> web", classifyToolCall("search_web", {}, projectPath, cwd),
 check("browser -> web", classifyToolCall("browser", {}, projectPath, cwd), ["web"]);
 check("bash -> classifyBashCommand", classifyToolCall("bash", { command: "ls" }, projectPath, cwd), ["bashCommands"]);
 check("unknown tool -> none", classifyToolCall("grep", {}, projectPath, cwd), []);
+
+// MCP bridge tools: own category, never misclassified as web by name.
+check("mcp knowledge_search -> mcp only", classifyToolCall("mcp_knowledge_knowledge_search", {}, projectPath, cwd), ["mcp"]);
+check("mcp task_list -> mcp only", classifyToolCall("mcp_taskboard_task_list", {}, projectPath, cwd), ["mcp"]);
+check("mcp message_list -> mcp only", classifyToolCall("mcp_taskboard_message_list", {}, projectPath, cwd), ["mcp"]);
+check("mcp searxng search -> mcp only (web gate not applied by name)", classifyToolCall("mcp_searxng_web_search", {}, projectPath, cwd), ["mcp"]);
+check("mcp episodic_search -> mcp only", classifyToolCall("mcp_knowledge_episodic_search", {}, projectPath, cwd), ["mcp"]);
 
 // YOLO hard-deny behavior: auto-allow everything except rm -f/rm -rf style commands and repo deletion.
 check("YOLO allows ordinary bash", isYoloHardDeniedBool("npm test", projectPath, cwd), false);

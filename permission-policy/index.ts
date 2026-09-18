@@ -11,7 +11,8 @@ type PermissionKey =
 	| "destructiveBash"
 	| "git"
 	| "web"
-	| "writeFiles";
+	| "writeFiles"
+	| "mcp";
 
 type Decision = "allow" | "deny";
 type PermissionMode = "ask" | "readOnlyAuto" | "llmAuto" | "yolo";
@@ -33,6 +34,12 @@ type PermissionRequest = {
 const POLICY_DIR = path.join(os.homedir(), ".pi", "agent", "permission-policy", "projects");
 const PROMPT_SHIELD_STATE_PATH = path.join(os.homedir(), ".pi", "agent", "prompt-shield", "state.json");
 const WEB_TOOL_NAMES = new Set(["web_search", "search_web", "web", "browser", "fetch", "http_get"]);
+// Tools registered by the MCP bridge extension use the mcp_<server>_<tool>
+// namespace. Their trust anchor is the user-authored mcp.json config (with
+// per-server auth), so they get their own permission key instead of being
+// blanket-classified by name (e.g. mcp_knowledge_knowledge_search is not web
+// access just because the underlying tool name ends in _search).
+const MCP_TOOL_PREFIX = "mcp_";
 const SESSION_PERMISSIONS = new Map<string, Partial<Record<PermissionKey, Decision>>>();
 const YOLO_WARNING = [
 	"YOLO permission mode is dangerous.",
@@ -54,6 +61,7 @@ const PERMISSION_LABELS: Record<PermissionKey, string> = {
 	git: "Run git commands",
 	web: "Search or fetch from the web",
 	writeFiles: "Write or edit files",
+	mcp: "Call MCP server tools",
 };
 
 export default function (pi: ExtensionAPI) {
@@ -224,6 +232,16 @@ function classifyToolCall(
 
 	if (toolName === "bash") {
 		return classifyBashCommand(String(input.command || ""));
+	}
+
+	if (toolName.startsWith(MCP_TOOL_PREFIX)) {
+		return [
+			{
+				key: "mcp",
+				title: PERMISSION_LABELS.mcp,
+				detail: `Tool: ${toolName}`,
+			},
+		];
 	}
 
 	if (WEB_TOOL_NAMES.has(toolName) || /(^|_)(web|search|browser)(_|$)/i.test(toolName)) {
@@ -522,7 +540,7 @@ function setSessionDecision(projectPath: string, key: PermissionKey, decision: D
 }
 
 function isSensitiveWhenPromptShieldRiskActive(key: PermissionKey): boolean {
-	return key === "bashCommands" || key === "destructiveBash" || key === "git" || key === "web" || key === "writeFiles" || key === "readOutsideProject";
+	return key === "bashCommands" || key === "destructiveBash" || key === "git" || key === "web" || key === "writeFiles" || key === "readOutsideProject" || key === "mcp";
 }
 
 async function isPromptShieldStrict(): Promise<boolean> {
