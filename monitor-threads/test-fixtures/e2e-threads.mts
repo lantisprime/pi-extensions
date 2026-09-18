@@ -19,6 +19,7 @@ import { Supervisor, drainBuffer, frameMonitorEvent, pidAlive, groupAlive, termi
 import { buildCronLine, removeCronLines, managedCronNames } from "../lib/cron.ts";
 import { registerThreadsTool, threadsPromptSection } from "../lib/threads-tool.ts";
 import { runDoctor } from "../lib/doctor.ts";
+import { computeUsageStats, buildFooterSegments, bandFor, shortModelName, formatWindow } from "../lib/telemetry.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const home = await fs.mkdtemp("/tmp/monitors-e2e-");
@@ -146,6 +147,39 @@ const section = threadsPromptSection();
 assert.ok(section.includes("## Background threads"));
 assert.ok(section.includes("monitor_threads"));
 assert.ok(section.includes("untrusted"));
+
+// --- 8.5 footer layout: usage stats, segments, bands ---
+const usageEntries = [
+	{ type: "message", message: { role: "assistant", usage: { input: 100, output: 50, cacheRead: 700, cacheWrite: 200, totalTokens: 1050, cost: { total: 0.01 } } } },
+	{ type: "message", message: { role: "assistant", usage: { input: 50, output: 30, cacheRead: 1000, cacheWrite: 0, totalTokens: 1080, cost: { total: 0.02 } } } },
+];
+const stats = computeUsageStats(usageEntries);
+assert.equal(stats.cacheHitPct, Math.round(100 * 1700 / 2050), "cache hit = reads/(reads+writes+input)");
+assert.ok(Math.abs(stats.costTotal - 0.03) < 1e-9);
+const noCache = computeUsageStats([{ type: "message", message: { role: "assistant", usage: { input: 500, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 520, cost: { total: 0.004 } } } }]);
+assert.equal(noCache.cacheHitPct, null, "no cache tokens reported -> hide ratio");
+assert.equal(shortModelName("anthropic/claude-sonnet-4-5"), "claude-sonnet-4-5");
+assert.equal(shortModelName("pi/minimax"), "minimax");
+assert.equal(formatWindow(200000), "200k");
+assert.equal(formatWindow(1000000), "1m");
+assert.equal(bandFor(90, true), "error");
+assert.equal(bandFor(30, true), "success");
+assert.equal(bandFor(85, false), "success");
+assert.equal(bandFor(30, false), "error");
+const segs = buildFooterSegments({
+	project: "pi-extensions", branch: "main", modelId: "litellm/glm-5.3-flash", thinking: "high",
+	ctxPercent: 57, cacheHitPct: 83, costTotal: 0.31, monitorsRunning: 1, crons: 0,
+});
+const line = segs.map((s2) => s2.text).join("");
+for (const expect of ["pi-extensions", "⎇ main", "glm-5.3-flash \u00b7 high", "ctx 57%", "cache 83%", "$0.31", "⛏ 1 mon · 0 cron", " \u2502 "]) {
+	assert.ok(line.includes(expect), `footer line missing "${expect}": ${line}`);
+}
+assert.ok(!line.includes("5h") && !line.includes("7d"), "no 5h/7d cost windows");
+const ctxSeg = segs.find((s2) => s2.text === "ctx 57%");
+assert.equal(ctxSeg?.color, "accent", "ctx 57% is warm band");
+const cacheSeg = segs.find((s2) => s2.text === "cache 83%");
+assert.equal(cacheSeg?.color, "success", "cache 83% is good band");
+console.log("[ok] footer layout: project/branch/model+think/ctx/cache/$/monitors, color bands, no 5h/7d");
 
 // --- 9. process-group stop: piped threads die entirely (regression: tail|grep orphans) ---
 const groupMembers = (pgid: number): number[] => {
