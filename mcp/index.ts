@@ -116,8 +116,12 @@ export default function mcpBridgeExtension(pi: ExtensionAPI) {
 				state.tools = tools;
 				state.status = "connected";
 
-				for (const tool of tools) {
-					registerServerTool(pi, state, tool);
+				if (state.config.lazy === true) {
+					registerLazyServerTools(pi, state);
+				} else {
+					for (const tool of tools) {
+						registerServerTool(pi, state, tool);
+					}
 				}
 			} catch (error) {
 				state.status = "error";
@@ -179,8 +183,10 @@ export default function mcpBridgeExtension(pi: ExtensionAPI) {
 		if (state.status !== "connected" || !state.client) return;
 		const tools = await state.client.listTools();
 		state.tools = tools;
-		for (const tool of tools) {
-			registerServerTool(pi, state, tool);
+		if (state.config.lazy !== true) {
+			for (const tool of tools) {
+				registerServerTool(pi, state, tool);
+			}
 		}
 		updateStatusWidget(ctx);
 	}
@@ -206,6 +212,107 @@ export default function mcpBridgeExtension(pi: ExtensionAPI) {
 			async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
 				const params = (rawParams ?? {}) as Record<string, unknown>;
 				return executeServerTool(state, tool, piName, params, signal, ctx);
+			},
+		});
+	}
+
+	/**
+	 * Progressive disclosure ("lazy") mode: instead of one pi tool per server
+	 * tool (each with its full JSON schema stamped into every request), register
+	 * exactly two meta tools. Schemas are fetched on demand, so a large server
+	 * costs a small, fixed context footprint.
+	 */
+	function registerLazyServerTools(pi: ExtensionAPI, state: ServerState): void {
+		const listName = allocateToolName(state.name, "tools");
+		const callName = allocateToolName(state.name, "call");
+		state.registered.add(listName);
+		state.registered.add(callName);
+
+		function findTool(name: string): McpToolDefinition | undefined {
+			return state.tools.find((t) => t.name === name);
+		}
+
+		function unknownToolError(name: string): Error {
+			const available = state.tools.map((t) => t.name).join(", ") || "(none)";
+			return new Error(`Unknown tool "${name}" on server "${state.name}". Available: ${available}. Use ${listName} to inspect tools.`);
+		}
+
+		pi.registerTool({
+			name: listName,
+			label: `${state.name}: list tools`,
+			description:
+				`List the tools available on MCP server "${state.name}" with one-line summaries. ` +
+				`Pass "tool" to get that tool's full description and JSON schema. ` +
+				`Call this before ${callName} whenever you don't know a tool's exact name or arguments.`,
+			parameters: Type.Object({
+				tool: Type.Optional(
+					Type.String({ description: `Exact tool name to inspect in detail. Omit to list all tools on "${state.name}".` }),
+				),
+			}),
+			async execute(_toolCallId, rawParams): Promise<{ content: OutputBlock[]; details: Record<string, unknown> }> {
+				const params = (rawParams ?? {}) as { tool?: string };
+				if (params.tool) {
+					const tool = findTool(params.tool);
+					if (!tool) throw unknownToolError(params.tool);
+					const lines = [
+						`tool: ${tool.name}`,
+						tool.description ? `description: ${tool.description.trim()}` : undefined,
+						`schema: ${JSON.stringify(tool.inputSchema ?? { type: "object", properties: {} })}`,
+					].filter((line): line is string => line !== undefined);
+					const result: { content: OutputBlock[]; details: Record<string, unknown> } = {
+						content: [{ type: "text", text: lines.join("\n") }],
+						details: { server: state.name, tool: tool.name },
+					};
+					return result;
+				}
+				if (state.tools.length === 0) {
+					const empty: { content: OutputBlock[]; details: Record<string, unknown> } = {
+						content: [{ type: "text", text: `(no tools currently exposed by server "${state.name}")` }],
+						details: { server: state.name, count: 0 },
+					};
+					return empty;
+				}
+				const lines = state.tools.map((t) => {
+					const summary = (t.description ?? t.title ?? "").trim().split("\n")[0].slice(0, 140);
+					return `- ${t.name}${summary ? `: ${summary}` : ""}`;
+				});
+				const listed: { content: OutputBlock[]; details: Record<string, unknown> } = {
+					content: [
+						{
+							type: "text",
+							text: `Tools on server "${state.name}":\n${lines.join("\n")}\n\n` +
+								`Invoke with ${callName} (pass the exact tool name). Pass "tool" to ${listName} for full argument schemas.`,
+						},
+					],
+					details: { server: state.name, count: state.tools.length },
+				};
+				return listed;
+			},
+		});
+
+		pi.registerTool({
+			name: callName,
+			label: `${state.name}: call tool`,
+			description:
+				`Invoke a tool on MCP server "${state.name}" by name. ` +
+				`Use ${listName} first to discover tool names and their argument schemas.`,
+			parameters: Type.Object({
+				tool: Type.String({ description: `Exact tool name on server "${state.name}".` }),
+				arguments: Type.Optional(
+					Type.Object(
+						{},
+						{
+							additionalProperties: true,
+							description: "Arguments object matching the target tool's input schema (see mcp tools listing).",
+						},
+					),
+				),
+			}),
+			async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
+				const params = (rawParams ?? {}) as { tool: string; arguments?: Record<string, unknown> };
+				const tool = findTool(params.tool);
+				if (!tool) throw unknownToolError(params.tool);
+				return executeServerTool(state, tool, callName, params.arguments ?? {}, signal, ctx);
 			},
 		});
 	}
