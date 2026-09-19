@@ -563,6 +563,62 @@ export const TASK_NUDGE_TEXT =
 	"[tasks] Multi-step work detected with no task set. If this is 3+ steps, follow the tasks skill now: task_create the steps, mark each in_progress before starting it, and complete with evidence. (Advisory — not a block.)";
 
 /**
+ * Prompt-level escalation of the same signal: a tail line on a tool result is
+ * easy to skim past (observed live), so once the streak crosses the threshold
+ * the reminder also rides the system prompt, at the top of context, every turn
+ * until a task set exists. Constant text — no per-turn growth, zero cost while
+ * compliant or below threshold.
+ */
+export const TASK_PROMPT_REMINDER_TEXT =
+	"[tasks] No task set: untracked multi-step work detected. Load the tasks skill and task_create the steps now (in_progress before each, evidence to complete).";
+
+/** System-prompt reminder for the current streak, or null when not warranted. */
+export function taskPromptReminder(state: NudgeState, tasksEmpty: boolean): string | null {
+	if (!tasksEmpty) return null;
+	return state.workStreak >= NUDGE_FIRST_AT ? TASK_PROMPT_REMINDER_TEXT : null;
+}
+
+/**
+ * Constant standing rule — appended to the system prompt on every turn so the
+ * discipline is known from turn one, not only after untracked work accumulates.
+ * Bounded and fixed: no per-turn growth.
+ */
+export const TASK_STANDING_RULE_TEXT =
+	"[tasks] Rule: 3+ step work is tracked with the tasks skill — task_create the steps, one in_progress at a time, settle each with evidence.";
+
+/**
+ * Tools whose mutations require a task set once untracked work crosses the
+ * threshold. Read-only tools are never gated; `bash` is deliberately not gated
+ * so builds/tests/git keep working.
+ */
+export const TASK_GATED_TOOLS: ReadonlySet<string> = new Set(["write", "edit"]);
+
+/** Directive block reason: names the remedy and the escape hatch. */
+export function taskGateReason(workStreak: number): string {
+	return (
+		`Blocked: ${workStreak} tool calls of untracked work with no task set. ` +
+		`The tasks skill requires multi-step work to be tracked — call task_create for the steps ` +
+		`(mark each in_progress before starting), then retry this mutation. ` +
+		`Read-only tools are never blocked. Disable gating with /tasks enforce off.`
+	);
+}
+
+/** True when a mutating tool call must be blocked until a task set exists. */
+export function shouldGateForTasks(opts: {
+	toolName: string;
+	tasksEmpty: boolean;
+	workStreak: number;
+	enforce: boolean;
+}): boolean {
+	return (
+		opts.enforce &&
+		opts.tasksEmpty &&
+		opts.workStreak >= NUDGE_FIRST_AT &&
+		TASK_GATED_TOOLS.has(opts.toolName)
+	);
+}
+
+/**
  * Advance the nudge state by one observed work tool result. Pure: returns the
  * next state plus the advisory text when one should fire, null otherwise.
  * Non-empty task sets reset the streak (their results carry the task block

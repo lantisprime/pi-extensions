@@ -549,7 +549,7 @@ Tools: `task_create`, `task_get`, `task_update`, `task_list`, `task_clear`. Huma
 
 **Evidence gates (anti-hallucination).** `completed` and `cancelled` require an `evidence` note, and completion additionally requires observed tool activity since the task started — invented results are rejected.
 
-**Advisory discipline nudge.** If a session does 3+ consecutive tool calls with no task set, the extension injects a bounded advisory into the tool result telling the model to follow the tasks skill (`task_create` the steps). It re-fires at most every 10 further results — never per result, never a block.
+**Compliance ladder (advisory → hard gate).** A constant standing rule rides the system prompt every turn. With no task set, 3+ consecutive tool calls add a bounded advisory to the tool result and a reminder to the prompt (re-firing at most every 10 results). Past that threshold `write`/`edit` are **blocked** with a directive reason until `task_create` runs — read-only tools and `bash` are never gated. Sessions can opt out with `/tasks enforce off`. Note: extension code changes need `/reload` to affect a running session.
 
 See [`tasks/README.md`](tasks/README.md) and the discipline itself in [`skills/tasks/SKILL.md`](skills/tasks/SKILL.md).
 

@@ -52,6 +52,10 @@ pending → in_progress → completed   (terminal)
   the result tells you the next task. Continue into it. **Never stop to ask the
   user between tasks.**
 - Work in listed order (creation order). Respect `blockedBy`.
+- Compliance is enforced by the harness, not optional: a standing rule rides
+  the system prompt, an advisory escalates, and past ~3 untracked tool calls
+  `write`/`edit` are blocked until a task set exists. Start the set yourself
+  instead of being gated.
 
 ## Plan artifacts (anti-drift)
 

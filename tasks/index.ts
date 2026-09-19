@@ -22,12 +22,17 @@ import {
 	createTask,
 	counts,
 	isSettled,
+	NUDGE_FIRST_AT,
 	renderContextBlock,
 	renderModelList,
 	renderStatusLine,
 	renderWidgetLines,
+	shouldGateForTasks,
 	sortTasks,
+	taskGateReason,
 	taskNudgeAdvance,
+	taskPromptReminder,
+	TASK_STANDING_RULE_TEXT,
 	updateTask,
 	type NudgeState,
 	type Task,
@@ -61,6 +66,10 @@ export default function tasksExtension(pi: ExtensionAPI) {
 	let projectPath: string | null = null;
 	let widgetExpanded = false;
 	let cleanupState: "pending" | "declined" | undefined;
+	/** Session gate: block mutating tools while untracked work crosses the threshold. */
+	let enforceTasks = true;
+	/** Session-scoped streak state shared by the tool-result nudge and the prompt reminder. */
+	let nudgeState: NudgeState = { workStreak: 0, lastNudgeAt: 0 };
 
 	// --- Durable store (atomic, project-keyed) ------------------------------
 
@@ -151,16 +160,34 @@ export default function tasksExtension(pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", async (event) => {
 		lastInjectedBlock = renderContextBlock(tasks, projectPath ?? "(unknown project)", { cleanupState });
-		if (!lastInjectedBlock) return;
-		return { systemPrompt: `${event.systemPrompt}\n\n${lastInjectedBlock}` };
+		// Standing rule is always present (turn one); the task block and the
+		// escalation reminder join it when they apply. All bounded and constant.
+		const parts: string[] = [TASK_STANDING_RULE_TEXT];
+		if (lastInjectedBlock) parts.push(lastInjectedBlock);
+		const reminder = taskPromptReminder(nudgeState, tasks.length === 0);
+		if (reminder) parts.push(reminder);
+		return { systemPrompt: `${event.systemPrompt}\n\n${parts.join("\n\n")}` };
+	});
+
+	// Hard gate: once untracked work crosses the threshold, file mutations are
+	// blocked until the model creates a task set. Read-only tools are never
+	// gated, and the operator can disable it for the session.
+	pi.on("tool_call", async (event) => {
+		if (typeof event.toolName !== "string") return undefined;
+		const gate = shouldGateForTasks({
+			toolName: event.toolName,
+			tasksEmpty: tasks.length === 0,
+			workStreak: nudgeState.workStreak,
+			enforce: enforceTasks,
+		});
+		if (!gate) return undefined;
+		return { block: true, reason: taskGateReason(nudgeState.workStreak) };
 	});
 
 	// Mid-turn freshness: after EVERY tool result, re-anchor task state. Full
 	// block when it changed since the last injection; one-line status otherwise.
 	// Empty task set: track consecutive work results and nudge toward the tasks
-	// skill (advisory) — models otherwise skip voluntary skill loading.
-	let nudgeState: NudgeState = { workStreak: 0, lastNudgeAt: 0 };
-
+	// skill (advisory) — the prompt reminder and the tool gate read the same state.
 	pi.on("tool_result", async (event) => {
 		if (typeof event.toolName === "string" && event.toolName.startsWith("task_")) return;
 		lastToolResultAt = Date.now(); // real work observed — feeds the evidence gate
@@ -348,14 +375,34 @@ export default function tasksExtension(pi: ExtensionAPI) {
 	// --- Command ---------------------------------------------------------------
 
 	pi.registerCommand("tasks", {
-		description: "Session task list; subcommands: expand, compact, reload, clear",
+		description: "Session task list; subcommands: expand, compact, reload, clear, enforce",
 		getArgumentCompletions: (prefix: string) => {
-			const options = ["expand", "compact", "reload", "clear"];
+			const options = ["expand", "compact", "reload", "clear", "enforce on", "enforce off", "enforce status"];
 			const filtered = options.filter((o) => o.startsWith(prefix.trim()));
 			return filtered.length > 0 ? filtered.map((value) => ({ value, label: value })) : null;
 		},
 		handler: async (args, ctx) => {
 			const sub = args.trim().toLowerCase();
+			if (sub.startsWith("enforce")) {
+				const arg = sub.split(/\s+/)[1] ?? "status";
+				if (arg === "on" || arg === "off") {
+					enforceTasks = arg === "on";
+					await persist();
+					updateUI(ctx);
+					ctx.ui.notify(
+						`Task gating ${enforceTasks ? "ON" : "OFF"} for this session` +
+							(enforceTasks ? " — write/edit blocked while untracked work crosses the threshold." : " — reminders only."),
+						"info",
+					);
+					return;
+				}
+				ctx.ui.notify(
+					`Task gating is ${enforceTasks ? "ON" : "OFF"} for this session ` +
+						`(streak ${nudgeState.workStreak}, threshold ${NUDGE_FIRST_AT}). Usage: /tasks enforce on|off`,
+					"info",
+				);
+				return;
+			}
 			if (sub === "clear") {
 				tasks = [];
 				await persist();
@@ -377,7 +424,7 @@ export default function tasksExtension(pi: ExtensionAPI) {
 			}
 			// Default and "expand": render the full widget.
 			if (sub && sub !== "expand") {
-				ctx.ui.notify("Usage: /tasks | /tasks expand | /tasks compact | /tasks reload | /tasks clear", "warning");
+				ctx.ui.notify("Usage: /tasks | /tasks expand | /tasks compact | /tasks reload | /tasks clear | /tasks enforce on|off", "warning");
 				return;
 			}
 			widgetExpanded = true;

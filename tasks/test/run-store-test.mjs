@@ -14,9 +14,14 @@ import {
 	renderStatusLine,
 	renderWidgetLines,
 	sanitizeCode,
+	shouldGateForTasks,
 	taskCode,
+	taskGateReason,
 	taskNudgeAdvance,
+	taskPromptReminder,
 	TASK_NUDGE_TEXT,
+	TASK_PROMPT_REMINDER_TEXT,
+	TASK_STANDING_RULE_TEXT,
 	TRANSITIONS,
 	updateTask,
 } from "../lib/store.ts";
@@ -382,6 +387,45 @@ await check("same-status: terminal re-open still errors (unchanged)", () => {
 	const r = updateTask(tasks, "A-1", { status: "completed" }, ENV(3000));
 	assert.ok(r.error);
 	assert.match(r.error, /terminal/);
+});
+
+// --- prompt reminder, standing rule, hard gate (ENF) -------------------------
+
+await check("prompt reminder: only when empty AND at/over threshold", () => {
+	assert.equal(taskPromptReminder({ workStreak: 0, lastNudgeAt: 0 }, true), null);
+	assert.equal(taskPromptReminder({ workStreak: NUDGE_FIRST_AT - 1, lastNudgeAt: 0 }, true), null);
+	assert.equal(taskPromptReminder({ workStreak: NUDGE_FIRST_AT, lastNudgeAt: NUDGE_FIRST_AT }, true), TASK_PROMPT_REMINDER_TEXT);
+	// a task set silences it entirely — zero prompt cost while compliant
+	assert.equal(taskPromptReminder({ workStreak: 99, lastNudgeAt: 3 }, false), null);
+});
+
+await check("prompt reminder + standing rule are bounded", () => {
+	assert.ok(TASK_PROMPT_REMINDER_TEXT.length < 200, `reminder too long: ${TASK_PROMPT_REMINDER_TEXT.length}`);
+	assert.ok(TASK_STANDING_RULE_TEXT.length < 200, `rule too long: ${TASK_STANDING_RULE_TEXT.length}`);
+	assert.match(TASK_STANDING_RULE_TEXT, /task_create/);
+	assert.match(TASK_PROMPT_REMINDER_TEXT, /task_create/);
+});
+
+await check("gate: blocks write/edit only, and only when enforced + empty + threshold", () => {
+	const base = { tasksEmpty: true, workStreak: NUDGE_FIRST_AT, enforce: true };
+	assert.equal(shouldGateForTasks({ ...base, toolName: "write" }), true);
+	assert.equal(shouldGateForTasks({ ...base, toolName: "edit" }), true);
+	// read-only tools are never gated
+	for (const t of ["read", "grep", "find", "ls", "bash", "task_create", "task_update"]) {
+		assert.equal(shouldGateForTasks({ ...base, toolName: t }), false, `${t} must not be gated`);
+	}
+	// a task set, a low streak, or operator opt-out all disable the gate
+	assert.equal(shouldGateForTasks({ ...base, toolName: "write", tasksEmpty: false }), false);
+	assert.equal(shouldGateForTasks({ ...base, toolName: "write", workStreak: NUDGE_FIRST_AT - 1 }), false);
+	assert.equal(shouldGateForTasks({ ...base, toolName: "write", enforce: false }), false);
+});
+
+await check("gate reason is directive and names the escape hatch", () => {
+	const reason = taskGateReason(5);
+	assert.match(reason, /task_create/);
+	assert.match(reason, /Read-only tools are never blocked/);
+	assert.match(reason, /\/tasks enforce off/);
+	assert.ok(reason.length < 400);
 });
 
 console.log(`\nAll ${pass} store tests passed`);

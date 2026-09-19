@@ -1243,12 +1243,23 @@ Humans review four things: checkable ACs, AC-cited evidence, justified
 amendments, and no work outside non-goals. Full guide:
 [`skills/tasks/README.md`](../skills/tasks/README.md).
 
-### Discipline nudge
+### Enforcement ladder
 
-Voluntary skill loading is unreliable, so the extension watches: 3+ consecutive
-tool calls with **no** task set injects a bounded advisory into the tool result,
-directing the model to `task_create`. It re-fires at most every 10 further
-results. Advisory only — the evidence gate remains the sole hard enforcement.
+Voluntary skill loading is unreliable, so enforcement escalates:
+
+1. a constant **standing rule** line in the system prompt, every turn;
+2. with no task set, a bounded **advisory** added to the tool result after 3+
+   consecutive tool calls (re-fires at most every 10), mirrored as a **prompt
+   reminder** until a task set exists;
+3. past that threshold, **`write`/`edit` are blocked** with a directive reason
+   until `task_create` runs. Read-only tools and `bash` are never gated.
+
+Sessions can opt out of layer 3 with `/tasks enforce on|off|status` (default on).
+
+Real-pi behaviour: a child pi with no skill loaded tracked its work from the
+first turn; a child explicitly told *not* to track was stopped at its first file
+write. Editing the extension itself requires `/reload` — a running session keeps
+the code loaded at startup.
 
 ---
 
