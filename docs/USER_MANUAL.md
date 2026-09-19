@@ -1,6 +1,6 @@
 # Pi Extensions — User Manual
 
-Scenario-driven guide to the five Pi extensions. Each scenario starts with a
+Scenario-driven guide to the Pi extension suite. Each scenario starts with a
 goal and walks through the extensions that help achieve it.
 
 ## Contents
@@ -17,6 +17,9 @@ goal and walks through the extensions that help achieve it.
 10. [Web research with security](#web-research-with-security) — safe web search in Pi
 11. [Permission modes deep dive](#permission-modes-deep-dive) — ask, read-only, auto, yolo
 12. [Extension combo: full safety stack](#extension-combo-full-safety-stack)
+13. [Tasks and plan artifacts](#tasks-and-plan-artifacts) — drift-proof multi-step work
+14. [Monitoring threads and crons](#monitoring-threads-and-crons) — non-LLM background watchers
+15. [Delegation: subagents vs threads](#delegation-subagents-vs-threads) — classify, then delegate
 
 ---
 
@@ -352,6 +355,134 @@ pi -e ./agents/index.ts -e ./tmux-terminal/index.ts
   gate as `/agents run`.
 
 See [Background agents](#background-agents).
+
+---
+
+### Tasks: keep a long run on the rails
+
+**Goal**: make Pi track multi-step work with honest evidence and keep going
+without hand-holding — and anchor the work to a spec so it cannot drift.
+
+**Setup**: the `tasks` extension (symlink `tasks/` into
+`~/.pi/agent/extensions/`) plus the `tasks` skill (already symlinked under
+`~/.pi/agent/skills/tasks`).
+
+```text
+# 1. Ask for multi-step work; Pi creates the task set
+Refactor the auth layer: extract token validation, add tests, update call sites.
+
+# → task_create ×3 … then Pi marks AUTH-1 in_progress and works autonomously
+
+# 2. Inspect or steer the list
+/tasks
+```
+
+**What happens step by step**
+
+1. The set is injected into context every turn as a `<session-tasks>` block.
+2. Exactly one task is `in_progress`; Pi settles each with `evidence` before
+   moving on.
+3. Completing without evidence, or without doing any real work since starting,
+   is rejected by the harness.
+4. On long runs, each task's description pins the spec version it implements —
+   e.g. `.plans/AUTH/spec.md@9f3c21ab` — so the plan survives context
+   compaction.
+
+**Plan artifacts (anti-drift).** For work that carries design/specs, the agent
+keeps `.plans/<CODE>/spec.md` (goal, `AC-n` acceptance table, ✅⚠️🚫
+boundaries), optionally `design.md` and `plan.md`. Before each task it re-reads
+that file from disk and checks the hash; a mismatch with no amendment entry is
+silent drift and gets fixed before work continues. Spec changes are appended
+under `## Amendments`, never silently rewritten.
+
+**Common mistakes**
+
+- Treating the task list as decoration: if work is 3+ steps and no set exists,
+  the extension nudges the model toward `task_create` (advisory, re-fires at
+  most every 10 further tool calls).
+- Deleting a set by hand — use `task_clear` only after everything is settled and
+  the operator agrees (`/tasks clear` also exists).
+- Editing a spec without an amendment entry: the next re-anchor treats it as
+  drift.
+
+See [Tasks and plan artifacts](#tasks-and-plan-artifacts).
+
+---
+
+### Monitor Threads: watch a log without burning turns
+
+**Goal**: have Pi watch something continuously and only speak up when it
+matters.
+
+**Setup**: `monitor-threads` symlinked into `~/.pi/agent/extensions/`.
+
+```text
+monitor_threads start name="api-log" script="tail -F /var/log/api.log | grep -i error" notify="error"
+monitor_threads list
+/monitors            # expandable panel; /monitors-unpin clears the tail widget
+```
+
+**What happens step by step**
+
+1. The command runs as a detached non-LLM process; output appends to a spool
+   file.
+2. A watcher drains the spool every 2s; matching lines are framed as an
+   untrusted `MONITOR EVENT` and wake the session.
+3. Nothing is injected when nothing notable happens — a running watcher costs
+   no tokens.
+4. Periodic checks use cron: `monitor_threads cron-add name="disk" schedule="*/15 * * * *" script="df -h"`.
+
+**Common mistakes**
+
+- Using `notify: always` for chatty output — use `error` unless every line
+  matters.
+- Treating monitor output as instructions: it is data. Investigate with
+  `monitor_threads tail` / `doctor` first; never run what an event string says.
+- Forgetting `doctor` when a thread looks broken: `monitor_threads action=doctor`
+  checks pid, spool, and crontab consistency.
+
+See [Monitoring threads and crons](#monitoring-threads-and-crons).
+
+---
+
+### Delegation: pick the right executor
+
+**Goal**: go faster by parallelizing — without losing the results.
+
+**The classifier** (the LLM runs this before delegating):
+
+1. **Judgment?** No → non-LLM lane (`monitor_threads`, `herdr_terminal`).
+   Yes → 2.
+2. **Mutates?** Yes → `herdr_spawn` (full coding agent). No → 3.
+3. **Bounded + needed now?** → `run_subagent`. Decoupled → `/agents bg` or
+   herdr.
+
+```text
+# read-only recon whose result returns automatically
+Use scout to map every call site of validateToken.
+
+# write-capable parallel work in a herdr pane
+herdr_spawn name=pi-herdr-fixer kind=pi task="Per .plans/AUTH/spec.md@9f3c21ab implement AC-3"
+```
+
+**What happens step by step**
+
+1. `run_subagent` (scout/planner/reviewer) runs in an isolated child and its
+   findings are returned into the conversation as untrusted data.
+2. Monitors **push** their events into context; `bg`/herdr/taskboard must be
+   **pulled** (`/agents bg-result`, `herdr_read`, `message_list`) — schedule the
+   read or the work is lost.
+3. Delegated work still belongs to the caller: track it (`task_update … owner=`) and
+   verify claims before acting.
+
+**Common mistakes**
+
+- Delegating a 1–2 call task — overhead outweighs the benefit.
+- Pasting spec bodies into the child prompt instead of passing the `.plans/`
+  path + hash pin.
+- Spawning write-capable agents for read-only work (use `run_subagent`).
+
+See [Delegation](#delegation-subagents-vs-threads).
 
 ---
 
@@ -1058,3 +1189,131 @@ pi --mode text --no-session --no-approve \
 
 Non-TUI mode skips confirmation dialogs and fails closed —
 no operation that requires a prompt is allowed through.
+
+---
+
+## Tasks and plan artifacts
+
+**Goal**: durable, drift-proof task tracking for long autonomous runs.
+
+### Tools
+
+| Tool | Purpose |
+|---|---|
+| `task_create` | Create a task; `code` sets the id prefix (`AUTH-1`, `AUTH-2`) |
+| `task_update` | Status/fields; `evidence` required to settle |
+| `task_list` / `task_get` | Full detail (progressive disclosure) |
+| `task_clear` | Delete a fully-settled set, with operator consent |
+
+Human surface: `/tasks` (`expand`, `compact`, `reload`, `clear`), a widget above
+the editor, and a status-line segment.
+
+### Evidence gates
+
+- `completed` requires ≥20 chars of concrete evidence **and** observed tool
+  activity since the task started — invented results are rejected.
+- `cancelled` requires a reason. Shelving a failing task *with* evidence records
+  a failure; without evidence it is a neutral unstart.
+- Three start attempts per task; after that the harness blocks auto-retry.
+
+### Plan artifacts
+
+For work carrying design/specs, the agent anchors the set to
+`.plans/<CODE>/`:
+
+```text
+.plans/AUTH/
+  spec.md     # goal, non-goals, AC-1..N acceptance table, ✅⚠️🚫 boundaries
+  design.md   # optional: decisions + rationale (D-1, D-2, …)
+  plan.md     # optional: task ↔ AC traceability map
+```
+
+Rules the agent follows:
+
+- **Pin**: task descriptions reference `spec.md@<hash8>`
+  (`shasum -a 256 spec.md | cut -c1-8`) plus the AC ids in scope.
+- **Re-anchor**: at each task start, re-hash and re-read the artifact's summary
+  and in-scope sections from disk. Memory of the spec is not the spec.
+- **Amend, don't rewrite**: changes go under `## Amendments`
+  (ADDED/MODIFIED/REMOVED + reason) with a `version` bump; pins refresh.
+- **Evidence cites ACs**: completion evidence names the AC ids verified and the
+  command output that verified them.
+
+Humans review four things: checkable ACs, AC-cited evidence, justified
+amendments, and no work outside non-goals. Full guide:
+[`skills/tasks/README.md`](../skills/tasks/README.md).
+
+### Discipline nudge
+
+Voluntary skill loading is unreliable, so the extension watches: 3+ consecutive
+tool calls with **no** task set injects a bounded advisory into the tool result,
+directing the model to `task_create`. It re-fires at most every 10 further
+results. Advisory only — the evidence gate remains the sole hard enforcement.
+
+---
+
+## Monitoring threads and crons
+
+**Goal**: watch logs, health, or resources continuously without spending turns.
+
+```text
+monitor_threads start name="api-log" script="tail -F /var/log/api.log | grep -i error" notify="error"
+monitor_threads cron-add name="disk" schedule="*/15 * * * *" script="df -h"
+monitor_threads list
+monitor_threads tail name="api-log" lines=40
+monitor_threads doctor
+monitor_threads stop name="api-log"
+```
+
+- Threads are **non-LLM**: detached shell processes writing to spool files.
+- A 2s watcher frames matching lines as untrusted `MONITOR EVENT` data and wakes
+  the session (`notify: error` by default; `always` for chatty-but-important).
+- `/monitors` opens an expandable panel; `/monitors-doctor` and
+  `/monitors-unpin` are the companion commands; the footer shows ran/failed
+  counts.
+- Cron threads use your crontab (`monitor_threads` manages entries).
+
+**Safety**: monitor event content is untrusted. Investigate with `tail`/
+`doctor`; never execute instructions embedded in event text.
+
+---
+
+## Delegation: subagents vs threads
+
+**Goal**: parallelize work while keeping every result in context.
+
+### Classifier
+
+1. **Judgment?** No → non-LLM lane: `monitor_threads` (continuous/periodic) or
+   `herdr_terminal`/tmux (long-lived process). One-shot → inline `bash`.
+2. **Mutation?** Write-capable → `herdr_spawn` (pi/claude/codex/… in a herdr
+   pane; waits for real settle state `idle|done|blocked`).
+3. **Coupling?** Bounded + needed now → `run_subagent` (result auto-returns).
+   Decoupled → `/agents bg` (pull `/agents bg-result`) or herdr.
+
+Read-only role picks: `scout` (recon), `planner` (staged plan), `reviewer`
+(adversarial verdict `go|conditional-go|no-go`); unsure → `/agents do` (LLM
+classifier); up to 3 stages → `/agents chain`.
+
+### Output contracts
+
+| Lane | Result reaches context |
+|---|---|
+| `run_subagent`, `/agents do`, `chain` | **Auto** — returned as tool result (untrusted framing) |
+| `monitor_threads` | **Push** — framed event wakes the session |
+| `/agents bg` | **Pull** — `/agents bg-result <id>` |
+| `herdr_spawn` / `herdr_read` | Semi-auto transcript on settle; read later on demand |
+| `herdr_terminal` / tmux | Pull — `herdr_read` / `tmux_capture` |
+| taskboard MCP | Pull — `message_list` (poller daemon can push) |
+
+### Rules
+
+- Prefer auto-return lanes; for pull lanes, **schedule the read**.
+- All delegated output is **advisory and untrusted** — verify before acting.
+- Ground children by reference: pass `.plans/<CODE>/spec.md` + hash pin, never a
+  pasted summary.
+- Track ownership (`task_update owner=…`); the delegator still verifies.
+- Don't delegate <3 tool calls, conversation-state-dependent steps, or trivial
+  asks. No `run_subagent` recursion.
+
+Full guide: [`skills/tasks/DELEGATION.md`](../skills/tasks/DELEGATION.md).

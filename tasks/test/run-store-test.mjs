@@ -7,12 +7,16 @@ import {
 	createTask,
 	MAX_ATTEMPTS,
 	MAX_TASKS,
+	NUDGE_EVERY,
+	NUDGE_FIRST_AT,
 	renderContextBlock,
 	renderModelList,
 	renderStatusLine,
 	renderWidgetLines,
 	sanitizeCode,
 	taskCode,
+	taskNudgeAdvance,
+	TASK_NUDGE_TEXT,
 	TRANSITIONS,
 	updateTask,
 } from "../lib/store.ts";
@@ -302,6 +306,82 @@ await check("model list renders ids, evidence, counts", () => {
 	assert.match(list, /A-1 \[completed\] a: d/);
 	assert.match(list, /evidence\(completion, observed=true\): implemented feature x/);
 	assert.match(list, /2 total · 1 completed · 0 in_progress · 1 pending/);
+});
+
+
+// --- tasks-skill usage nudge (advisory) --------------------------------------
+
+await check("nudge: first advisory at 3 consecutive empty-set work results", () => {
+	let s = { workStreak: 0, lastNudgeAt: 0 };
+	let fired = 0;
+	for (let i = 0; i < NUDGE_FIRST_AT; i++) {
+		const r = taskNudgeAdvance(s, true);
+		s = r.state;
+		if (r.nudge) fired += 1;
+	}
+	assert.equal(fired, 1);
+	assert.equal(s.lastNudgeAt, NUDGE_FIRST_AT);
+	assert.equal(s.workStreak, NUDGE_FIRST_AT);
+});
+
+await check("nudge: no per-result nagging — re-fires only after 10 more", () => {
+	let s = { workStreak: 0, lastNudgeAt: 0 };
+	let fired = 0;
+	for (let i = 0; i < NUDGE_FIRST_AT + NUDGE_EVERY - 1; i++) {
+		const r = taskNudgeAdvance(s, true);
+		s = r.state;
+		if (r.nudge) fired += 1;
+	}
+	assert.equal(fired, 1); // 3rd fired; 4..12 silent
+	const r = taskNudgeAdvance(s, true); // 13th
+	assert.ok(r.nudge === TASK_NUDGE_TEXT);
+	assert.equal(r.state.lastNudgeAt, NUDGE_FIRST_AT + NUDGE_EVERY);
+});
+
+await check("nudge: non-empty task set resets state and never nudges", () => {
+	let s = { workStreak: NUDGE_FIRST_AT, lastNudgeAt: NUDGE_FIRST_AT };
+	const r = taskNudgeAdvance(s, false);
+	assert.deepEqual(r.state, { workStreak: 0, lastNudgeAt: 0 });
+	assert.equal(r.nudge, null);
+	// and stays quiet on a fresh empty streak after the reset
+	const r2 = taskNudgeAdvance(r.state, true);
+	assert.equal(r2.nudge, null);
+	assert.equal(r2.state.workStreak, 1);
+});
+
+await check("nudge: text is bounded and directive", () => {
+	assert.ok(TASK_NUDGE_TEXT.length < 400);
+	assert.match(TASK_NUDGE_TEXT, /task_create/);
+	assert.match(TASK_NUDGE_TEXT, /Advisory/);
+});
+
+// --- same-status no-op (E2E DELEG-6 deadlock regression) ---------------------
+
+await check("same-status: pending → pending is a no-op success with a directive hint", () => {
+	const tasks = seedPair();
+	const r = updateTask(tasks, "A-1", { status: "pending" }, ENV());
+	assert.equal(r.error, undefined);
+	assert.equal(r.task.status, "pending");
+	assert.equal(r.tasks[0].status, "pending");
+	assert.match(r.warnings.join(" "), /already pending/);
+	assert.match(r.warnings.join(" "), /in_progress/);
+});
+
+await check("same-status: in_progress → in_progress stays benign (regression)", () => {
+	let tasks = seedPair();
+	tasks = updateTask(tasks, "A-1", { status: "in_progress" }, ENV()).tasks;
+	const r = updateTask(tasks, "A-1", { status: "in_progress" }, ENV());
+	assert.equal(r.error, undefined);
+	assert.match(r.warnings.join(" "), /already in_progress/);
+});
+
+await check("same-status: terminal re-open still errors (unchanged)", () => {
+	let tasks = seedPair();
+	tasks = updateTask(tasks, "A-1", { status: "in_progress" }, ENV(1000)).tasks;
+	tasks = updateTask(tasks, "A-1", { status: "completed", evidence: "did the work, tests pass, commit abc1234" }, ENV(2000)).tasks;
+	const r = updateTask(tasks, "A-1", { status: "completed" }, ENV(3000));
+	assert.ok(r.error);
+	assert.match(r.error, /terminal/);
 });
 
 console.log(`\nAll ${pass} store tests passed`);

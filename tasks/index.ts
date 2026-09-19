@@ -27,16 +27,26 @@ import {
 	renderStatusLine,
 	renderWidgetLines,
 	sortTasks,
+	taskNudgeAdvance,
 	updateTask,
+	type NudgeState,
 	type Task,
 } from "./lib/store";
 
-const STATUS_PARAM = Type.Union([
-	Type.Literal("pending"),
-	Type.Literal("in_progress"),
-	Type.Literal("completed"),
-	Type.Literal("cancelled"),
-]);
+const STATUS_PARAM = Type.Union(
+	[
+		Type.Literal("pending"),
+		Type.Literal("in_progress"),
+		Type.Literal("completed"),
+		Type.Literal("cancelled"),
+	],
+	{
+		description:
+			'New status. To START a task pass "in_progress" (never repeat the current status; a repeated status is a no-op). ' +
+			'To FINISH pass "completed" (evidence required). To DROP pass "cancelled" (evidence required). ' +
+			'Omit entirely when only updating other fields.',
+	},
+);
 
 interface PersistedShape {
 	projectPath: string;
@@ -147,10 +157,21 @@ export default function tasksExtension(pi: ExtensionAPI) {
 
 	// Mid-turn freshness: after EVERY tool result, re-anchor task state. Full
 	// block when it changed since the last injection; one-line status otherwise.
+	// Empty task set: track consecutive work results and nudge toward the tasks
+	// skill (advisory) — models otherwise skip voluntary skill loading.
+	let nudgeState: NudgeState = { workStreak: 0, lastNudgeAt: 0 };
+
 	pi.on("tool_result", async (event) => {
 		if (typeof event.toolName === "string" && event.toolName.startsWith("task_")) return;
 		lastToolResultAt = Date.now(); // real work observed — feeds the evidence gate
-		if (tasks.length === 0) return;
+		const advanced = taskNudgeAdvance(nudgeState, tasks.length === 0);
+		nudgeState = advanced.state;
+		if (tasks.length === 0) {
+			if (!advanced.nudge) return;
+			const content = [...(event.content ?? [])];
+			content.push({ type: "text", text: `\n\n${advanced.nudge}` });
+			return { content };
+		}
 		const block = renderContextBlock(tasks, projectPath ?? "(unknown project)", { cleanupState });
 		if (!block) return;
 		const text = block === lastInjectedBlock ? (renderStatusLine(tasks) ?? block) : block;
@@ -251,7 +272,7 @@ export default function tasksExtension(pi: ExtensionAPI) {
 		name: "task_update",
 		label: "Tasks: update",
 		description:
-			"Update a task's status or fields. Enforces exactly one in_progress; completing a task returns the next one so work continues without waiting.",
+			"Update a task's status or fields. Set status='in_progress' BEFORE starting a task; set 'completed' with evidence as soon as it is done. Enforces exactly one in_progress; completing a task returns the next one so work continues without waiting.",
 		promptGuidelines: [
 			"Use task_update to mark a task in_progress BEFORE starting it and completed as soon as it is done; then continue to the returned next task without waiting for the user.",
 		],

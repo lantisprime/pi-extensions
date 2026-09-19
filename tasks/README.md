@@ -62,6 +62,12 @@ Guards enforced by the harness (not by prompting):
 - `before_agent_start` — bounded `<session-tasks>` block appended to the system prompt.
 - `tool_result` — after every non-task tool result: full block when state changed,
   one-line status otherwise. The model never works from a stale list.
+- **Empty-set nudge** — with no task set, 3+ consecutive tool results inject a
+  bounded advisory directing `task_create` per the tasks skill; it re-fires at
+  most every 10 further results (advisory only, never a block).
+- **Same-status no-op** — a `task_update` whose status equals the current status
+  succeeds as a benign no-op with a directive warning, so a model that re-emits
+  the current status cannot deadlock on a transition error.
 - Full detail stays behind `task_list`; behavioral discipline lives in the
   `tasks` skill (loaded on demand).
 
@@ -87,3 +93,24 @@ folder/repo. Corrupt files are quarantined (`.corrupt-<ts>`), never fatal.
 npm exec -y --package=typescript@5.9.3 -- tsc --noEmit -p tsconfig.json
 npm exec -y --package=tsx -- tsx test/run-store-test.mjs
 ```
+
+### End-to-end (real child pi)
+
+Pi exposes the current session to commands as `PI_PROVIDER` / `PI_MODEL`. Always
+inherit them — never hardcode a model, so the child exercises exactly what the
+parent runs:
+
+```bash
+mkdir -p /tmp/pi-e2e/proj && cd /tmp/pi-e2e/proj
+pi --provider "$PI_PROVIDER" --model "$PI_MODEL" \
+  --no-extensions -e "$PWD/../../tasks/index.ts" \
+  --skill "$PWD/../../skills/tasks" \
+  --session-dir /tmp/pi-e2e/sessions --no-approve \
+  -p "Do this as a tracked multi-step job: create a.txt/b.txt/c.txt, then verify them."
+```
+
+Checks: a project-keyed store appears under `~/.pi/agent/tasks/projects/`, the
+session transcript shows `task_create` → `in_progress` → `completed` with
+evidence, and no `Illegal transition` loop. Drop `--skill` and use 3+ tool calls
+to exercise the empty-set nudge (the advisory must appear exactly once in the
+transcript).

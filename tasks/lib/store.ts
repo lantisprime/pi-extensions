@@ -250,14 +250,18 @@ export function updateTask(tasks: Task[], id: string, patch: UpdateInput, env: U
 
 	const target = patch.status;
 
-	// Idempotent re-start: in_progress → in_progress is a no-op success (e.g.
-	// after a session resume the model re-affirms the active task).
-	if (target === "in_progress" && current.status === "in_progress") {
-		return {
-			tasks,
-			task: current,
-			warnings: [`${id} is already in_progress — continue working on it.`],
-		};
+	// Idempotent same-status update: re-affirming the task's current status is a
+	// no-op success, never an error. This covers in_progress → in_progress (e.g.
+	// after a session resume the model re-affirms the active task) and, critically,
+	// any other repeat: a weaker model that emits the *current* status instead of
+	// the intended one would otherwise retry the same illegal call forever.
+	// Observed live in E2E (DELEG-6): 17 deadlocked `pending → pending` calls.
+	if (target && target === current.status) {
+		const hint =
+			current.status === "pending"
+				? `${id} is already pending — pass status="in_progress" to start it.`
+				: `${id} is already ${current.status} — continue working on it.`;
+		return { tasks, task: current, warnings: [hint] };
 	}
 
 	// Lifecycle table.
@@ -540,4 +544,37 @@ export function renderModelList(tasks: Task[]): string {
 	const tail = [`${c.completed} completed`, `${c.inProgress} in_progress`, `${c.pending} pending`];
 	if (c.cancelled > 0) tail.splice(1, 0, `${c.cancelled} cancelled`);
 	return `${lines.join("\n")}\n\n${c.total} total · ${tail.join(" · ")}`;
+}
+
+// --- Tasks-skill usage nudge (advisory) --------------------------------------
+
+/** Session-scoped streak state for the empty-set work nudge. */
+export interface NudgeState {
+	/** Consecutive non-task tool results observed while the task set was empty. */
+	workStreak: number;
+	/** Streak value at which the last advisory fired (0 = never). */
+	lastNudgeAt: number;
+}
+
+export const NUDGE_FIRST_AT = 3;
+export const NUDGE_EVERY = 10;
+
+export const TASK_NUDGE_TEXT =
+	"[tasks] Multi-step work detected with no task set. If this is 3+ steps, follow the tasks skill now: task_create the steps, mark each in_progress before starting it, and complete with evidence. (Advisory — not a block.)";
+
+/**
+ * Advance the nudge state by one observed work tool result. Pure: returns the
+ * next state plus the advisory text when one should fire, null otherwise.
+ * Non-empty task sets reset the streak (their results carry the task block
+ * instead). First nudge at NUDGE_FIRST_AT consecutive empty-set work results,
+ * then every NUDGE_EVERY further ones — never per-result nagging.
+ */
+export function taskNudgeAdvance(state: NudgeState, tasksEmpty: boolean): { state: NudgeState; nudge: string | null } {
+	if (!tasksEmpty) return { state: { workStreak: 0, lastNudgeAt: 0 }, nudge: null };
+	const workStreak = state.workStreak + 1;
+	const threshold = state.lastNudgeAt === 0 ? NUDGE_FIRST_AT : state.lastNudgeAt + NUDGE_EVERY;
+	if (workStreak >= threshold) {
+		return { state: { workStreak, lastNudgeAt: workStreak }, nudge: TASK_NUDGE_TEXT };
+	}
+	return { state: { workStreak, lastNudgeAt: state.lastNudgeAt }, nudge: null };
 }
