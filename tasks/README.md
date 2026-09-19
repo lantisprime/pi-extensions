@@ -57,13 +57,35 @@ Guards enforced by the harness (not by prompting):
 | `task_list` | Full list with counts. |
 | `task_clear` | Delete the settled set (all-settled precondition; operator consent required). |
 
-## Context delivery (progressive disclosure)
+## Context delivery and enforcement
 
-- `before_agent_start` — bounded `<session-tasks>` block appended to the system prompt.
-- `tool_result` — after every non-task tool result: full block when state changed,
-  one-line status otherwise. The model never works from a stale list.
-- Full detail stays behind `task_list`; behavioral discipline lives in the
-  `tasks` skill (loaded on demand).
+Progressive disclosure plus a three-layer compliance ladder — advisory signals
+escalate to a hard gate, because a hint at the tail of a tool result is easy to
+skim past (observed in practice, by the session that designed it):
+
+1. **Standing rule** (`before_agent_start`, every turn, constant) —
+   `[tasks] Rule: 3+ step work is tracked with the tasks skill …` so the
+   discipline is known from turn one, not only after untracked work piles up.
+2. **Nudge + prompt reminder** — with no task set, 3+ consecutive non-task tool
+   results inject a bounded advisory into the tool result (re-firing at most
+   every 10 further results); the same state mirrors a reminder into the system
+   prompt each turn until a task set exists. Zero cost while compliant.
+3. **Hard gate** (`tool_call`) — once the streak crosses the threshold,
+   `write`/`edit` are **blocked** with a directive reason until `task_create`
+   runs. Read-only tools and `bash` are never gated. Toggle per session:
+   `/tasks enforce on|off|status` (default `on`).
+
+Also on every turn: the bounded `<session-tasks>` block (full block when state
+changed, one-line status otherwise), so the model never works from a stale list.
+Same-status `task_update` calls are benign no-ops (a repeated status never
+errors), so a model that re-emits its current status cannot deadlock.
+
+> **Editing extension code requires `/reload`** (or a restart). A running session
+> keeps the version loaded at startup — which is exactly how a coding session can
+> edit this extension and still see none of its own enforcement.
+
+Full detail stays behind `task_list`; the behavioural discipline lives in the
+`tasks` skill (loaded on demand — see also `skills/tasks/DELEGATION.md`).
 
 ## Durable state
 
@@ -80,6 +102,7 @@ folder/repo. Corrupt files are quarantined (`.corrupt-<ts>`), never fatal.
 | `/tasks expand` / `compact` | Widget density |
 | `/tasks reload` | Re-read state from disk |
 | `/tasks clear` | Wipe the list (operator-initiated) |
+| `/tasks enforce on\|off\|status` | Toggle the write/edit gate for this session (default on) |
 
 ## Testing
 
@@ -87,3 +110,24 @@ folder/repo. Corrupt files are quarantined (`.corrupt-<ts>`), never fatal.
 npm exec -y --package=typescript@5.9.3 -- tsc --noEmit -p tsconfig.json
 npm exec -y --package=tsx -- tsx test/run-store-test.mjs
 ```
+
+### End-to-end (real child pi)
+
+Pi exposes the current session to commands as `PI_PROVIDER` / `PI_MODEL`. Always
+inherit them — never hardcode a model, so the child exercises exactly what the
+parent runs:
+
+```bash
+mkdir -p /tmp/pi-e2e/proj && cd /tmp/pi-e2e/proj
+pi --provider "$PI_PROVIDER" --model "$PI_MODEL" \
+  --no-extensions -e "$PWD/../../tasks/index.ts" \
+  --skill "$PWD/../../skills/tasks" \
+  --session-dir /tmp/pi-e2e/sessions --no-approve \
+  -p "Do this as a tracked multi-step job: create a.txt/b.txt/c.txt, then verify them."
+```
+
+Checks: a project-keyed store appears under `~/.pi/agent/tasks/projects/`, the
+session transcript shows `task_create` → `in_progress` → `completed` with
+evidence, and no `Illegal transition` loop. Drop `--skill` and use 3+ tool calls
+to exercise the empty-set nudge (the advisory must appear exactly once in the
+transcript).

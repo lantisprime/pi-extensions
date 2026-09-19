@@ -250,14 +250,18 @@ export function updateTask(tasks: Task[], id: string, patch: UpdateInput, env: U
 
 	const target = patch.status;
 
-	// Idempotent re-start: in_progress → in_progress is a no-op success (e.g.
-	// after a session resume the model re-affirms the active task).
-	if (target === "in_progress" && current.status === "in_progress") {
-		return {
-			tasks,
-			task: current,
-			warnings: [`${id} is already in_progress — continue working on it.`],
-		};
+	// Idempotent same-status update: re-affirming the task's current status is a
+	// no-op success, never an error. This covers in_progress → in_progress (e.g.
+	// after a session resume the model re-affirms the active task) and, critically,
+	// any other repeat: a weaker model that emits the *current* status instead of
+	// the intended one would otherwise retry the same illegal call forever.
+	// Observed live in E2E (DELEG-6): 17 deadlocked `pending → pending` calls.
+	if (target && target === current.status) {
+		const hint =
+			current.status === "pending"
+				? `${id} is already pending — pass status="in_progress" to start it.`
+				: `${id} is already ${current.status} — continue working on it.`;
+		return { tasks, task: current, warnings: [hint] };
 	}
 
 	// Lifecycle table.
@@ -540,4 +544,93 @@ export function renderModelList(tasks: Task[]): string {
 	const tail = [`${c.completed} completed`, `${c.inProgress} in_progress`, `${c.pending} pending`];
 	if (c.cancelled > 0) tail.splice(1, 0, `${c.cancelled} cancelled`);
 	return `${lines.join("\n")}\n\n${c.total} total · ${tail.join(" · ")}`;
+}
+
+// --- Tasks-skill usage nudge (advisory) --------------------------------------
+
+/** Session-scoped streak state for the empty-set work nudge. */
+export interface NudgeState {
+	/** Consecutive non-task tool results observed while the task set was empty. */
+	workStreak: number;
+	/** Streak value at which the last advisory fired (0 = never). */
+	lastNudgeAt: number;
+}
+
+export const NUDGE_FIRST_AT = 3;
+export const NUDGE_EVERY = 10;
+
+export const TASK_NUDGE_TEXT =
+	"[tasks] Multi-step work detected with no task set. If this is 3+ steps, follow the tasks skill now: task_create the steps, mark each in_progress before starting it, and complete with evidence. (Advisory — not a block.)";
+
+/**
+ * Prompt-level escalation of the same signal: a tail line on a tool result is
+ * easy to skim past (observed live), so once the streak crosses the threshold
+ * the reminder also rides the system prompt, at the top of context, every turn
+ * until a task set exists. Constant text — no per-turn growth, zero cost while
+ * compliant or below threshold.
+ */
+export const TASK_PROMPT_REMINDER_TEXT =
+	"[tasks] No task set: untracked multi-step work detected. Load the tasks skill and task_create the steps now (in_progress before each, evidence to complete).";
+
+/** System-prompt reminder for the current streak, or null when not warranted. */
+export function taskPromptReminder(state: NudgeState, tasksEmpty: boolean): string | null {
+	if (!tasksEmpty) return null;
+	return state.workStreak >= NUDGE_FIRST_AT ? TASK_PROMPT_REMINDER_TEXT : null;
+}
+
+/**
+ * Constant standing rule — appended to the system prompt on every turn so the
+ * discipline is known from turn one, not only after untracked work accumulates.
+ * Bounded and fixed: no per-turn growth.
+ */
+export const TASK_STANDING_RULE_TEXT =
+	"[tasks] Rule: 3+ step work is tracked with the tasks skill — task_create the steps, one in_progress at a time, settle each with evidence.";
+
+/**
+ * Tools whose mutations require a task set once untracked work crosses the
+ * threshold. Read-only tools are never gated; `bash` is deliberately not gated
+ * so builds/tests/git keep working.
+ */
+export const TASK_GATED_TOOLS: ReadonlySet<string> = new Set(["write", "edit"]);
+
+/** Directive block reason: names the remedy and the escape hatch. */
+export function taskGateReason(workStreak: number): string {
+	return (
+		`Blocked: ${workStreak} tool calls of untracked work with no task set. ` +
+		`The tasks skill requires multi-step work to be tracked — call task_create for the steps ` +
+		`(mark each in_progress before starting), then retry this mutation. ` +
+		`Read-only tools are never blocked. Disable gating with /tasks enforce off.`
+	);
+}
+
+/** True when a mutating tool call must be blocked until a task set exists. */
+export function shouldGateForTasks(opts: {
+	toolName: string;
+	tasksEmpty: boolean;
+	workStreak: number;
+	enforce: boolean;
+}): boolean {
+	return (
+		opts.enforce &&
+		opts.tasksEmpty &&
+		opts.workStreak >= NUDGE_FIRST_AT &&
+		TASK_GATED_TOOLS.has(opts.toolName)
+	);
+}
+
+/**
+ * Advance the nudge state by one observed work tool result. Pure: returns the
+ * next state plus the advisory text when one should fire, null otherwise.
+ * Non-empty task sets reset the streak (their results carry the task block
+ * instead). First nudge at NUDGE_FIRST_AT consecutive empty-set work results,
+ * then every NUDGE_EVERY further ones — never per-result nagging.
+ */
+export function taskNudgeAdvance(state: NudgeState, tasksEmpty: boolean): { state: NudgeState; nudge: string | null } {
+	if (!tasksEmpty) return { state: { workStreak: 0, lastNudgeAt: 0 }, nudge: null };
+	const workStreak = state.workStreak + 1;
+	const threshold = state.lastNudgeAt === 0 ? NUDGE_FIRST_AT : state.lastNudgeAt + NUDGE_EVERY;
+	if (workStreak >= threshold) {
+		return { state: { workStreak, lastNudgeAt: workStreak }, nudge: TASK_NUDGE_TEXT };
+	}
+	return { state: { workStreak, lastNudgeAt: state.lastNudgeAt }, nudge: null };
 }
