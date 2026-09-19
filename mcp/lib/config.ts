@@ -45,6 +45,13 @@ export interface McpServerConfig {
 	headersCommand?: string;
 	/** Set false to skip this server. Default true. */
 	enabled?: boolean;
+	/**
+	 * Progressive disclosure mode: register two meta tools
+	 * (`mcp_<server>_tools`, `mcp_<server>_call`) instead of one pi tool per
+	 * server tool. Full tool schemas are fetched on demand via the meta tools,
+	 * keeping large servers from consuming system-prompt tokens. Default false.
+	 */
+	lazy?: boolean;
 	/** Connect/list timeout in ms. Default 30000. */
 	timeout?: number;
 	/** tools/call timeout in ms. Default 120000. Set 0 to disable. */
@@ -182,6 +189,9 @@ function normalizeServerConfig(
 
 	if (value.enabled !== undefined) {
 		config.enabled = value.enabled === true;
+	}
+	if (value.lazy !== undefined) {
+		config.lazy = value.lazy === true;
 	}
 	config.timeout = parsePositiveNumber(value.timeout, filePath, name, "timeout", warnings) ?? 30_000;
 	config.callTimeout = parsePositiveNumber(value.callTimeout, filePath, name, "callTimeout", warnings) ?? 120_000;

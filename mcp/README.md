@@ -66,6 +66,7 @@ Zero runtime dependencies — the MCP protocol (JSON-RPC 2.0) is implemented dir
 
       // Optional, both transports
       "enabled": true,      // set false to skip without deleting
+      "lazy": false,        // progressive disclosure: 2 meta tools instead of N full schemas
       "timeout": 30000,     // connect + tools/list timeout, ms
       "callTimeout": 120000 // tools/call timeout, ms (0 = no timeout)
     }
@@ -95,6 +96,7 @@ Zero runtime dependencies — the MCP protocol (JSON-RPC 2.0) is implemented dir
 ## Behavior details
 
 - **Tool naming** — registered as `mcp_<server>_<tool>`, sanitized to `[a-z0-9_]`; a numeric suffix avoids collisions.
+- **Lazy mode (`"lazy": true`)** — progressive disclosure for large servers: instead of registering every server tool (each schema stamped into every request), registers exactly two meta tools: `mcp_<server>_tools` (list tools with one-line summaries; pass `"tool"` for a full description + JSON schema) and `mcp_<server>_call` (invoke by name with an arguments object). Cuts per-server prompt cost from O(all schemas) to two small schemas; the trade-off is one extra discovery hop before the first call. `tools/list_changed` refreshes the listing transparently.
 - **Result mapping** — text, images (base64 → native image content), embedded resources (text inlined, binaries noted), resource links, and `structuredContent` are mapped to pi tool results. Output is truncated at pi's standard limits (50KB / 2000 lines) with the full text saved to a temp file.
 - **Errors** — a result with `isError: true` (or a JSON-RPC error, timeout, or crash) surfaces as a normal pi tool error the model can see and react to.
 - **Cancellation** — aborting a turn (Esc) sends `notifications/cancelled` to the server.
