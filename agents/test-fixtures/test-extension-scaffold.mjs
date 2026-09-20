@@ -31,6 +31,10 @@ async function makeHarness() {
 		agentsPiCommand: "pi-test",
 		agentsChildRunner: undefined,
 		explicitToolContextLoaderPath: undefined,
+		// jev resolves by default when the extension is installed. These tests assert
+		// exact child-option shapes, so pin it off here to stay environment-independent;
+		// test-jev-child-args.mjs covers the jev-on path.
+		explicitJevExtensionPath: "off",
 		hasUI: true,
 		isProjectTrusted: () => false,
 		ui: {
@@ -140,6 +144,7 @@ async function testRunBuiltInUsesInjectedRunner() {
 	const harness = await makeHarness();
 	try {
 		const calls = [];
+		harness.ctx.explicitJevExtensionPath = "off";
 		harness.ctx.agentsChildRunner = async (name, task, options) => {
 			calls.push({ name, task, options });
 			return {
@@ -261,6 +266,8 @@ async function testRunRegisteredForwardsToolContextLoaderPath() {
 
 		const calls = [];
 		harness.ctx.explicitToolContextLoaderPath = "/trusted/tool-context-loader/index.ts";
+		// jev resolves by default when installed; pin off so the shape is environment-independent.
+		harness.ctx.explicitJevExtensionPath = "off";
 		harness.ctx.agentsChildRunner = async (agent, task, options) => {
 			calls.push({ name: typeof agent === "string" ? agent : agent.name, source: typeof agent === "string" ? "built-in" : agent.source, task, options });
 			return childRunResult(typeof agent === "string" ? agent : agent.name, "Registered user summary");

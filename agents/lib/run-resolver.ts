@@ -1,6 +1,10 @@
 // Shared run-resolution helpers extracted from index.ts so /agents run and run_subagent
 // share the same gated path. P3d-1 Step 1: pure move with zero logic changes.
 
+import { existsSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
 import { parseAgentMarkdownFile } from "./agent-markdown.ts";
 import { canRunAgent } from "./can-run-agent.ts";
 import {
@@ -24,6 +28,9 @@ export type AgentsContextLike = {
 	agentsPiCommand?: string;
 	agentsChildRunner?: ChildAgentRunner;
 	explicitToolContextLoaderPath?: string;
+	/** Path to the jev extension, enabling jev_ask in children (typed judgments via
+	 *  TypeSafe's System One). Trusted sources only — see resolveExplicitJevExtensionPath. */
+	explicitJevExtensionPath?: string;
 	disableContextFiles?: boolean;
 	profileLibrary?: ModelProfileLibrary;
 	projectTrusted?: boolean;
@@ -51,18 +58,57 @@ export type RunnableRegisteredRecord = AgentDiagnosticRecord & {
 };
 
 export const TOOL_CONTEXT_LOADER_PATH_ENV = "PI_AGENTS_TOOL_CONTEXT_LOADER_PATH";
+export const JEV_EXTENSION_PATH_ENV = "PI_AGENTS_JEV_EXTENSION_PATH";
+
+/** Values that explicitly disable jev for children. */
+const JEV_DISABLED_VALUES = new Set(["0", "off", "false", "none"]);
 
 export function resolveExplicitToolContextLoaderPath(ctx?: { explicitToolContextLoaderPath?: string }): string | undefined {
 	return ctx?.explicitToolContextLoaderPath || process.env[TOOL_CONTEXT_LOADER_PATH_ENV];
 }
 
-export function buildChildRunOptions(ctx: { cwd?: string; agentsPiCommand?: string; explicitToolContextLoaderPath?: string }) {
+/** Default install location: the jev extension symlinked into the global extensions dir. */
+function defaultJevExtensionPath(): string | undefined {
+	const candidate = path.join(os.homedir(), ".pi", "agent", "extensions", "jev", "index.ts");
+	return existsSync(candidate) ? candidate : undefined;
+}
+
+/**
+ * Resolve the jev extension path for children, enabling the `jev_ask` tool in
+ * subagents (typed judgments: noul / choice / score over a bounded state).
+ *
+ * Precedence: ctx > env > the default install location. Trusted sources only —
+ * never read from an agent spec, so a spec cannot inject an arbitrary -e path
+ * (the same rule that guards explicitToolContextLoaderPath).
+ *
+ * Set PI_AGENTS_JEV_EXTENSION_PATH to a path to override, or to 0/off/false/none
+ * to disable jev in children entirely.
+ */
+export function resolveExplicitJevExtensionPath(ctx?: { explicitJevExtensionPath?: string }): string | undefined {
+	const fromCtx = ctx?.explicitJevExtensionPath;
+	if (typeof fromCtx === "string") {
+		const t = fromCtx.trim();
+		if (JEV_DISABLED_VALUES.has(t.toLowerCase())) return undefined;
+		if (t.length > 0) return t;
+	}
+	const fromEnv = process.env[JEV_EXTENSION_PATH_ENV];
+	if (typeof fromEnv === "string") {
+		const t = fromEnv.trim();
+		if (JEV_DISABLED_VALUES.has(t.toLowerCase())) return undefined;
+		if (t.length > 0) return t;
+	}
+	return defaultJevExtensionPath();
+}
+
+export function buildChildRunOptions(ctx: { cwd?: string; agentsPiCommand?: string; explicitToolContextLoaderPath?: string; explicitJevExtensionPath?: string }) {
 	const explicitToolContextLoaderPath = resolveExplicitToolContextLoaderPath(ctx);
+	const explicitJevExtensionPath = resolveExplicitJevExtensionPath(ctx);
 	return {
 		cwd: ctx.cwd,
 		piCommand: ctx.agentsPiCommand,
 		...(ctx.disableContextFiles ? { disableContextFiles: true } : {}),
 		...(explicitToolContextLoaderPath ? { explicitToolContextLoaderPath } : {}),
+		...(explicitJevExtensionPath ? { explicitJevExtensionPath } : {}),
 	};
 }
 
