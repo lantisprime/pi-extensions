@@ -69,6 +69,8 @@ export type FooterInput = {
 	modelId?: string;
 	thinking?: string;
 	ctxPercent?: number | null;
+	/** Context window size in tokens; when known, ctx renders as `ctx N%/1m`. */
+	contextWindow?: number;
 	cacheHitPct?: number | null;
 	costTotal?: number;
 	monitorsRunning?: number;
@@ -100,7 +102,8 @@ export function buildFooterSegments(input: FooterInput): FooterSegment[] {
 	const ctx = input.ctxPercent;
 	if (ctx !== undefined && ctx !== null) {
 		seg.push(sep());
-		seg.push({ text: `ctx ${ctx}%`, color: bandFor(ctx, true) });
+		const total = formatWindow(input.contextWindow);
+		seg.push({ text: `ctx ${ctx}%${total ? `/${total}` : ""}`, color: bandFor(ctx, true) });
 	}
 	const cache = input.cacheHitPct;
 	if (cache !== undefined && cache !== null) {
