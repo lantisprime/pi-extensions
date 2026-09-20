@@ -30,6 +30,7 @@ import { join } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { probeJev, readJevAvailabilitySync } from "./lib/availability.ts";
 
 const DEFAULT_ENDPOINT = "https://litellm.lab.znp.pw/typesafe/v1/systemone";
 const DEFAULT_MODEL = "jev-latest";
@@ -121,6 +122,20 @@ function renderAnswer(id: string, a: Answer): string {
 }
 
 export default function (pi: ExtensionAPI) {
+	// Refresh the availability cache once per session, in the background so startup
+	// is never blocked. Other components (e.g. agents child-args) read the cached
+	// status synchronously and fall back to no-Jev when it is stale or negative.
+	pi.on("session_start", async (_event, ctx) => {
+		try {
+			const status = await probeJev({ signal: ctx?.signal });
+			if (!status.ok) {
+				ctx?.ui?.notify?.(`Jev unavailable (${status.detail ?? "unknown"}) — proceeding without it.`, "warning");
+			}
+		} catch {
+			// Availability stays unknown, which is the safe direction.
+		}
+	});
+
 	pi.registerTool({
 		name: "jev_ask",
 		label: "Ask Jev",
@@ -177,6 +192,30 @@ export default function (pi: ExtensionAPI) {
 		}),
 
 		async execute(_toolCallId, params, signal) {
+			// Never offer a tool that cannot work: when Jev is not known-good, tell the
+			// model to fall back to its default behaviour instead of failing opaquely or
+			// retrying. A stale or missing probe result counts as unavailable, so the
+			// no-Jev path is the default when in doubt.
+			const availability = readJevAvailabilitySync();
+			if (!availability.available) {
+				const why =
+					availability.reason === "fresh"
+						? (availability.status?.detail ?? "probe reported failure")
+						: `no recent successful check (${availability.reason})`;
+				return {
+					content: [
+						{
+							type: "text",
+							text:
+								`Jev is unavailable — ${why}. Do NOT retry jev_ask. ` +
+								`Proceed without it: use your own judgement, and state plainly which ` +
+								`judgements you could not ground with a calibrated probability.`,
+						},
+					],
+					details: { available: false, reason: availability.reason, status: availability.status },
+				};
+			}
+
 			const questions: Record<string, { type: QuestionType; instructions: string; criteria?: unknown }> = {};
 			for (const q of params.questions) {
 				if (!q.id.trim()) throw new Error("jev_ask: every question needs a non-empty id");

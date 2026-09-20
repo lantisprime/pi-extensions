@@ -610,11 +610,19 @@ Transport: the homelab LiteLLM gateway proxies TypeSafe, so the **existing** Lit
 
 A third trap is worth stating plainly: for a **per-candidate `noul`**, name the candidate *and inline its content* in the question. The vague form ("does this file answer the following: …") returns a flat ~0.92 for **every** candidate — confident-looking and completely non-discriminative.
 
+#### Availability is checked before the tool is used
+
+Jev is a network service, so it can be down. Rather than handing out a tool that cannot work, the extension probes once per session and caches the result in `~/.pi/agent/jev-status.json` (5-minute TTL; override the location with `JEV_STATUS_PATH`).
+
+The check is **fail-safe**: a missing, stale, unreadable, or negative status all mean *not available*, so the default no-Jev behaviour is what you get when in doubt. When Jev is unavailable the `jev_ask` tool short-circuits with an explicit instruction not to retry and to fall back to uncalibrated judgement — and subagents are simply not given the tool at all.
+
+Rate-limited responses (429/529) count as **available**: the service is up, just throttled.
+
 #### Use in subagents
 
 Read-only subagents get no extension discovery (`--no-extensions --no-skills`), so the `agents` extension passes this one explicitly via `-e` and adds `jev_ask` to their `--tools` allowlist. Enabled by default when the extension is installed; override or disable with `PI_AGENTS_JEV_EXTENSION_PATH` (set it to `0`/`off`/`false`/`none` to disable). The path is read only from the host context or env — never from an agent spec.
 
-Verified: a child in that sandbox calls `jev_ask` and gets calibrated answers, including reaching for it unprompted when a task demands grounded judgement.
+Verified: a child in that sandbox calls `jev_ask` and gets calibrated answers, including reaching for it unprompted when a task demands grounded judgement. When Jev is unavailable the child is not given the tool at all, so it keeps its default behaviour instead of burning turns on a failed call.
 
 ---
 

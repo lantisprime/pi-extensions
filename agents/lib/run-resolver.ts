@@ -1,7 +1,7 @@
 // Shared run-resolution helpers extracted from index.ts so /agents run and run_subagent
 // share the same gated path. P3d-1 Step 1: pure move with zero logic changes.
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -63,6 +63,41 @@ export const JEV_EXTENSION_PATH_ENV = "PI_AGENTS_JEV_EXTENSION_PATH";
 /** Values that explicitly disable jev for children. */
 const JEV_DISABLED_VALUES = new Set(["0", "off", "false", "none"]);
 
+/**
+ * Cached Jev availability, written by the jev extension.
+ *
+ * Extensions in this repo do not import each other, so this is a small file
+ * contract rather than a shared module: path + shape + TTL. Keep in sync with
+ * jev/lib/availability.ts (jevStatusPath, JEV_STATUS_TTL_MS, JevStatus).
+ *
+ * Fail-safe: a missing, stale, unreadable, or negative status means "no Jev",
+ * so children fall back to the default tool surface rather than being handed a
+ * tool that cannot work.
+ */
+export const JEV_STATUS_PATH_ENV = "JEV_STATUS_PATH";
+const JEV_STATUS_TTL_MS = 5 * 60_000;
+
+export function jevStatusPath(): string {
+	const override = process.env[JEV_STATUS_PATH_ENV]?.trim();
+	return override && override.length > 0
+		? override
+		: path.join(os.homedir(), ".pi", "agent", "jev-status.json");
+}
+
+export function jevIsAvailableSync(now = Date.now()): boolean {
+	try {
+		const status = JSON.parse(readFileSync(jevStatusPath(), "utf8")) as {
+			ok?: boolean;
+			checkedAt?: number;
+		};
+		if (typeof status?.checkedAt !== "number") return false;
+		if (now - status.checkedAt > JEV_STATUS_TTL_MS) return false;
+		return status.ok === true;
+	} catch {
+		return false;
+	}
+}
+
 export function resolveExplicitToolContextLoaderPath(ctx?: { explicitToolContextLoaderPath?: string }): string | undefined {
 	return ctx?.explicitToolContextLoaderPath || process.env[TOOL_CONTEXT_LOADER_PATH_ENV];
 }
@@ -81,10 +116,23 @@ function defaultJevExtensionPath(): string | undefined {
  * never read from an agent spec, so a spec cannot inject an arbitrary -e path
  * (the same rule that guards explicitToolContextLoaderPath).
  *
+ * Returns undefined — i.e. children get no jev tool and keep the default tool
+ * surface — when the path cannot be trusted/resolved OR when Jev is not known to
+ * be reachable. Availability is checked last so an explicit disable always wins.
+ *
  * Set PI_AGENTS_JEV_EXTENSION_PATH to a path to override, or to 0/off/false/none
  * to disable jev in children entirely.
  */
 export function resolveExplicitJevExtensionPath(ctx?: { explicitJevExtensionPath?: string }): string | undefined {
+	const resolved = resolveJevPath(ctx);
+	if (!resolved) return undefined;
+	// Never hand a child a tool that cannot work: without a fresh positive probe,
+	// fall back to the default no-Jev behaviour.
+	if (!jevIsAvailableSync()) return undefined;
+	return resolved;
+}
+
+function resolveJevPath(ctx?: { explicitJevExtensionPath?: string }): string | undefined {
 	const fromCtx = ctx?.explicitJevExtensionPath;
 	if (typeof fromCtx === "string") {
 		const t = fromCtx.trim();
