@@ -10,7 +10,7 @@ import {
 	validateSubagentInput,
 } from "../lib/subagent-tool.ts";
 import { buildChildPiArgs } from "../lib/child-args.ts";
-import { buildChildRunOptions, TOOL_CONTEXT_LOADER_PATH_ENV } from "../lib/run-resolver.ts";
+import { buildChildRunOptions, TOOL_CONTEXT_LOADER_PATH_ENV, JEV_EXTENSION_PATH_ENV } from "../lib/run-resolver.ts";
 import { getBuiltInAgentSpec, isReservedBuiltInAgentName } from "../lib/specs.ts";
 
 function makeFakeChild(jsonlText) {
@@ -758,7 +758,11 @@ async function testResultDetailsContainOnlyAllowlistedFields() {
 
 function testLoaderPathSourcePrecedenceAndValidation() {
 	const previous = process.env[TOOL_CONTEXT_LOADER_PATH_ENV];
+	const previousJev = process.env[JEV_EXTENSION_PATH_ENV];
 	try {
+		// jev resolves by default when the extension is installed; pin it off so these
+		// loader-path precedence assertions stay environment-independent.
+		process.env[JEV_EXTENSION_PATH_ENV] = "off";
 		process.env[TOOL_CONTEXT_LOADER_PATH_ENV] = "/env/tool-context-loader/index.ts";
 		assert.deepEqual(
 			buildChildRunOptions({ cwd: "/tmp/project", agentsPiCommand: "pi-test" }),
@@ -779,6 +783,8 @@ function testLoaderPathSourcePrecedenceAndValidation() {
 	} finally {
 		if (previous === undefined) delete process.env[TOOL_CONTEXT_LOADER_PATH_ENV];
 		else process.env[TOOL_CONTEXT_LOADER_PATH_ENV] = previous;
+		if (previousJev === undefined) delete process.env[JEV_EXTENSION_PATH_ENV];
+		else process.env[JEV_EXTENSION_PATH_ENV] = previousJev;
 	}
 }
 

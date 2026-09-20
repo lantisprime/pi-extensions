@@ -6,6 +6,9 @@ export type ChildPiArgsOptions = {
 	piCommand?: string;
 	systemPromptPath?: string;
 	explicitToolContextLoaderPath?: string;
+	/** Explicit path to the jev extension (enables jev_ask in the child). Sourced only
+	 *  from ctx/env, never from an agent spec — same trust rule as tool-context-loader. */
+	explicitJevExtensionPath?: string;
 	disableContextFiles?: boolean;
 	disableResourceDiscovery?: boolean;
 	appendMethod?: string;
@@ -34,7 +37,8 @@ export function buildChildPiArgs(spec: AgentSpec, task: string, options: ChildPi
 	if (spec.model) argv.push("--model", spec.model);
 	if (spec.thinking) argv.push("--thinking", spec.thinking);
 	if (options.explicitToolContextLoaderPath) argv.push("-e", options.explicitToolContextLoaderPath);
-	argv.push("--tools", spec.tools.join(","));
+	if (options.explicitJevExtensionPath) argv.push("-e", options.explicitJevExtensionPath);
+	argv.push("--tools", childTools(spec, options).join(","));
 	argv.push("--append-system-prompt", options.systemPromptPath!);
 	argv.push("-p");
 	const promptTransport = { kind: "stdin" as const, stdinText: task.trim() };
@@ -66,6 +70,19 @@ export function redactChildPiArgv(argv: readonly string[]): string[] {
 
 
 
+export const JEV_TOOL_NAME = "jev_ask";
+
+/**
+ * Child tool allowlist. `--tools` is an allowlist covering built-in, extension and
+ * custom tools, so an extension tool that is not named here is never enabled —
+ * loading the jev extension alone would not expose jev_ask to the child.
+ */
+function childTools(spec: AgentSpec, options: ChildPiArgsOptions): string[] {
+	if (!options.explicitJevExtensionPath) return [...spec.tools];
+	if (spec.tools.includes(JEV_TOOL_NAME)) return [...spec.tools];
+	return [...spec.tools, JEV_TOOL_NAME];
+}
+
 function validateChildArgInputs(spec: AgentSpec, task: string, options: ChildPiArgsOptions): void {
 	if (!spec || typeof spec !== "object") throw new Error("agent spec is required");
 	if (typeof spec.name !== "string" || spec.name.length === 0) throw new Error("agent spec name is required");
@@ -84,6 +101,10 @@ function validateChildArgInputs(spec: AgentSpec, task: string, options: ChildPiA
 	if (options.explicitToolContextLoaderPath !== undefined) {
 		if (options.explicitToolContextLoaderPath.trim().length === 0) throw new Error("explicitToolContextLoaderPath must be non-empty when provided");
 		if (hasUnsafePathControlChar(options.explicitToolContextLoaderPath)) throw new Error("explicitToolContextLoaderPath must not contain NUL or newline characters");
+	}
+	if (options.explicitJevExtensionPath !== undefined) {
+		if (options.explicitJevExtensionPath.trim().length === 0) throw new Error("explicitJevExtensionPath must be non-empty when provided");
+		if (hasUnsafePathControlChar(options.explicitJevExtensionPath)) throw new Error("explicitJevExtensionPath must not contain NUL or newline characters");
 	}
 	if (options.systemPromptPath !== undefined) {
 		if (options.systemPromptPath.trim().length === 0) throw new Error("systemPromptPath is required when provided");
