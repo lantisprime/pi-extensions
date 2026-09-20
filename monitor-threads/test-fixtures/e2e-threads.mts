@@ -177,6 +177,16 @@ for (const expect of ["pi-extensions", "⎇ main", "glm-5.3-flash \u00b7 high", 
 assert.ok(!line.includes("5h") && !line.includes("7d"), "no 5h/7d cost windows");
 const ctxSeg = segs.find((s2) => s2.text === "ctx 57%");
 assert.equal(ctxSeg?.color, "accent", "ctx 57% is warm band");
+// With a known context window the ctx segment carries the total: `ctx N%/1m`.
+const segsWin = buildFooterSegments({
+	project: "pi-extensions", branch: "main", modelId: "litellm/glm-5.3-flash", thinking: "high",
+	ctxPercent: 57, contextWindow: 1_000_000, cacheHitPct: 83, costTotal: 0.31, monitorsRunning: 1, crons: 0,
+});
+const lineWin = segsWin.map((s2) => s2.text).join("");
+assert.ok(lineWin.includes("ctx 57%/1m"), `footer line missing "ctx 57%/1m": ${lineWin}`);
+assert.equal(segsWin.find((s2) => s2.text === "ctx 57%/1m")?.color, "accent", "ctx total segment keeps warm band");
+// 1MiB-style windows still render compactly (1048576 -> "1049k").
+assert.equal(formatWindow(1_048_576), "1049k");
 const cacheSeg = segs.find((s2) => s2.text === "cache 83%");
 assert.equal(cacheSeg?.color, "success", "cache 83% is good band");
 console.log("[ok] footer layout: project/branch/model+think/ctx/cache/$/monitors, color bands, no 5h/7d");

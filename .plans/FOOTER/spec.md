@@ -60,3 +60,9 @@ Data source is `ctx.getContextUsage()` which returns
     the entire status string is themed (dim <70, warning 70–89.99, error ≥90, dim when null).
   - Numbers formatting: tokens rendered as compact `42.3k` (1 decimal, k) or raw when
     < 1000; percent as integer `21%`.
+- **2026-09-20 ADDED (delivery note, CTXTOT follow-up):** In the operator's live
+  setup the footer is owned by `monitor-threads`' custom `setFooter` layout, so
+  the context-window TOTAL (`ctx N%/1m`) was delivered there
+  (monitor-threads/lib/telemetry.ts `FooterInput.contextWindow` + segment; index.ts
+  passes the already-computed window). `extensions/context-used-status.ts` remains
+  the opt-in status item for stock-footer setups (loaded via `-e`), unchanged.

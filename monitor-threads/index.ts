@@ -90,6 +90,7 @@ export default function (pi: ExtensionAPI) {
 						modelId: lastCtx?.model?.id,
 						thinking: lastCtx?.thinkingLevel ? String(lastCtx.thinkingLevel) : undefined,
 						ctxPercent: ctxPct,
+						contextWindow: window,
 						cacheHitPct: stats.cacheHitPct,
 						costTotal: stats.costTotal,
 						monitorsRunning: supervisor.list().filter((r) => r.kind === "monitor" && r.status === "running").length,
