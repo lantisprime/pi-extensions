@@ -620,6 +620,14 @@ The check is **fail-safe**: a missing, stale, unreadable, or negative status all
 
 Rate-limited responses (429/529) count as **available**: the service is up, just throttled.
 
+#### A standing rule puts it in the chain of thought
+
+A tool description only helps once the model is already looking at the tool. The tasks extension solved the same problem for task discipline with a constant standing rule appended to the system prompt every turn; Jev now does the same. While availability is positive, the extension appends one bounded line to the system prompt on every turn:
+
+> [jev] Rule: for grounded judgement — ranking candidates, verifying a claim against evidence, scoring along levels — gather candidates with grep/find/read first, then make ONE jev_ask call with packed questions over bounded state.
+
+The rule is gated on the same cached availability probe, so a dead gateway never advertises a tool it cannot serve, and the prompt changes only when availability flips (one bounded cache miss, no per-turn growth). Because the extension is passed to subagents explicitly, children get the same rule in their system prompt. New rule text takes effect on `/reload`.
+
 #### Use in subagents
 
 Read-only subagents get no extension discovery (`--no-extensions --no-skills`), so the `agents` extension passes this one explicitly via `-e` and adds `jev_ask` to their `--tools` allowlist. Enabled by default when the extension is installed; override or disable with `PI_AGENTS_JEV_EXTENSION_PATH` (set it to `0`/`off`/`false`/`none` to disable). The path is read only from the host context or env — never from an agent spec.
