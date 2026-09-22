@@ -550,6 +550,8 @@ Tools: `task_create`, `task_get`, `task_update`, `task_list`, `task_clear`. Huma
 
 **Evidence gates (anti-hallucination).** `completed` and `cancelled` require an `evidence` note, and completion additionally requires observed tool activity since the task started — invented results are rejected.
 
+**Titles-only display.** Both the widget above the editor and the injected `<session-tasks>` block render titles only by default (`◐ ARCH-1: Fix flaky auth test`), like the monitor-threads tail widget. Details stay one step away: `task_get <id>` for a single task, `task_list` for the full rows, or `/tasks expand` to switch both surfaces to full `subject — description` rows (`/tasks compact` returns to titles). The toggle is session-scoped, like `/monitors` expansion; `renderModelList` (task_list) is always full-detail.
+
 **Compliance ladder (advisory → hard gate).** A constant standing rule rides the system prompt every turn. With no task set, 3+ consecutive tool calls add a bounded advisory to the tool result and a reminder to the prompt (re-firing at most every 10 results). Past that threshold `write`/`edit` are **blocked** with a directive reason until `task_create` runs — read-only tools and `bash` are never gated. Sessions can opt out with `/tasks enforce off`. Note: extension code changes need `/reload` to affect a running session.
 
 See [`tasks/README.md`](tasks/README.md) and the discipline itself in [`skills/tasks/SKILL.md`](skills/tasks/SKILL.md).
@@ -617,6 +619,14 @@ Jev is a network service, so it can be down. Rather than handing out a tool that
 The check is **fail-safe**: a missing, stale, unreadable, or negative status all mean *not available*, so the default no-Jev behaviour is what you get when in doubt. When Jev is unavailable the `jev_ask` tool short-circuits with an explicit instruction not to retry and to fall back to uncalibrated judgement — and subagents are simply not given the tool at all.
 
 Rate-limited responses (429/529) count as **available**: the service is up, just throttled.
+
+#### A standing rule puts it in the chain of thought
+
+A tool description only helps once the model is already looking at the tool. The tasks extension solved the same problem for task discipline with a constant standing rule appended to the system prompt every turn; Jev now does the same. While availability is positive, the extension appends one bounded line to the system prompt on every turn:
+
+> [jev] Rule: for grounded judgement — ranking candidates, verifying a claim against evidence, scoring along levels — gather candidates with grep/find/read first, then make ONE jev_ask call with packed questions over bounded state.
+
+The rule is gated on the same cached availability probe, so a dead gateway never advertises a tool it cannot serve, and the prompt changes only when availability flips (one bounded cache miss, no per-turn growth). Because the extension is passed to subagents explicitly, children get the same rule in their system prompt. New rule text takes effect on `/reload`.
 
 #### Use in subagents
 

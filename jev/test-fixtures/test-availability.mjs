@@ -23,6 +23,7 @@ import {
 } from "../../agents/lib/run-resolver.ts";
 import { buildChildPiArgs, JEV_TOOL_NAME } from "../../agents/lib/child-args.ts";
 import { getBuiltInAgentSpec } from "../../agents/lib/specs.ts";
+import { JEV_STANDING_RULE_TEXT, standingRuleAppend } from "../../jev/lib/standing-rule.ts";
 
 const spec = getBuiltInAgentSpec("scout");
 assert.ok(spec, "scout spec must exist");
@@ -115,6 +116,25 @@ try {
 			`explicit '${v}' must disable jev even when available`,
 		);
 	}
+
+	// 9. Standing rule follows availability exactly (the chain-of-thought hook).
+	assert.ok(JEV_STANDING_RULE_TEXT.length < 300, `rule too long: ${JEV_STANDING_RULE_TEXT.length}`);
+	assert.match(JEV_STANDING_RULE_TEXT, /jev_ask/, "rule must name the tool");
+	writeStatus({ ok: true, endpoint: "https://example.invalid" });
+	assert.equal(
+		standingRuleAppend(readJevAvailabilitySync()),
+		JEV_STANDING_RULE_TEXT,
+		"available -> standing rule is appended",
+	);
+	writeStatus({ ok: false, endpoint: "https://example.invalid", detail: "HTTP 503" });
+	assert.equal(
+		standingRuleAppend(readJevAvailabilitySync()),
+		undefined,
+		"fresh negative -> no rule (never advertise a dead tool)",
+	);
+	process.env[JEV_STATUS_PATH_ENV] = path.join(tmp, "absent-again.json");
+	assert.equal(standingRuleAppend(readJevAvailabilitySync()), undefined, "no status -> no rule");
+	process.env[JEV_STATUS_PATH_ENV] = statusPath;
 
 	console.log("test-availability: all assertions passed");
 } finally {

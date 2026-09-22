@@ -30,7 +30,8 @@ import { join } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { probeJev, readJevAvailabilitySync } from "./lib/availability.ts";
+import { probeJev, readJevAvailabilitySync, writeJevStatus } from "./lib/availability.ts";
+import { standingRuleAppend } from "./lib/standing-rule.ts";
 
 const DEFAULT_ENDPOINT = "https://litellm.lab.znp.pw/typesafe/v1/systemone";
 const DEFAULT_MODEL = "jev-latest";
@@ -72,6 +73,15 @@ type Answer = {
 	confidence?: number;
 	probabilities?: Record<string, number>;
 	legend?: Record<string, string>;
+};
+
+type JevAskDetails = {
+	available: boolean;
+	reason?: string;
+	endpoint?: string;
+	model?: string;
+	answers?: Record<string, Answer>;
+	usage?: { input_tokens?: number; output_tokens?: number };
 };
 
 type JevResponse = {
@@ -136,6 +146,18 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
+	// Standing rule (same mechanism as the tasks extension): a constant line
+	// appended to the system prompt every turn, so grounded-judgement routing to
+	// jev_ask is in the chain of thought from turn one — not only in Guidelines
+	// bullets or the tool description. Gated on the cached availability probe so
+	// a dead gateway never advertises a tool it cannot serve; the prompt changes
+	// only when availability flips, which is one bounded cache miss, not growth.
+	pi.on("before_agent_start", async (event) => {
+		const append = standingRuleAppend(readJevAvailabilitySync());
+		if (!append) return undefined;
+		return { systemPrompt: `${event.systemPrompt}\n\n${append}` };
+	});
+
 	pi.registerTool({
 		name: "jev_ask",
 		label: "Ask Jev",
@@ -192,30 +214,11 @@ export default function (pi: ExtensionAPI) {
 		}),
 
 		async execute(_toolCallId, params, signal) {
-			// Never offer a tool that cannot work: when Jev is not known-good, tell the
-			// model to fall back to its default behaviour instead of failing opaquely or
-			// retrying. A stale or missing probe result counts as unavailable, so the
-			// no-Jev path is the default when in doubt.
-			const availability = readJevAvailabilitySync();
-			if (!availability.available) {
-				const why =
-					availability.reason === "fresh"
-						? (availability.status?.detail ?? "probe reported failure")
-						: `no recent successful check (${availability.reason})`;
-				return {
-					content: [
-						{
-							type: "text",
-							text:
-								`Jev is unavailable — ${why}. Do NOT retry jev_ask. ` +
-								`Proceed without it: use your own judgement, and state plainly which ` +
-								`judgements you could not ground with a calibrated probability.`,
-						},
-					],
-					details: { available: false, reason: availability.reason, status: availability.status },
-				};
-			}
-
+			// REAL-TIME availability (lesson 2026-09-22: a stale liveness file must
+			// never refuse a call while the service is up — and must record downtime
+			// when it is down). The request itself is the check: attempt it, and
+			// write the outcome through to the shared status file so child-offering
+			// and the standing rule stay fresh. 429/529 count as up (throttled ≠ down).
 			const questions: Record<string, { type: QuestionType; instructions: string; criteria?: unknown }> = {};
 			for (const q of params.questions) {
 				if (!q.id.trim()) throw new Error("jev_ask: every question needs a non-empty id");
@@ -252,18 +255,29 @@ export default function (pi: ExtensionAPI) {
 				});
 			} catch (err: unknown) {
 				const msg = err instanceof Error ? err.message : String(err);
-				throw new Error(`jev_ask: request failed (${msg}). Endpoint: ${endpoint()}`);
+				writeJevStatus({ ok: false, checkedAt: Date.now(), endpoint: endpoint(), detail: msg });
+				return {
+					content: [
+						{
+							type: "text",
+							text:
+								`Jev is unavailable — request failed (${msg}). Do NOT retry jev_ask. ` +
+								`Proceed without it: use your own judgement, and state plainly which ` +
+								`judgements you could not ground with a calibrated probability.`,
+						},
+					],
+					details: { available: false, reason: "request-failed", endpoint: endpoint() } as JevAskDetails,
+				};
 			}
 
 			const text = await res.text();
-			if (!res.ok) {
-				// 429/529 are transient per the API docs; surface enough to retry deliberately.
-				const hint =
-					res.status === 429 || res.status === 529
-						? " (transient — retry after a short backoff)"
-						: "";
-				throw new Error(`jev_ask: HTTP ${res.status}${hint}: ${text.slice(0, 400)}`);
+			if (!res.ok && res.status !== 429 && res.status !== 529) {
+				writeJevStatus({ ok: false, checkedAt: Date.now(), endpoint: endpoint(), detail: `HTTP ${res.status}` });
+				throw new Error(`jev_ask: HTTP ${res.status}: ${text.slice(0, 400)}`);
 			}
+			// Reachable (success or throttled): refresh the shared liveness file as a
+			// side effect so child-offering and the standing rule stay fresh.
+			writeJevStatus({ ok: true, checkedAt: Date.now(), endpoint: endpoint() });
 
 			let parsed: JevResponse;
 			try {
@@ -290,7 +304,7 @@ export default function (pi: ExtensionAPI) {
 							usage,
 					},
 				],
-				details: { model: parsed.model, answers: parsed.answers, usage: parsed.usage },
+				details: { available: true, model: parsed.model, answers: parsed.answers, usage: parsed.usage } as JevAskDetails,
 			};
 		},
 	});

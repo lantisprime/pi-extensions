@@ -461,7 +461,10 @@ export function renderWidgetLines(tasks: Task[], expanded: boolean): string[] | 
 		const code = taskCode(t.id);
 		// Bare code when unique (ARCH: …), full id when a code has multiple tasks.
 		const label = (codeCounts.get(code) ?? 0) > 1 ? t.id : code;
-		return `${STATUS_ICON[t.status]} ${label}: ${t.description}`;
+		// Titles-only in compact (the default view); descriptions only on demand.
+		return expanded
+			? `${STATUS_ICON[t.status]} ${label}: ${t.subject} — ${t.description}`
+			: `${STATUS_ICON[t.status]} ${label}: ${t.subject}`;
 	});
 	const hidden = ordered.length - lines.length;
 	const c = counts(tasks);
@@ -477,6 +480,12 @@ export interface ContextBlockOptions {
 	maxLines?: number;
 	/** pending: operator has not yet decided on clearing the finished set. */
 	cleanupState?: "pending" | "declined";
+	/**
+	 * "titles" (default): one line per open task, subject only — descriptions
+	 * stay behind task_get/task_list. "full": the historical subject — description
+	 * rows (/tasks expand). Progressive disclosure in both directions.
+	 */
+	detail?: "titles" | "full";
 }
 
 /**
@@ -487,7 +496,7 @@ export interface ContextBlockOptions {
  */
 export function renderContextBlock(tasks: Task[], projectPath: string, options: ContextBlockOptions = {}): string | null {
 	if (tasks.length === 0) return null;
-	const { maxLines = 14, cleanupState } = options;
+	const { maxLines = 14, cleanupState, detail = "titles" } = options;
 	const sorted = sortTasks(tasks);
 
 	if (allSettled(sorted)) {
@@ -504,12 +513,17 @@ export function renderContextBlock(tasks: Task[], projectPath: string, options: 
 	const pending = sorted.filter((t) => t.status === "pending");
 	const settled = sorted.filter((t) => isSettled(t.status));
 	const visible = [...active, ...pending].slice(0, maxLines);
-	const lines = visible.map((t) => `${STATUS_ICON[t.status]} ${t.id} [${t.status}] ${t.subject} — ${t.description}`);
+	const lines = visible.map((t) =>
+		detail === "full"
+			? `${STATUS_ICON[t.status]} ${t.id} [${t.status}] ${t.subject} — ${t.description}`
+			: `${STATUS_ICON[t.status]} ${t.id} [${t.status}] ${t.subject}`,
+	);
 	const openTotal = active.length + pending.length;
 	if (visible.length < openTotal) lines.push(`… +${openTotal - visible.length} more pending (task_list for the full list)`);
 	if (settled.length > 0) lines.push(`✓ ${settledRef(sorted)}`);
 	lines.push(
-		"Work in listed order. Exactly one in_progress; settle with evidence when done; continue autonomously — do not stop to ask between tasks.",
+		"Work in listed order. Exactly one in_progress; settle with evidence when done; continue autonomously — do not stop to ask between tasks." +
+			(detail === "titles" ? " task_get <id> for details; /tasks expand for full rows." : ""),
 	);
 	return `<session-tasks project="${projectPath}">\n${lines.join("\n")}\n</session-tasks>`;
 }

@@ -1,0 +1,12 @@
+You are a design reviewer for a pi coding-agent extension called smart-compaction.
+Read these two files in this repo (use your read tool):
+- .plans/COMPACT/design.md
+- .plans/COMPACT/research.md
+Optionally consult pi's docs at /opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/docs/compaction.md and docs/extensions.md to check API assumptions (ctx.getContextUsage, ctx.compact, session_before_compact, turn_end, agent_settled, registerCommand).
+
+Then produce a structured design review as your reply (no file edits):
+1. Top 3-5 risks or flaws in the trigger engine / cost model / per-model profile design.
+2. Edge cases and failure modes not covered — especially: mid-session model switching, cache hot/cold state tracking, tier-boundary prediction during multi-turn tasks, relevance-gate fallback, compaction triggered while a task is mid-flight.
+3. Concrete improvements or simplifications (prefer minimal diffs to the design).
+4. Gaps in acceptance criteria AC-1..AC-11.
+Be specific and technical; reference section names (Model profiles, Runtime model detection, Cost model, Decision records, TriggerEngine).
