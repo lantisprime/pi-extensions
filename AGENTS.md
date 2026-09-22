@@ -1,5 +1,25 @@
 # Agent instructions
 
+## Working rules (learned, 2026-09-21 — smart-compaction build)
+
+These are binding for agent work in this repo; rationale in
+`.plans/COMPACT/RETRO.md`.
+
+1. **Delegated work isn't done until it's read back.** Verify a delegate's
+   actual model (launch command / self-report) before submitting the task;
+   never report a delegated result without reading its full output; keep
+   delegate scope small enough to finish (an 8-file review timed out at 300s).
+2. **Spot-check review claims before acting** — at least one file:line claim
+   against the real code per review.
+3. **Review the implementation, not just the design draft.** Any amended
+   design + new code gets a fresh review pass against the code itself.
+4. **Wiring bugs get wiring tests.** Pure-function unit tests can't catch
+   handler state-lifecycle bugs; review-found state bugs in extension wiring
+   require a mock-API harness regression test (`smart-compaction/test/
+   wiring.test.ts` is the pattern).
+5. **Amend the design doc when the API proves it wrong** — never let a header
+   comment silently redefine the design (append under `## Amendments`).
+
 ## TypeSafe skill
 
 This repo ships the `typesafe-ai` skill at `.agents/skills/typesafe-ai/`.
