@@ -64,7 +64,8 @@ interface PersistedShape {
 export default function tasksExtension(pi: ExtensionAPI) {
 	let tasks: Task[] = [];
 	let projectPath: string | null = null;
-	let widgetExpanded = false;
+	/** Session-scoped detail level: false (default) = titles-only widget + block; true = full rows (/tasks expand). */
+	let detailFull = false;
 	let cleanupState: "pending" | "declined" | undefined;
 	/** Session gate: block mutating tools while untracked work crosses the threshold. */
 	let enforceTasks = true;
@@ -140,7 +141,7 @@ export default function tasksExtension(pi: ExtensionAPI) {
 	// --- UI -----------------------------------------------------------------
 
 	function updateUI(ctx: ExtensionContext): void {
-		const widget = renderWidgetLines(tasks, widgetExpanded);
+		const widget = renderWidgetLines(tasks, detailFull);
 		ctx.ui.setWidget("tasks", widget ?? []);
 		if (!widget) {
 			ctx.ui.setStatus("tasks", "");
@@ -159,7 +160,10 @@ export default function tasksExtension(pi: ExtensionAPI) {
 	let lastToolResultAt = 0;
 
 	pi.on("before_agent_start", async (event) => {
-		lastInjectedBlock = renderContextBlock(tasks, projectPath ?? "(unknown project)", { cleanupState });
+		lastInjectedBlock = renderContextBlock(tasks, projectPath ?? "(unknown project)", {
+			cleanupState,
+			detail: detailFull ? "full" : "titles",
+		});
 		// Standing rule is always present (turn one); the task block and the
 		// escalation reminder join it when they apply. All bounded and constant.
 		const parts: string[] = [TASK_STANDING_RULE_TEXT];
@@ -199,7 +203,10 @@ export default function tasksExtension(pi: ExtensionAPI) {
 			content.push({ type: "text", text: `\n\n${advanced.nudge}` });
 			return { content };
 		}
-		const block = renderContextBlock(tasks, projectPath ?? "(unknown project)", { cleanupState });
+		const block = renderContextBlock(tasks, projectPath ?? "(unknown project)", {
+			cleanupState,
+			detail: detailFull ? "full" : "titles",
+		});
 		if (!block) return;
 		const text = block === lastInjectedBlock ? (renderStatusLine(tasks) ?? block) : block;
 		lastInjectedBlock = block;
@@ -406,7 +413,7 @@ export default function tasksExtension(pi: ExtensionAPI) {
 			if (sub === "clear") {
 				tasks = [];
 				await persist();
-				widgetExpanded = false;
+				detailFull = false;
 				updateUI(ctx);
 				ctx.ui.notify("Tasks cleared", "info");
 				return;
@@ -418,16 +425,16 @@ export default function tasksExtension(pi: ExtensionAPI) {
 				return;
 			}
 			if (sub === "compact") {
-				widgetExpanded = false;
+				detailFull = false;
 				updateUI(ctx);
 				return;
 			}
-			// Default and "expand": render the full widget.
+			// Default and "expand": full detail rows in the widget and the injected block.
 			if (sub && sub !== "expand") {
 				ctx.ui.notify("Usage: /tasks | /tasks expand | /tasks compact | /tasks reload | /tasks clear | /tasks enforce on|off", "warning");
 				return;
 			}
-			widgetExpanded = true;
+			detailFull = true;
 			updateUI(ctx);
 		},
 	});

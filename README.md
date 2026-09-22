@@ -550,6 +550,8 @@ Tools: `task_create`, `task_get`, `task_update`, `task_list`, `task_clear`. Huma
 
 **Evidence gates (anti-hallucination).** `completed` and `cancelled` require an `evidence` note, and completion additionally requires observed tool activity since the task started — invented results are rejected.
 
+**Titles-only display.** Both the widget above the editor and the injected `<session-tasks>` block render titles only by default (`◐ ARCH-1: Fix flaky auth test`), like the monitor-threads tail widget. Details stay one step away: `task_get <id>` for a single task, `task_list` for the full rows, or `/tasks expand` to switch both surfaces to full `subject — description` rows (`/tasks compact` returns to titles). The toggle is session-scoped, like `/monitors` expansion; `renderModelList` (task_list) is always full-detail.
+
 **Compliance ladder (advisory → hard gate).** A constant standing rule rides the system prompt every turn. With no task set, 3+ consecutive tool calls add a bounded advisory to the tool result and a reminder to the prompt (re-firing at most every 10 results). Past that threshold `write`/`edit` are **blocked** with a directive reason until `task_create` runs — read-only tools and `bash` are never gated. Sessions can opt out with `/tasks enforce off`. Note: extension code changes need `/reload` to affect a running session.
 
 See [`tasks/README.md`](tasks/README.md) and the discipline itself in [`skills/tasks/SKILL.md`](skills/tasks/SKILL.md).

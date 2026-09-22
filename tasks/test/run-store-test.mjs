@@ -248,14 +248,24 @@ await check("widget matches Claude Code collapsed sample format", () => {
 		"◻ ATTEST-V2: attest self-competition workdir v2",
 	]);
 	assert.match(lines[3], /^ … \+4 pending, 2 completed$/);
+	// Compact is titles-only (AC-1): no description text may leak into rows.
+	assert.ok(!lines.join("\n").includes("slice work"), "compact widget must not contain description text");
 });
 
 await check("widget suffixes codes shared by multiple tasks", () => {
 	let tasks = createTask([], { code: "ARCH", subject: "s1", description: "first slice" }).tasks;
 	tasks = createTask(tasks, { code: "ARCH", subject: "s2", description: "second slice" }).tasks;
 	const lines = renderWidgetLines(tasks, false);
-	assert.equal(lines[0], "◻ ARCH-1: first slice");
-	assert.equal(lines[1], "◻ ARCH-2: second slice");
+	assert.equal(lines[0], "◻ ARCH-1: s1");
+	assert.equal(lines[1], "◻ ARCH-2: s2");
+});
+
+await check("widget expanded shows subject and description (AC-2)", () => {
+	let tasks = createTask([], { code: "ARCH", subject: "s1", description: "first slice" }).tasks;
+	const compact = renderWidgetLines(tasks, false);
+	assert.equal(compact[0], "◻ ARCH: s1");
+	const expanded = renderWidgetLines(tasks, true);
+	assert.equal(expanded[0], "◻ ARCH: s1 — first slice");
 });
 
 await check("widget all-settled line mentions cancelled", () => {
@@ -276,10 +286,18 @@ await check("context block: open tasks + settled references + drift rule", () =>
 	tasks = updateTask(tasks, "ARCH-1", { status: "in_progress" }, ENV(3000, true)).tasks;
 	const block = renderContextBlock(tasks, "/repo");
 	assert.match(block, /<session-tasks project="\/repo">/);
-	assert.match(block, /◐ ARCH-1 \[in_progress\] Architect slices — slice work/);
+	// Default (titles-only, AC-3): subject without description, task_get hint present.
+	assert.match(block, /◐ ARCH-1 \[in_progress\] Architect slices$/m);
+	assert.ok(!/— slice work/.test(block), "titles mode must not render descriptions");
+	assert.match(block, /task_get <id> for details/);
 	assert.match(block, /✓ 1 completed: BRAIN-LAUNCH-1/);
 	assert.match(block, /continue autonomously/);
 	assert.ok(!/Ask the operator/.test(block));
+	// Full mode (AC-4) preserves the historical rows.
+	const full = renderContextBlock(tasks, "/repo", { detail: "full" });
+	// Full mode (AC-4) preserves the historical rows.
+	assert.match(full, /◐ ARCH-1 \[in_progress\] Architect slices — slice work/);
+	assert.ok(!/task_get <id> for details/.test(full), "full mode needs no hint");
 });
 
 await check("context block: all-settled is compact and asks once", () => {
