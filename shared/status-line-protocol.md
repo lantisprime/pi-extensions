@@ -43,6 +43,11 @@ sc balanced · f100 · CH99
   (fresh/stale/dup/error), condensed: zero shares are omitted.
 - `CH<n>` — per-call cache health from the last assistant message.
 - `p:<n>%⚠(queued)` — purity-budget flush warning, when queued.
+- `sh<n>` — Phase-3 shaping: `n` tool outputs currently stubbed in per-call views
+  (stale-dedupe / superseded collapse / task-switch eviction). The transcript is
+  never mutated; stubs re-hydrate via visible toolCall args or `/ctx:restore <sha8>`.
+- `dq<n>` — Phase-3 dirty queue: `n` shaping ops waiting to flush at the next
+  burst boundary (already-sent content; one prefix-dirtying per flush).
 
 Legacy behavior is preserved per extension: `statusLine.consolidate: false`
 in `.pi/context-manager.json` restores the standalone `ctx-health` segment

@@ -79,10 +79,10 @@ function jsonl(cwd: string): any[] {
 test("AC-1: subscribes only to observe events — no context/warmer handlers", async () => {
 	const { pi, handlers } = mockPi();
 	createExtension(pi);
-	for (const forbidden of ["context", "cache_warming_decision", "session_before_compact"]) {
+	for (const forbidden of ["cache_warming_decision", "session_before_compact"]) {
 		assert.equal(handlers.has(forbidden), false, `must not subscribe to ${forbidden}`);
 	}
-	for (const required of ["tool_execution_end", "message_end", "turn_end"]) {
+	for (const required of ["tool_execution_end", "message_end", "turn_end", "context"]) { // Phase 3: context subscription is REQUIRED (spec-phase3.md E1/E2)
 		assert.ok(handlers.has(required));
 	}
 });
