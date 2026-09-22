@@ -634,6 +634,44 @@ Read-only subagents get no extension discovery (`--no-extensions --no-skills`), 
 
 Verified: a child in that sandbox calls `jev_ask` and gets calibrated answers, including reaching for it unprompted when a task demands grounded judgement. When Jev is unavailable the child is not given the tool at all, so it keeps its default behaviour instead of burning turns on a failed call.
 
+### Context Manager
+
+Path:
+
+```text
+context-manager/index.ts
+```
+
+Project-local install (symlinked from `~/.pi/agent/extensions/context-manager`).
+
+Dynamic context manager: observe → score → shape → compact → verify, per
+`.plans/CONTEXT/` (proposal v0.3, phase specs). Config: `.pi/context-manager.json`
+per project; telemetry: `.pi/context-telemetry.jsonl`; side-car archive:
+`.pi/context-elisions.jsonl`.
+
+Phase capabilities (all shipped):
+
+- **Phase 1 — Observe**: span fingerprinting + classification (fresh/stale/dup/
+  error), purity shares, per-call cache-health (CH) attribution with locked
+  usage fallback, Jev ingest-relevance verdicts with degraded heuristic, JSONL
+  telemetry, consolidated `ctx-suite` status segment, `/ctx:health` report.
+- **Phase 2 — Prevent**: task-switch detection + staged re-scoring (B2),
+  pressure-gated dump elision with side-car archive (B1: read tools never
+  elided; errors never), purity budget with soft-queue/hard-compact tiers (B4),
+  batched re-score on switch (one Jev call, degraded fallback).
+- **Phase 3 — Shape** (`spec-phase3.md@d36bfbf0`): per-call view shaping via the
+  `context` event — stale-dedupe, superseded-output collapse, task-switch
+  eviction (P1 one-line stubs; toolCall+args stay visible for re-run). Plan
+  frozen per burst (B5); ops on already-sent content queue and flush once at a
+  burst boundary (dirty-prefix batching; triggers ttl/floor/hard/cap, XOR with
+  the Phase-2 compact per turn). Forced-prompt (compaction) requests and
+  ambient calls bypass shaping; transcript is never mutated; toolCall/
+  toolResult adjacency is self-validated per call. Side-car before any stub;
+  `/ctx:restore <sha8>` re-hydration; `shape.*` telemetry.
+
+Commands: `/ctx:health` (legend, shares, shaping state, dirty queue, flushes,
+evictions). Status tags: `sh<n>` applied views, `dq<n>` queued dirty ops.
+
 ---
 
 ### Terminal Backends (tmux, cmux, zellij)
