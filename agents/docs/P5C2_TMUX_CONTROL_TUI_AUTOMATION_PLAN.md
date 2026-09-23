@@ -4,7 +4,7 @@
 
 Planning only. Do not implement until this plan, plan review, and adversarial review are accepted.
 
-This plan builds on **tmux-control v0.1** (P5c-1, shipped in [PR #106](https://github.com/lantisprime/pi-extensions/pull/106)) and implements against the lessons captured in [`TMUX_TUI_AUTOMATION.md`](../../TMUX_TUI_AUTOMATION.md) (repo root).
+This plan builds on **tmux-control v0.1** (P5c-1, shipped in [PR #106](https://github.com/lantisprime/pi-extensions/pull/106)) and implements against the lessons captured in [`TMUX_TUI_AUTOMATION.md`](../../docs/TMUX_TUI_AUTOMATION.md) (docs/).
 
 ## Episode Search Summary
 

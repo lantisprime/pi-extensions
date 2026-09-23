@@ -39,6 +39,6 @@ the source of truth; older entries in the chain are `superseded`.
 - `agents/docs/P5B1_CMUX_TERMINAL_PLAN.md` — P5b-1 plan, 5-slice ladder.
 - `agents/docs/P5C2_TMUX_CONTROL_TUI_AUTOMATION_PLAN.md` — P5c-2 plan (shipped).
 - `agents/docs/P4_REMEDIATION_PLAN.md` — P4R v3 GO consensus.
-- `TMUX_TUI_AUTOMATION.md` — research grounding (repo root).
+- `TMUX_TUI_AUTOMATION.md` — research grounding (now in docs/).
 
 To update it, revise/supersede the episodic memory entry instead of editing this file.
