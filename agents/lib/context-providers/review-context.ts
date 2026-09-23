@@ -411,7 +411,7 @@ function extractDocRefs(content: string): string[] {
 }
 
 /** plan-docs provider: include the content of changed plan/workplan docs (most relevant), else the
- *  root WORKPLAN.md if present. ALL reads go through readContainedReferencedDoc (REQ-B1).
+ *  root WORKPLAN.md (repo root or docs/) if present. ALL reads go through readContainedReferencedDoc (REQ-B1).
  *  B.3: also scans each changed plan doc for referenced docs and includes them if contained. */
 async function buildPlanDocsSection(
 	cwd: string,
@@ -422,7 +422,7 @@ async function buildPlanDocsSection(
 	const isPlanDoc = (p: string) => /(^|\/)WORKPLAN[^/]*\.md$/i.test(p) || /_PLAN\.md$/i.test(p) || /\/[^/]*PLAN[^/]*\.md$/i.test(p);
 	const candidates = files.map((f) => f.path).filter(isPlanDoc);
 	const isFallback = candidates.length === 0;
-	if (isFallback) candidates.push("WORKPLAN.md");
+	if (isFallback) candidates.push("WORKPLAN.md", "docs/WORKPLAN.md"); // repo root (legacy) then docs/
 	const blocks: string[] = [];
 	let budget = caps.maxPlanDocBytes;
 	const omissions: string[] = [];
