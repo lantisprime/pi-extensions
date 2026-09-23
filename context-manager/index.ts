@@ -328,12 +328,12 @@ async function ingestRelevance(
 				state: {
 					question: "Does this new artifact add information not already present in the existing context, and is it relevant to the current tasks?",
 					tasks,
-					existingInventory: existing.slice(-30).map((s) => ({ path: s.path, tok: s.tok, class: s.cls, excerpt: s.excerpt.slice(0, 120) })),
+					existingInventory: existing.slice(-30).map((s) => ({ path: s.path, tok: s.tok, class: s.cls, excerpt: s.excerpt.slice(0, 600) })),
 					candidate: { path: candidate.path, excerpt: candidate.excerpt.slice(0, 2000) },
 				},
 				questions: {
 					new_info: { type: "noul", instructions: "noul: the candidate artifact contains substantive information NOT already covered by the existing inventory." },
-					on_task: { type: "noul", instructions: "noul: the candidate artifact is relevant to the listed current tasks." },
+					on_task: { type: "noul", instructions: "noul: the candidate artifact is relevant to the listed current tasks, including progress, verification, dependencies, or constraints that affect completing them." },
 				},
 			});
 			const res = await fetch(process.env.JEV_ENDPOINT?.trim() || JEV_ENDPOINT_DEFAULT, {
@@ -396,6 +396,11 @@ async function jevDriftCall(userMsg: string, model: TaskModel): Promise<number |
 	}
 	return null;
 }
+
+// __eval — test/eval-only access to the judgment functions (L1 wire-contract
+// test, L2 eval runner; .plans/CTXEVAL/eval-plan.md@4961e6ff). Not an
+// extension API surface.
+export const __eval = { ingestRelevance, jevDriftCall, overlapScore };
 
 const STATUS_CHANNEL = "pi-extensions:status-line";
 const SUITE_KEY = "ctx-suite";
@@ -710,7 +715,7 @@ export default function (pi: ExtensionAPI) {
 					state: {
 						question: "After a task switch, which of these spans are relevant to the new pinned task model?",
 						pinnedTaskModel: { tasks: model.tasks, topic: model.topic },
-						spans: batch.map((s, i) => ({ i, path: s.path ?? null, tok: s.tok, class: s.cls, excerpt: s.excerpt.slice(0, 120) })),
+						spans: batch.map((s, i) => ({ i, path: s.path ?? null, tok: s.tok, class: s.cls, excerpt: s.excerpt.slice(0, 600) })),
 					},
 					questions,
 				});
