@@ -670,7 +670,17 @@ Phase capabilities (all shipped):
   `/ctx:restore <sha8>` re-hydration; `shape.*` telemetry.
 
 Commands: `/ctx:health` (legend, shares, shaping state, dirty queue, flushes,
-evictions). Status tags: `sh<n>` applied views, `dq<n>` queued dirty ops.
+evictions, poison/error-loop counters). Status tags: `sh<n>` applied views,
+`dq<n>` queued dirty ops.
+
+- **Phase 4 — Poison defense** (`spec-phase4.md@8c4a3d0d`): one-call Jev
+  battery per turn (contradiction noul + staleness score, confidence-gated,
+  degraded capped at review) routing shape-eligible spans to act/review/pass;
+  deterministic secret redaction at capture time (span text, side-car, and the
+  restorable `restoreHash` identity; view substitution; battery state redacted
+  by construction); error-loop collapse (3+ identical failures collapse to one
+  signature stub, newest kept, no re-run affordance); incident fixture replay
+  in the wire-test suite.
 
 ---
 
