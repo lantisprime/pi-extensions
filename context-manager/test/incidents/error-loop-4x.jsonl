@@ -1,0 +1,5 @@
+{"scenario": "error loop \u2014 4 identical failures across a turn boundary", "expect": {"act": [], "review": [], "pass": [], "collapse": 3}}
+{"toolName": "bash", "text": "ECONNREFUSED 127.0.0.1:5432\nexit code 1", "isError": true, "args": {"cmd": "db"}}
+{"toolName": "bash", "text": "ECONNREFUSED 127.0.0.1:5432\nexit code 1", "isError": true, "args": {"cmd": "db"}}
+{"toolName": "bash", "text": "ECONNREFUSED 127.0.0.1:5432\nexit code 1", "isError": true, "args": {"cmd": "db"}}
+{"toolName": "bash", "text": "ECONNREFUSED 127.0.0.1:5432\nexit code 1", "isError": true, "args": {"cmd": "db"}}

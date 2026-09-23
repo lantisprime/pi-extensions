@@ -45,6 +45,18 @@ interface CMConfig {
 	compactInstructions: string;
 	shaping: { enabled: boolean; qualityFloor: number; cacheTtlMin: number; maxEvictShare: number; argsCap: number };
 	dirtyQueue: { maxEntries: number; maxTok: number };
+	poison: {
+		enabled: boolean;
+		contradictionAct: number;
+		reviewFloor: number;
+		stalenessAct: number;
+		stalenessReview: number;
+		spansPerCall: number;
+		excerptCap: number;
+		redact: boolean;
+		errorLoopMin: number;
+		redactionPatterns: string[];
+	};
 }
 
 const DEFAULTS: CMConfig = {
@@ -61,6 +73,18 @@ const DEFAULTS: CMConfig = {
 	compactInstructions: "drop unrelated/dup/stale content",
 	shaping: { enabled: true, qualityFloor: 0.85, cacheTtlMin: 5, maxEvictShare: 0.4, argsCap: 2048 },
 	dirtyQueue: { maxEntries: 64, maxTok: 32768 },
+	poison: {
+		enabled: true,
+		contradictionAct: 0.8,
+		reviewFloor: 0.35,
+		stalenessAct: 2,
+		stalenessReview: 1,
+		spansPerCall: 8,
+		excerptCap: 1200,
+		redact: true,
+		errorLoopMin: 3,
+		redactionPatterns: [],
+	},
 };
 
 type SpanClass = "fresh" | "stale" | "dup" | "error" | "unclassified";
@@ -68,10 +92,22 @@ type Verdict = "duplicate" | "relevant" | "unrelated";
 type DriftSource = "task-diff" | "jev" | "heuristic-degraded";
 
 // ---------- Phase 3: per-call view shaping (spec-phase3.md) ----------
-type ShapeKind = "stale-dedupe" | "superseded-collapse" | "task-evict";
+type ShapeKind = "stale-dedupe" | "superseded-collapse" | "task-evict" | "poison-stub" | "error-loop";
+interface ShapeOpMeta {
+	/** Pre-rendered stub text (error-loop carries ×N + newest-sha the view may no longer show). */
+	stub?: string;
+	/** error-loop: total failures in the loop and the kept (newest) span sha. */
+	n?: number;
+	newestSha?: string;
+	/** error-loop group identity: member shas, tool name, args key, normalized signature. */
+	shas?: string[];
+	toolName?: string;
+	argsKey?: string;
+	sig?: string;
+}
 interface ShapePlan {
 	computedAt: number;
-	ops: Array<{ kind: ShapeKind; sha: string; idx: number }>;
+	ops: Array<{ kind: ShapeKind; sha: string; idx: number; meta?: ShapeOpMeta }>;
 }
 interface Burst {
 	id: number;
@@ -87,6 +123,7 @@ interface DirtyOp {
 	tok: number;
 	turn: number;
 	enqueuedAt: number;
+	meta?: ShapeOpMeta;
 }
 interface ShapeStats {
 	plans: number;
@@ -97,6 +134,13 @@ interface ShapeStats {
 	bypassed: number;
 	pruned: number;
 	sideCarSkips: number;
+	// Phase 4 (spec-phase4.md@43a7f0c1)
+	poisonActed: number;
+	poisonReview: number;
+	poisonDegraded: number;
+	redactHits: Record<string, number>;
+	errorLoopCollapsed: number;
+	errorLoopKept: number;
 }
 
 interface TaskModel {
@@ -116,6 +160,24 @@ interface Span {
 	excerpt: string;
 	isError: boolean;
 	rescoredAtTurn?: number;
+	// Phase 4: capture-time redacted text (M8) + poison verdicts (M7).
+	// TWO pinned identities (GLM post-review): contentHash = sha1(RAW transcript text)
+	// for index/sentPrefix bookkeeping; restoreHash = sha1(REDACTED text) for stubs,
+	// side-car records, and /ctx:restore lookups (no secret-derived hashes in artifacts).
+	textRedacted?: string;
+	restoreHash?: string;
+	redactKinds?: Record<string, number>;
+	poison?: PoisonMeta;
+}
+
+interface PoisonMeta {
+	contra: number;
+	stale: number;
+	/** Score-answer confidence — NEVER present on noul-only spans (AC-24, api.md: nouls carry none). */
+	scoreConf?: number;
+	source: "jev" | "poison-degraded";
+	at: number;
+	consumedAt?: number;
 }
 
 interface CMState {
@@ -157,6 +219,10 @@ interface CMState {
 	shapeStats: ShapeStats;
 	lastFlush: { trigger: string; turn: number } | null;
 	argsKeyBySha: Map<string, string>;
+	// Phase 4
+	appliedMeta: Map<string, ShapeOpMeta>;
+	redactApplied: Set<string>;
+	lastPoison: { turn: number; candidates: number; acted: number; review: number; degraded: number; inputTokens: number; noulPolicy: "raw-probability" } | null;
 }
 
 function loadConfig(cwd: string): CMConfig {
@@ -169,6 +235,7 @@ function loadConfig(cwd: string): CMConfig {
 		purityBudget: { ...DEFAULTS.purityBudget },
 		shaping: { ...DEFAULTS.shaping },
 		dirtyQueue: { ...DEFAULTS.dirtyQueue },
+		poison: { ...DEFAULTS.poison, redactionPatterns: [...DEFAULTS.poison.redactionPatterns] },
 	};
 	const p = join(cwd, ".pi", "context-manager.json");
 	if (!existsSync(p)) return base;
@@ -191,6 +258,7 @@ function loadConfig(cwd: string): CMConfig {
 			purityBudget: { ...base.purityBudget, ...(raw.purityBudget ?? {}) },
 			shaping: sanitizeShaping({ ...base.shaping, ...(raw.shaping ?? {}) }),
 			dirtyQueue: sanitizeDirtyQueue({ ...base.dirtyQueue, ...(raw.dirtyQueue ?? {}) }),
+			poison: sanitizePoison({ ...base.poison, ...(raw.poison ?? {}) }),
 		};
 	} catch {
 		return base;
@@ -226,6 +294,32 @@ function sanitizeDirtyQueue(q: CMConfig["dirtyQueue"]): CMConfig["dirtyQueue"] {
 	return out;
 }
 
+// AC-19/AC-43 (spec-phase4): malformed poison values warn + default; never throw.
+function sanitizePoison(p: CMConfig["poison"]): CMConfig["poison"] {
+	const d = DEFAULTS.poison;
+	const out = {
+		enabled: typeof p.enabled === "boolean" ? p.enabled : d.enabled,
+		contradictionAct: num(p.contradictionAct, d.contradictionAct),
+		reviewFloor: num(p.reviewFloor, d.reviewFloor),
+		stalenessAct: num(p.stalenessAct, d.stalenessAct),
+		stalenessReview: num(p.stalenessReview, d.stalenessReview),
+		spansPerCall: num(p.spansPerCall, d.spansPerCall),
+		excerptCap: num(p.excerptCap, d.excerptCap),
+		redact: typeof p.redact === "boolean" ? p.redact : d.redact,
+		errorLoopMin: num(p.errorLoopMin, d.errorLoopMin),
+		redactionPatterns: Array.isArray(p.redactionPatterns) ? p.redactionPatterns.filter((x): x is string => typeof x === "string") : [...d.redactionPatterns],
+	};
+	if (
+		out.enabled !== p.enabled || out.contradictionAct !== p.contradictionAct || out.reviewFloor !== p.reviewFloor ||
+		out.stalenessAct !== p.stalenessAct || out.stalenessReview !== p.stalenessReview || out.spansPerCall !== p.spansPerCall ||
+		out.excerptCap !== p.excerptCap || out.redact !== p.redact || out.errorLoopMin !== p.errorLoopMin ||
+		JSON.stringify(out.redactionPatterns) !== JSON.stringify(p.redactionPatterns)
+	) {
+		console.warn("[context-manager] malformed poison config value(s); default(s) applied");
+	}
+	return out;
+}
+
 function textOf(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (Array.isArray(content)) {
@@ -241,6 +335,69 @@ function classify(tok: number, isError: boolean, text: string, cfg: CMConfig): S
 	if (tok >= cfg.classification.dumpTokens) return "unclassified"; // dump-class; unclassified share
 	if (tok <= cfg.classification.conclusionTokens) return "fresh";
 	return "fresh";
+}
+
+// ---------- Phase 4 M8: secret redaction (spec-phase4.md@43a7f0c1, deterministic, zero Jev) ----------
+// Capture-time redaction: span text, side-car records, and every downstream consumer share
+// ONE identity computed on redacted text (AC-12). Raw text persists only in pi's own session
+// transcript. Negative lookahead keeps already-redacted spans idempotent (AC-9).
+const REDACTION_PATTERNS: Array<{ kind: string; re: RegExp; repl?: (m: string, ...groups: string[]) => string }> = [
+	{ kind: "openai", re: /sk-[A-Za-z0-9_-]{16,}/g },
+	{ kind: "github", re: /gh[pousr]_[A-Za-z0-9]{30,}/g },
+	{ kind: "aws", re: /AKIA[0-9A-Z]{16}/g },
+	{ kind: "slack", re: /xox[baprs]-[A-Za-z0-9-]{10,}/g },
+	{ kind: "jwt", re: /eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g },
+	{ kind: "pem", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
+	{ kind: "bearer", re: /bearer\s+(?!\[REDACTED)[A-Za-z0-9._~+/=-]{20,}/gi },
+	{
+		kind: "assignment",
+		// preserves the key name in the view; quoted values of ANY length per spec
+		re: /\b(api[_-]?key|token|secret|password)(\s*[=:]\s*)("[^"]*"|'[^']*'|(?!\[REDACTED)[^\s"']{20,})/gi,
+		repl: (_m: string, p1: string, p2: string) => `${p1}${p2}[REDACTED:assignment]`,
+	},
+];
+
+function compileExtraPatterns(extra: string[]): Array<{ kind: string; re: RegExp; repl?: (m: string, ...groups: string[]) => string }> {
+	const out: Array<{ kind: string; re: RegExp; repl?: (m: string, ...groups: string[]) => string }> = [];
+	for (const src of extra) {
+		try {
+			out.push({ kind: "custom", re: new RegExp(src, "g") });
+		} catch {
+			console.warn("[context-manager] invalid poison.redaction.patterns entry skipped");
+		}
+	}
+	return out;
+}
+
+/** Apply the redaction battery; returns redacted text and the per-kind hit counts. */
+function redactText(text: string, extra: string[] = []): { text: string; kinds: Record<string, number> } {
+	const kinds: Record<string, number> = {};
+	let out = text;
+	for (const { kind, re, repl } of [...REDACTION_PATTERNS, ...compileExtraPatterns(extra)]) {
+		// custom (user-supplied) patterns scan a bounded head only — a catastrophic
+		// regex must not hang every capture (GLM post-review S2-7)
+		const bounded = kind === "custom" && out.length > 65_536;
+		const scanHead = bounded ? out.slice(0, 65_536) : out;
+		const tail = bounded ? out.slice(65_536) : "";
+		const scanned = scanHead.replace(re, (...args: unknown[]) => {
+			const m = args[0] as string;
+			if (m.includes("[REDACTED")) return m; // idempotence guard (AC-9)
+			kinds[kind] = (kinds[kind] ?? 0) + 1;
+			if (repl) {
+				const groups = (args.slice(1) as string[]).slice(0, Math.max(repl.length - 1, 0));
+				return repl(m, ...groups);
+			}
+			return `[REDACTED:${kind}]`;
+		});
+		out = tail ? scanned + tail : scanned;
+	}
+	return { text: out, kinds };
+}
+
+/** M9 error-signature normalization: first line, digits → N (spec AC-13). */
+function errorSignature(text: string): string {
+	const first = (text.split("\n", 1)[0] ?? "").trim();
+	return first.replace(/\d+/g, "N").slice(0, 160);
 }
 
 // ---------- cache-stats import (AC-10: locked resolution) ----------
@@ -365,6 +522,33 @@ async function ingestRelevance(
 
 // M1: ONE drift noul per user turn, spec-locked phrasing (spec-phase2 M1b).
 // Returns null when keyless or fetch fails ⇒ caller falls back to heuristic (M1c).
+/** Phase 4 M7/AC-8: POST /v1/systemone with one backoff retry on 429/529; other errors
+ *  (401/422/timeout/network) return null immediately → degraded heuristics. */
+async function postSystemOne(
+	key: string,
+	body: unknown,
+	retries: number,
+): Promise<{ answers?: Record<string, { noul?: number; score?: number; confidence?: number }>; usage?: { input_tokens?: number } } | null> {
+	for (let attempt = 0; ; attempt++) {
+		try {
+			const res = await fetch(process.env.JEV_ENDPOINT?.trim() || JEV_ENDPOINT_DEFAULT, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+				body: JSON.stringify(body),
+				signal: AbortSignal.timeout(JEV_TIMEOUT_MS),
+			});
+			if ((res.status === 429 || res.status === 529) && attempt < retries) {
+				await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+				continue;
+			}
+			if (!res.ok) return null;
+			return (await res.json()) as { answers?: Record<string, { noul?: number; score?: number; confidence?: number }>; usage?: { input_tokens?: number } };
+		} catch {
+			return null;
+		}
+	}
+}
+
 async function jevDriftCall(userMsg: string, model: TaskModel): Promise<number | null> {
 	const key = jevKey();
 	if (!key) return null;
@@ -476,9 +660,12 @@ export default function (pi: ExtensionAPI) {
 		baselineViewTokens: 0,
 		lastViewTokens: 0,
 		compacting: false,
-		shapeStats: { plans: 0, applied: 0, droppedAdjacency: 0, flushed: 0, flushedTok: 0, bypassed: 0, pruned: 0, sideCarSkips: 0 },
+		shapeStats: { plans: 0, applied: 0, droppedAdjacency: 0, flushed: 0, flushedTok: 0, bypassed: 0, pruned: 0, sideCarSkips: 0, poisonActed: 0, poisonReview: 0, poisonDegraded: 0, redactHits: {}, errorLoopCollapsed: 0, errorLoopKept: 0 },
 		lastFlush: null,
 		argsKeyBySha: new Map(),
+		appliedMeta: new Map(),
+		redactApplied: new Set(),
+		lastPoison: null,
 		};
 	}
 
@@ -827,6 +1014,8 @@ export default function (pi: ExtensionAPI) {
 			}
 			mkdirSync(dirname(sideCarPath), { recursive: true });
 			const args = st.argsKeyBySha.get(info.sha);
+			const redArgs = redactText((args ?? "").slice(0, st.config.shaping.argsCap), st.config.poison.redactionPatterns).text;
+			const redText = redactText(info.text, st.config.poison.redactionPatterns).text; // AC-10: idempotent for capture-redacted text; covers legacy spans
 			appendFileSync(
 				sideCarPath,
 				`${JSON.stringify({
@@ -834,11 +1023,11 @@ export default function (pi: ExtensionAPI) {
 					sessionId: ctx.sessionManager.getSessionId?.(),
 					kind: "shape",
 					shapeKind: kind,
-					sha: info.sha,
+					sha: spanBySha(info.sha)?.restoreHash ?? info.sha,
 					...(info.toolName ? { toolName: info.toolName } : {}),
-					...(args ? { args: args.slice(0, st.config.shaping.argsCap) } : {}),
+					...(args ? { args: redArgs } : {}),
 					tok: info.tok,
-					text: info.text,
+					text: redText,
 				})}\n`,
 			);
 			return true;
@@ -855,6 +1044,138 @@ export default function (pi: ExtensionAPI) {
 		st.shapeStats.pruned += before - st.dirty.length;
 	}
 
+	/** Shared enqueue path (AC-7 single authoritative act path): side-car BEFORE any
+	 *  application (AC-33); unsent applies this burst at zero cost (AC-8), sent queues via M5 (E6).
+	 *  Idempotence: appliedShas + dirty membership block double-enqueue from battery AND freeze. */
+	function enqueueOp(ctx: ExtensionContext, index: Map<string, ToolResultInfo>, ops: ShapePlan["ops"], sha: string, kind: ShapeKind, meta?: ShapeOpMeta, skipSideCar = false): void {
+		if (!st) return;
+		const info = index.get(sha);
+		if (!info) return;
+		if (st.appliedShas.has(sha) || st.dirty.some((d) => d.sha === sha)) return;
+		if (st.sentPrefix.has(sha)) {
+			if (skipSideCar || writeSideCar(ctx, info, kind)) {
+				st.dirty.push({
+					kind,
+					sha,
+					toolName: info.toolName ?? st.toolNames.get(sha) ?? "unknown",
+					tok: info.tok,
+					turn: st.turn,
+					enqueuedAt: Date.now(),
+					meta,
+				});
+			} else {
+				st.shapeStats.sideCarSkips += 1;
+			}
+		} else if (skipSideCar || writeSideCar(ctx, info, kind)) {
+			st.appliedShas.add(sha);
+			st.appliedKinds.set(sha, kind);
+			st.appliedTurns.set(sha, st.turn);
+			if (meta) st.appliedMeta.set(sha, meta);
+			ops.push({ kind, sha, idx: info.idx, meta });
+		} else {
+			st.shapeStats.sideCarSkips += 1;
+		}
+	}
+
+	/** M9 error-loop groups (AC-13/AC-14): ≥ errorLoopMin error spans sharing toolName +
+	 *  argsKey + normalized signature. Sole error-shaping class; M3/M4 never touch errors. */
+	/** M9 error-loop collapse (AC-13/AC-15/AC-16). OCCURRENCE-AWARE: byte-identical
+	 *  errors share ONE sha (index dedupes) — the loop size is the total capture count
+	 *  (hashCount); near-identical errors share the normalized signature. The newest
+	 *  content's LAST view occurrence stays raw; every other occurrence stubs. */
+	function errorLoopOps(ctx: ExtensionContext, index: Map<string, ToolResultInfo>): ShapePlan["ops"] {
+		const ops: ShapePlan["ops"] = [];
+		if (!st || !st.config.poison.enabled) return ops;
+		const groups = new Map<string, { shas: string[]; size: number }>();
+		for (const info of index.values()) {
+			const toolName = info.toolName ?? st.toolNames.get(info.sha);
+			if (!toolName || st.config.elision.readToolNames.includes(toolName)) continue; // B1 (AC-14)
+			const sp = spanBySha(info.sha);
+			if (!sp?.isError) continue; // error spans only
+			const capturedSpan = st.spans.filter((s) => s.contentHash === info.sha).at(-1);
+			if (st.burst && capturedSpan && capturedSpan.capturedAt >= st.burst.openedAt) continue; // warm exempt (one-burst delay is deliberate — spec M9)
+			const key = `${toolName}|${st.argsKeyBySha.get(info.sha) ?? ""}|${errorSignature(sp.textRedacted ?? info.text)}`;
+			const g = groups.get(key) ?? { shas: [], size: 0 };
+			g.shas.push(info.sha);
+			g.size += Math.max(1, st.hashCount.get(info.sha) ?? 1); // occurrences, not unique shas
+			groups.set(key, g);
+		}
+		for (const [key, g] of groups) {
+			if (g.size < st.config.poison.errorLoopMin) continue;
+			// E6 split (AC-13): a group can straddle the sent boundary — each subset gets
+			// its own op (unsent applies this burst; sent queues via M5 for the flush)
+			const subsets = [
+				g.shas.filter((s) => !st!.sentPrefix.has(s)),
+				g.shas.filter((s) => st!.sentPrefix.has(s)),
+			];
+			for (const members of subsets) {
+				if (members.length === 0) continue;
+				const newestSha = [...members].sort((a, b) => (spanBySha(b)?.capturedAt ?? 0) - (spanBySha(a)?.capturedAt ?? 0))[0];
+				const representative = members[0];
+				const repInfo = index.get(representative);
+				if (!repInfo) continue;
+				const toolName = repInfo.toolName ?? st.toolNames.get(repInfo.sha) ?? "tool";
+				const parts = key.split("|");
+				// the stub advertises the KEPT span's RESTORABLE hash (redacted identity)
+				const newestSpan = spanBySha(newestSha);
+				const restoreSha8 = (newestSpan?.restoreHash ?? newestSha).slice(0, 8);
+				const meta: ShapeOpMeta = {
+					n: g.size,
+					newestSha,
+					shas: [...members],
+					toolName,
+					argsKey: parts[1] ?? "",
+					sig: parts.slice(2).join("|"),
+					stub: `[error-loop: ${toolName} ×${g.size} identical failures @turn ${st.turn}; sha=${restoreSha8}; /ctx:restore ${restoreSha8}]`,
+				};
+				// side-car BEFORE first application (AC-33/AC-16): per-member entries carry
+				// the restorable redacted text; enqueueOp skips its own write (no duplicates)
+				for (const sha of members) {
+					const mi = index.get(sha);
+					if (mi) writeSideCar(ctx, mi, "error-loop");
+				}
+				enqueueOp(ctx, index, ops, representative, "error-loop", meta, true);
+				st.shapeStats.errorLoopCollapsed += g.size - 1;
+				st.shapeStats.errorLoopKept += 1;
+			}
+		}
+		return ops;
+	}
+
+	/** M9 view application: stub every occurrence of the loop's members except the LAST
+	 *  occurrence of the kept (newest) sha. Text-only swaps — structure/adjacency intact. */
+	function applyErrorLoop(view: any[], op: ShapePlan["ops"][number]): { view: any[]; applied: number } {
+		const meta = op.meta;
+		if (!meta?.shas?.length || !meta.newestSha || !meta.stub) return { view, applied: 0 };
+		const memberShas = new Set(meta.shas);
+		const occurrences: Array<{ idx: number; sha: string }> = [];
+		for (let i = 0; i < view.length; i++) {
+			const m = view[i] as { role?: string; content?: unknown };
+			if (!m || m.role !== "toolResult") continue;
+			const text = textOf(m.content);
+			if (!text || text.startsWith("[error-loop") || text.startsWith("[shaped ") || text.startsWith("[elided ")) continue; // AC-35 idempotence
+			const sha = createHash("sha1").update(text).digest("hex");
+			if (memberShas.has(sha)) occurrences.push({ idx: i, sha });
+		}
+		let keptIdx = -1;
+		for (let i = occurrences.length - 1; i >= 0; i--) {
+			if (occurrences[i].sha === meta.newestSha) {
+				keptIdx = occurrences[i].idx;
+				break;
+			}
+		}
+		if (keptIdx === -1 && occurrences.length > 0) keptIdx = occurrences[occurrences.length - 1].idx; // kept content absent ⇒ keep the last remaining
+		const targets = occurrences.filter((o) => o.idx !== keptIdx);
+		if (targets.length === 0) return { view, applied: 0 };
+		let newView = view.slice();
+		for (const t of targets) {
+			const m = { ...(newView[t.idx] as Record<string, unknown>) };
+			m.content = [{ type: "text", text: meta.stub }];
+			newView[t.idx] = m;
+		}
+		return { view: newView, applied: targets.length };
+	}
+
 	/** M2: frozen plan for the burst. Unsent ops apply immediately; sent ops queue (E6/M5). */
 	function buildPlan(messages: any[], ctx: ExtensionContext): ShapePlan {
 		if (!st) return { computedAt: Date.now(), ops: [] };
@@ -864,44 +1185,35 @@ export default function (pi: ExtensionAPI) {
 		for (const info of index.values()) {
 			const kind = shapeKind(info.sha, info);
 			if (!kind) continue;
-			if (st.sentPrefix.has(info.sha)) {
-				// dirtying op (E6): already sent ⇒ batch to the next burst boundary (M5);
-				// side-car written NOW, before the op can ever apply (AC-33)
-				if (!st.dirty.some((d) => d.sha === info.sha) && !st.appliedShas.has(info.sha)) {
-					if (writeSideCar(ctx, info, kind)) {
-						st.dirty.push({
-							kind,
-							sha: info.sha,
-							toolName: info.toolName ?? st.toolNames.get(info.sha) ?? "unknown",
-							tok: info.tok,
-							turn: st.turn,
-							enqueuedAt: Date.now(),
-						});
-					} else {
-						st.shapeStats.sideCarSkips += 1;
-					}
-				}
-			} else if (writeSideCar(ctx, info, kind)) {
-				// unsent op (M2a): applies this burst at zero cache cost (AC-8)
-				st.appliedShas.add(info.sha);
-				st.appliedKinds.set(info.sha, kind);
-				st.appliedTurns.set(info.sha, st.turn);
-				ops.push({ kind, sha: info.sha, idx: info.idx });
-			} else {
-				st.shapeStats.sideCarSkips += 1;
-			}
+			enqueueOp(ctx, index, ops, info.sha, kind);
+		}
+		// Phase 4 M9 (after M3/M4: AC-14 error exemption intact for those classes)
+		for (const op of errorLoopOps(ctx, index)) ops.push(op);
+		// Phase 4 AC-23/AC-7: freeze CONSUMES pre-existing unconsumed poison metadata it
+		// indexed (read-only bookkeeping — the routing decision already happened at turn_end).
+		const nowTs = Date.now();
+		for (const sha of index.keys()) {
+			const sp = spanBySha(sha);
+			if (sp?.poison && sp.poison.consumedAt === undefined) sp.poison.consumedAt = nowTs;
 		}
 		// baseline ops: appliedShas re-apply on every call of every burst (M5 flush outcome)
 		for (const sha of st.appliedShas) {
 			if (ops.some((o) => o.sha === sha)) continue;
 			const info = index.get(sha);
-			if (info) ops.push({ kind: st.appliedKinds.get(sha) ?? "stale-dedupe", sha, idx: info.idx });
+			if (info) ops.push({ kind: st.appliedKinds.get(sha) ?? "stale-dedupe", sha, idx: info.idx, meta: st.appliedMeta.get(sha) });
 		}
 		st.shapeStats.plans += 1;
 		return { computedAt: Date.now(), ops };
 	}
 
-	function stubText(info: ToolResultInfo, turn: number): string {
+	function stubText(info: ToolResultInfo, turn: number, meta?: ShapeOpMeta): string {
+		if (meta?.stub) return meta.stub;
+		if (meta?.n != null && meta.newestSha != null) {
+			// M9 error-loop stub (AC-15): NO rerun affordance — an identical signature ×N
+			// is persistent; re-running invites the loop M9 exists to suppress.
+			const restoreSha8 = (spanBySha(meta.newestSha)?.restoreHash ?? meta.newestSha).slice(0, 8);
+			return `[error-loop: ${info.toolName ?? "tool"} ×${meta.n} identical failures @turn ${turn}; sha=${restoreSha8}; /ctx:restore ${restoreSha8}]`;
+		}
 		return `[shaped: ${info.toolName ?? "tool"} -${info.tok} tok @turn ${turn}; sha=${info.sha.slice(0, 8)}; rerun call above or /ctx:restore ${info.sha.slice(0, 8)}]`;
 	}
 
@@ -950,12 +1262,25 @@ export default function (pi: ExtensionAPI) {
 		for (const op of plan.ops) (op.kind === "superseded-collapse" ? dropOps : stubOps).push(op);
 		// P1 stubs first, per-op (a violation drops ONLY that op — AC-10..12)
 		for (const op of stubOps) {
+			if (op.kind === "error-loop") {
+				// M9 group application: stubs every loop occurrence except the kept newest
+				const r = applyErrorLoop(view, op);
+				if (r.applied === 0) continue; // nothing to stub this call (fail-safe)
+				if (adjacencyValid(r.view)) {
+					view = r.view;
+					applied += r.applied;
+				} else {
+					droppedAdjacency += 1;
+					removeFromPlan(plan, op);
+				}
+				continue;
+			}
 			const index = indexToolResults(view);
 			const info = index.get(op.sha);
 			if (!info) continue; // target absent this call ⇒ skip (fail-safe)
 			const newView = view.slice();
 			const m = { ...(newView[info.idx] as Record<string, unknown>) };
-			m.content = [{ type: "text", text: stubText(info, turnOf(op.sha)) }];
+			m.content = [{ type: "text", text: stubText(info, turnOf(op.sha), op.meta) }];
 			newView[info.idx] = m;
 			if (adjacencyValid(newView)) {
 				view = newView;
@@ -984,7 +1309,7 @@ export default function (pi: ExtensionAPI) {
 			if (!info) continue;
 			const newView = view.slice();
 			const m = { ...(newView[info.idx] as Record<string, unknown>) };
-			m.content = [{ type: "text", text: stubText(info, turnOf(op.sha)) }];
+			m.content = [{ type: "text", text: stubText(info, turnOf(op.sha), op.meta) }];
 			newView[info.idx] = m;
 			if (adjacencyValid(newView)) {
 				view = newView;
@@ -1064,6 +1389,168 @@ export default function (pi: ExtensionAPI) {
 		rt.b6SuppressNext = true; // B6 extension: the flush dirties the prefix once (spec M5)
 	}
 
+	// ---------- Phase 4 M7: poison battery (spec-phase4.md@43a7f0c1) ----------
+	/** AC-2/AC-23: pre-eligible spans NOT already acted/queued; re-ask suppressed while
+	 *  poison metadata is live-unconsumed; oldest-first so deep-prefix poison is not
+	 *  starved by the spansPerCall cap; errors excluded (M9's domain, AC-14). */
+	function poisonCandidates(): Span[] {
+		if (!st || !st.burst || st.compacting || !st.config.poison.enabled) return [];
+		const out: Span[] = [];
+		for (const s of st.spans) {
+			if (s.isError) continue;
+			if (s.tok < st.config.classification.dumpTokens) continue; // dump floor
+			const toolName = st.toolNames.get(s.contentHash);
+			if (!toolName) continue; // assistant/user spans are not battery candidates
+			if (st.config.elision.readToolNames.includes(toolName)) continue; // B1 (AC-2)
+			if (st.burst && s.capturedAt >= st.burst.openedAt) continue; // warm/current-burst (AC-2)
+			if (st.appliedShas.has(s.contentHash)) continue; // already baseline
+			if (st.dirty.some((d) => d.sha === s.contentHash)) continue; // pending (AC-23)
+			if (s.poison && s.poison.consumedAt === undefined) continue; // re-ask suppressed (AC-23)
+			out.push(s);
+		}
+		out.sort((a, b) => a.capturedAt - b.capturedAt); // oldest-unverdicted-first (AC-23)
+		return out.slice(0, st.config.poison.spansPerCall);
+	}
+
+	/** AC-5/AC-6/AC-24: scale-clean truth table; confidence gates the Score arm only
+	 *  (nouls carry none — api.md); degraded sources are capped at review. */
+	function routePoison(s: Span): "act" | "review" | "pass" {
+		const cfg = st!.config.poison;
+		const p = s.poison!;
+		const actOnStale = p.stale >= cfg.stalenessAct && (p.scoreConf ?? 0) >= 0.5; // AC-24
+		const act = p.contra >= cfg.contradictionAct || actOnStale;
+		if (act) return p.source === "poison-degraded" ? "review" : "act"; // AC-6 degraded ceiling
+		const review = p.contra >= cfg.reviewFloor || p.stale >= cfg.stalenessReview;
+		return review ? "review" : "pass";
+	}
+
+	/** AC-1/AC-3/AC-4/AC-7/AC-8/AC-22: one call per turn, inside turn_end, before burst
+	 *  teardown and M5 flush evaluation; act enqueues via the single authoritative path. */
+	async function poisonBattery(rt: CMState, ctx: ExtensionContext): Promise<void> {
+		const cfg = rt.config.poison;
+		if (!cfg.enabled || !rt.burst || rt.compacting) return; // AC-1
+		const candidates = poisonCandidates();
+		if (candidates.length === 0) return;
+		let degraded = false;
+		let inputTokens = 0;
+		let live: Span[] = candidates;
+		const key = jevKey();
+		if (!key) {
+			degraded = true;
+		} else {
+			const questions: Record<string, unknown> = {};
+			const candTools = new Set(candidates.map((s) => rt.toolNames.get(s.contentHash)));
+			// newest-per-candidate-tools inventory (spec: "newest same-tool outputs")
+			const newestOutputs = rt.spans
+				.filter((x) => candTools.has(rt.toolNames.get(x.contentHash)))
+				.slice(-5)
+				.map((x) => ({
+					sha8: x.contentHash.slice(0, 8),
+					tool: rt.toolNames.get(x.contentHash) ?? "tool",
+					excerpt: redactText(x.excerpt, rt.config.poison.redactionPatterns).text.slice(0, 200),
+				}));
+			for (const s of candidates) {
+				const sha8 = s.contentHash.slice(0, 8);
+				questions[`contra_${sha8}`] = {
+					type: "noul",
+					instructions: {
+						question: `Does span ${sha8} (tool ${rt.toolNames.get(s.contentHash) ?? "tool"}) contain content that contradicts any newer retained output in newest_outputs or the current task list?`,
+						// defense-in-depth: send-time redaction even for legacy spans whose
+						// captured excerpt predates M8 (GLM post-review finding 1)
+						span_excerpt: redactText(s.textRedacted ?? s.excerpt, rt.config.poison.redactionPatterns).text.slice(0, cfg.excerptCap),
+					},
+				};
+				questions[`stale_${sha8}`] = {
+					type: "score",
+					instructions: `Rate how stale or superseded span ${sha8} is now, given newest_outputs.`,
+					criteria: ["fresh — current and consistent", "aged but still valid", "superseded by newer content", "wrong or contradicted"],
+				};
+			}
+			const state = {
+				turn: rt.turn,
+				taskList: rt.taskModel?.tasks ?? [],
+				// field names avoid `state.spans` — that key is the Phase-2 M4 rescore-call
+				// contract (tests/wiring discriminate batteries from rescores by it)
+				poisonSpans: candidates.map((s) => ({
+					sha8: s.contentHash.slice(0, 8),
+					tool: rt.toolNames.get(s.contentHash) ?? "tool",
+					ageMin: Math.round((Date.now() - s.capturedAt) / 60000),
+					excerpt: redactText(s.textRedacted ?? s.excerpt, rt.config.poison.redactionPatterns).text.slice(0, cfg.excerptCap),
+				})),
+				poisonNewest: newestOutputs,
+			};
+			const parsed = await postSystemOne(key, { model: "jev-latest", state, questions }, 1);
+			// AC-1 effect-time revalidation (GLM post-review finding 2): the await window
+			// may have seen compaction start or span eviction — only LIVE candidates route
+			const live = rt.compacting || !rt.burst ? [] : candidates.filter((s) => rt.spans.includes(s));
+			if (!parsed) {
+				degraded = true;
+			} else {
+				inputTokens = parsed.usage?.input_tokens ?? 0;
+				for (const s of live) {
+					const sha8 = s.contentHash.slice(0, 8);
+					const contra = parsed.answers?.[`contra_${sha8}`]?.noul;
+					const staleAns = parsed.answers?.[`stale_${sha8}`];
+					if (typeof contra !== "number" || typeof staleAns?.score !== "number") {
+						degraded = true; // malformed answer ⇒ degrade THIS candidate only (finding 7)
+						continue;
+					}
+					s.poison = {
+						contra,
+						stale: staleAns.score,
+						...(typeof staleAns.confidence === "number" ? { scoreConf: staleAns.confidence } : {}),
+						source: "jev",
+						at: Date.now(),
+					};
+				}
+			}
+		}
+		if (degraded) {
+			// AC-6: heuristic fallback, capped at review downstream
+			for (const s of live) {
+				if (s.poison?.source === "jev") continue; // valid verdicts survive partial degrade (finding 7)
+				const own = rt.argsKeyBySha.get(s.contentHash);
+				const newerSame = rt.spans.some(
+					(x) => x.contentHash !== s.contentHash && x.capturedAt >= s.capturedAt && own != null && rt.argsKeyBySha.get(x.contentHash) === own,
+				);
+				const ageMin = (Date.now() - s.capturedAt) / 60000;
+				s.poison = {
+					contra: newerSame ? 0.6 : 0.1,
+					stale: ageMin >= 3 * rt.config.shaping.cacheTtlMin ? 2 : 0,
+					source: "poison-degraded",
+					at: Date.now(),
+				};
+			}
+		}
+		let acted = 0;
+		let review = 0;
+		for (const s of live) {
+			if (!s.poison) continue;
+			const route = routePoison(s);
+			if (route === "act") {
+				// AC-7 single authoritative path: enqueue through enqueueOp (side-car first,
+				// appliedShas/dirty idempotence; sent → M5 queue rides THIS boundary's flush).
+				const info: ToolResultInfo = {
+					idx: -1,
+					sha: s.contentHash,
+					toolName: rt.toolNames.get(s.contentHash),
+					text: s.textRedacted ?? s.excerpt,
+					tok: s.tok,
+					assistantIdx: -1,
+				};
+				enqueueOp(ctx, new Map([[s.contentHash, info]]), [], s.contentHash, "poison-stub");
+				if (s.poison) s.poison.consumedAt = Date.now();
+				acted += 1;
+			} else if (route === "review") {
+				review += 1; // metadata stays live-unconsumed; next freeze consumes it (AC-23)
+			}
+		}
+		if (degraded) rt.shapeStats.poisonDegraded += 1;
+		rt.shapeStats.poisonActed += acted;
+		rt.shapeStats.poisonReview += review;
+		rt.lastPoison = { turn: rt.turn, candidates: candidates.length, acted, review, degraded: degraded ? 1 : 0, inputTokens, noulPolicy: "raw-probability" as const };
+	}
+
 	// Phase 3 M1–M6: `context` handler — per-call view ONLY, transcript never mutated (E5).
 	pi.on("context", async (event, ctx) => {
 		if (!st?.config.enabled || !st.config.shaping.enabled) return undefined; // AC-44
@@ -1083,6 +1570,39 @@ export default function (pi: ExtensionAPI) {
 			}
 			const r = applyPlan(messages, burst.plan);
 			st.shapeStats.droppedAdjacency += r.droppedAdjacency;
+			// Phase 4 M8 view substitution (AC-12) — runs LAST, on the final view, so
+			// plan-time indexing keeps the RAW-transcript identity (contentHash = raw sha).
+			// The REDACTED form is what the model sees from the FIRST send — no extra
+			// prefix-dirtying, deterministic per call. Text-only swaps; adjacency holds.
+			let redactShipped = false;
+			{
+				try {
+					let view = r.view;
+					let changed = false;
+					for (const [sha, info] of indexToolResults(r.view)) {
+						const sp = spanBySha(sha);
+						if (!sp?.textRedacted || sp.textRedacted === info.text) continue;
+						if (!changed) {
+							view = view.slice();
+							changed = true;
+						}
+						const m = { ...(view[info.idx] as Record<string, unknown>) };
+						m.content = [{ type: "text", text: sp.textRedacted }];
+						view[info.idx] = m;
+						if (!st.redactApplied.has(sha)) {
+							st.redactApplied.add(sha);
+							const sp2 = spanBySha(sha);
+							if (sp2?.redactKinds) for (const [k, n] of Object.entries(sp2.redactKinds)) st.shapeStats.redactHits[k] = (st.shapeStats.redactHits[k] ?? 0) + n;
+						}
+					}
+					if (changed && adjacencyValid(view)) {
+						r.view = view;
+						redactShipped = true;
+					}
+				} catch {
+					/* substitution never breaks the call (AC-21) */
+				}
+			}
 			// stamp sent-prefix AFTER the decision: what counts is PRIOR payloads (E6/M2);
 			// everything in this input becomes sent history once the call goes out
 			try {
@@ -1096,10 +1616,11 @@ export default function (pi: ExtensionAPI) {
 			} catch {
 				/* stamping is best-effort */
 			}
-			if (r.applied === 0) return undefined;
+			if (r.applied === 0 && !redactShipped) return undefined;
 			st.shapeStats.applied += r.applied;
 			return { messages: r.view };
-		} catch {
+		} catch (e) {
+			if (process.env.CM_DEBUG) console.error("[context-manager] context handler:", e);
 			return undefined; // fail-open (AC-34)
 		}
 	});
@@ -1122,23 +1643,38 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_execution_end", async (event, ctx) => {
 		if (!st?.config.enabled) return;
+		try {
 		const args = (event as { args?: Record<string, unknown> }).args ?? {};
 		const p = typeof args.path === "string" ? args.path : undefined;
 		const text = textOf((event as { result?: unknown }).result);
 		if (!text) return; // all tool results fingerprinted (error loops/dumps from any tool are poison candidates); path captured when present (spec §2.1/§2.2)
 		const tok = Math.ceil(text.length / 4);
 		const isError = Boolean((event as { isError?: boolean }).isError);
+		// Phase 4 M8 (AC-9/AC-12): capture-time redaction — the REDACTED text is what the
+		// span, its excerpt, side-car, and battery consumers see; contentHash stays computed
+		// over the RAW transcript text so index/sentPrefix bookkeeping keeps ONE identity (AC-12).
+		const red = redactText(text, st.config.poison.redactionPatterns);
+		for (const [k, n] of Object.entries(red.kinds)) st.shapeStats.redactHits[k] = (st.shapeStats.redactHits[k] ?? 0) + n;
 		const span: Span = {
 			id: `${Date.now()}-${st.spans.length}`,
 			path: p,
 			contentHash: createHash("sha1").update(text).digest("hex"),
 			tok,
 			capturedAt: Date.now(),
-			cls: classify(tok, isError, text, st.config),
-			excerpt: text.slice(0, 400),
+			cls: classify(tok, isError, red.text, st.config),
+			excerpt: red.text.slice(0, 400),
 			isError,
+			textRedacted: red.text.slice(0, 16384),
+			restoreHash: createHash("sha1").update(red.text).digest("hex"),
+			...(Object.keys(red.kinds).length > 0 ? { redactKinds: red.kinds } : {}),
 		};
-		if (st.hashCount.size > st.config.keepSpans * 2) st.hashCount.clear();
+		if (st.hashCount.size > st.config.keepSpans * 2) {
+			// prune the OLDEST half — a blind clear() loses live occurrence counts and a
+			// 4× identical-error loop straddling the clear silently never reaches
+			// errorLoopMin (GLM post-review, AC-13)
+			const keptEntries = [...st.hashCount.entries()].slice(-(st.config.keepSpans >> 1));
+			st.hashCount = new Map(keptEntries);
+		}
 		if (st.verdictMemo.size > st.config.keepSpans * 2) st.verdictMemo.clear();
 		const seen = st.hashCount.get(span.contentHash) ?? 0;
 		st.hashCount.set(span.contentHash, seen + 1);
@@ -1154,6 +1690,10 @@ export default function (pi: ExtensionAPI) {
 		// turn_end awaits pending scores so telemetry stays complete (B5 discipline)
 		const pending = maybeScoreRelevance(span, ctx).finally(() => st!.pendingScores.delete(pending));
 		st.pendingScores.add(pending);
+		} catch (e) {
+			if (process.env.CM_DEBUG) console.error("[context-manager] tool_execution_end:", e);
+			// fail-open (AC-21): a capture failure never breaks the tool pipeline
+		}
 	});
 
 	pi.on("message_end", async (event, ctx) => {
@@ -1249,6 +1789,15 @@ export default function (pi: ExtensionAPI) {
 		const dupTok = rt.spans.filter((s) => s.cls === "dup").reduce((a, s) => a + s.tok, 0);
 		const staleTok = rt.spans.filter((s) => s.cls === "stale").reduce((a, s) => a + s.tok, 0);
 		rt.lastPurity = total > 0 ? (unrelatedTok + dupTok + staleTok) / total : 0;
+		// Phase 4 M7: poison battery (AC-1) — inside turn_end, after pendingScores, BEFORE
+		// burst teardown and the M5 flush evaluation below, so act ops ride the same flush.
+		if (rt.config.shaping.enabled) {
+			try {
+				await poisonBattery(rt, ctx);
+			} catch {
+				/* fail-open (AC-21) */
+			}
+		}
 		const telemetrySpans = rt.spans.slice(-50); // snapshot BEFORE the M3 decision — a compact clears the ledger, but the flush-turn record must show what triggered it
 		// Phase 3 M5: dirty-prefix flush at the burst boundary — XOR with M3 (AC-29):
 		// exactly one of {shaping flush, M3 compact} acts per turn.
@@ -1362,8 +1911,15 @@ export default function (pi: ExtensionAPI) {
 						dirtyTok: rt.dirty.reduce((a, d) => a + d.tok, 0),
 						viewTokens: rt.lastViewTokens,
 						lastFlush: rt.lastFlush,
+						poisonActed: rt.shapeStats.poisonActed,
+						poisonReview: rt.shapeStats.poisonReview,
+						poisonDegraded: rt.shapeStats.poisonDegraded,
+						redactHits: rt.shapeStats.redactHits,
+						errorLoopCollapsed: rt.shapeStats.errorLoopCollapsed,
+						errorLoopKept: rt.shapeStats.errorLoopKept,
 					}
 					: undefined,
+					poison: rt.lastPoison,
 					spans: telemetrySpans.map((s) => ({ id: s.id, path: s.path, contentHash: s.contentHash, tok: s.tok, class: s.cls, verdict: s.verdict?.v ?? null, source: s.verdict?.source ?? null, rescoredAtTurn: s.rescoredAtTurn ?? null })),
 				})}\n`,
 			);
@@ -1393,12 +1949,13 @@ export default function (pi: ExtensionAPI) {
 					`fresh ${pct(st.spans.filter((s) => s.cls === "fresh").reduce((a, s) => a + s.tok, 0))} · stale ${pct(st.spans.filter((s) => s.cls === "stale").reduce((a, s) => a + s.tok, 0))} · dup ${pct(st.spans.filter((s) => s.cls === "dup").reduce((a, s) => a + s.tok, 0))} · error ${pct(st.spans.filter((s) => s.cls === "error").reduce((a, s) => a + s.tok, 0))}`,
 					`unrelated (Jev/heuristic verdicts): ${unrelated.length} spans · ~${unrelated.reduce((a, s) => a + s.tok, 0)} tok (eviction candidates, phase 3)`,
 					`cache miss: ${st.missStats.missedTokens} tok (cause: ${st.missStats.cause ?? "none recorded"})`,
-				`cache miss: ${st.missStats.missedTokens} tok (cause: ${st.missStats.cause ?? "none recorded"})`,
 				...(st.config.shaping.enabled
 					? [
 						`shaping: burst ${st.burst ? `#${st.burst.id} call ${st.burst.callNo}` : "closed"} · baseline ${st.appliedShas.size} sha · dirty queue ${st.dirty.length} op/~${st.dirty.reduce((a, d) => a + d.tok, 0)} tok`,
 						`  view ~${st.lastViewTokens} tok vs baseline ~${st.baselineViewTokens} tok · last flush: ${st.lastFlush ? `${st.lastFlush.trigger} @turn ${st.lastFlush.turn}` : "none"}`,
 						`  evicted (stub + /ctx:restore <sha8>): ${unrelated.map((s) => s.contentHash.slice(0, 8)).join(", ") || "none"}`,
+						`poison: acted ${st.shapeStats.poisonActed} · review ${st.shapeStats.poisonReview} · degraded ${st.shapeStats.poisonDegraded}${st.lastPoison ? ` (last turn: ${st.lastPoison.candidates} candidates, ${st.lastPoison.acted} acted, ${st.lastPoison.inputTokens} input tok)` : ""} · noulPolicy raw-probability`,
+						`error-loop: collapsed ${st.shapeStats.errorLoopCollapsed} · kept ${st.shapeStats.errorLoopKept} · redaction hits: ${Object.entries(st.shapeStats.redactHits).map(([k, n]) => `${k}:${n}`).join(", ") || "none"}`,
 					]
 					: []),
 					`stale paths: ${stale.map((s) => `${s.path} (read ${Math.round((Date.now() - s.capturedAt) / 60000)}min ago)`).join(", ") || "none"}`,
