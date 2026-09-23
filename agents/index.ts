@@ -22,6 +22,7 @@ import { registerAgent, registerProjectAgents, unregisterAgent } from "./lib/reg
 import { runAgentCommand, runIntentCommand, dispatchChildRun, resolveRegisteredRunTarget } from "./lib/run-resolver.ts";
 import type { AgentsContextLike } from "./lib/run-resolver.ts";
 import { disposeBackgroundRuns } from "./lib/bg-run.ts";
+import { createBgWakeWatcher, type BgWakeSend } from "./lib/bg-wake.ts";
 import { validateBuiltInAgentSpecs } from "./lib/specs.ts";
 import { registerSubagentTool } from "./lib/subagent-tool.ts";
 import { preflightBgAgent } from "./lib/bg-preflight.ts";
@@ -93,6 +94,13 @@ export default function agentsExtension(pi: ExtensionAPI) {
 		// cleaned up even if reapStaleBgRuns rejects.
 		if (bgStatusPollTimer !== undefined) { clearInterval(bgStatusPollTimer); bgStatusPollTimer = undefined; }
 		if (typeof ctx?.ui?.setStatus === "function") ctx.ui.setStatus(BG_STATUS_KEY, undefined);
+		// P12: stop the bg push-wake watcher before the reap; stop() flushes the
+		// watermark so nothing re-wakes next session.
+		if (bgWakeWatcher !== undefined) {
+			const watcher = bgWakeWatcher;
+			bgWakeWatcher = undefined;
+			try { await watcher.stop(); } catch { /* best-effort */ }
+		}
 		await reapStaleBgRuns(resolveTrustedHome()); // free slots only — NOT key retirement (N5)
 	});
 	eventApi.on?.("session_start", async (_event, ctx) => {
@@ -115,6 +123,17 @@ export default function agentsExtension(pi: ExtensionAPI) {
 		// P4-6: show current background agent count in the footer on session start.
 		// Only start polling if there are active runs — avoid a throwaway timer on idle sessions.
 		if (await updateBgStatusLine(ctx) > 0) ensureBgStatusPolling(ctx);
+		// P12: push wake for bg completions — started AFTER the reap above (and the
+		// status line) so session-open reaps of stale orphans are baselined quiet;
+		// later completions (including reaps) wake via framed bg-agent-event
+		// messages. Headless ctx never consumes wakes (amendment 3).
+		bgWakeWatcher = createBgWakeWatcher({
+			sendMessage: (pi as ExtensionAPI & { sendMessage?: BgWakeSend }).sendMessage?.bind(pi),
+			notify: (message: string, level?: string) => {
+				try { ctx.ui.notify(message, level ?? "info"); } catch { /* detached UI */ }
+			},
+		});
+		void bgWakeWatcher.start({ hasUI: ctx?.hasUI });
 		ctx.profileLibrary = profileLibrary; // start with built-ins
 		// Discover user/project profiles and rebuild library.
 		// os.homedir() is intentional here (NOT resolveTrustedHome()): profile discovery
@@ -536,6 +555,9 @@ async function handleProfileUnregister(target: string, ctx: AgentsContext, diagn
 const BG_STATUS_KEY = "agents:bg-count";
 const BG_STATUS_POLL_MS = 15_000; // refresh every 15s while runs are active
 let bgStatusPollTimer: ReturnType<typeof setInterval> | undefined;
+
+// P12: bg push-wake watcher handle (session-scoped; stopped + flushed on shutdown).
+let bgWakeWatcher: ReturnType<typeof createBgWakeWatcher> | undefined;
 
 /** Build an `isAlive` callback for the bg-state reaper that routes each
  *  reservation to the backend recorded in its `ownerBackendName`. Runs
