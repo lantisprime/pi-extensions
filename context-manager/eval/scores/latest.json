@@ -1,0 +1,46 @@
+{
+  "generatedAt": "2026-09-23T09:03:58.960Z",
+  "requestedModel": "jev-latest",
+  "endpoint": "(extension default)",
+  "keySource": "models.json",
+  "corpus": {
+    "relevance": 21,
+    "drift": 12
+  },
+  "passes": {
+    "degraded": {
+      "relevance": {
+        "aggregate": 1,
+        "majorityBaseline": 0.4117647058823529,
+        "relevantRecall": 1,
+        "duplicateRecall": 1,
+        "unrelatedPrecision": 1,
+        "a3IncapableMisses": 2,
+        "hardTier": {
+          "total": 2,
+          "correct": 2
+        }
+      },
+      "drift": {
+        "precision": 1,
+        "recall": 1
+      }
+    },
+    "live": {
+      "relevance": {
+        "aggregate": 1,
+        "majorityBaseline": 0.4117647058823529,
+        "relevantRecall": 1,
+        "aggregateAll": 0.9047619047619048,
+        "hardTier": {
+          "total": 2,
+          "correct": 0
+        }
+      },
+      "drift": {
+        "precision": 1,
+        "recall": 1
+      }
+    }
+  }
+}
