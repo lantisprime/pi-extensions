@@ -245,8 +245,8 @@ export function buildSubagentToolDefinition() {
 			additionalProperties: false,
 			required: ["agent", "task"],
 			properties: {
-				agent: { type: "string", description: "Built-in agent name (scout, planner, reviewer) or a registered user/project agent name." },
-				task: { type: "string", description: "Delegated task for the subagent. Bounded, read-only scope only." },
+				agent: { type: "string", pattern: "^[A-Za-z][A-Za-z0-9._-]{0,127}$", description: "Built-in agent name (scout, planner, reviewer) or a registered user/project agent name." },
+				task: { type: "string", maxLength: 8000, description: "Delegated task for the subagent. Bounded, read-only scope only." },
 			},
 		},
 	};
