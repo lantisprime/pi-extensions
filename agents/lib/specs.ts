@@ -3,7 +3,7 @@ import { PROMPT_FILES } from "./prompts.ts";
 
 export const AGENT_SPEC_VERSION = 1;
 
-export const RESERVED_BUILT_IN_AGENT_NAMES = ["scout", "planner", "reviewer"] as const;
+export const RESERVED_BUILT_IN_AGENT_NAMES = ["scout", "planner", "reviewer", "architect", "builder", "orchestrator", "researcher", "test-architect"] as const;
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 export const P3_READONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
 export const P3_FORBIDDEN_TOOLS = ["write", "edit", "bash", "run_subagent"] as const;
@@ -477,6 +477,116 @@ The Verdict section must contain exactly one of: go, conditional-go, no-go.`,
 			verdicts: ["go", "conditional-go", "no-go"],
 		},
 		evals: [{ id: "reviewer-basic-review-contract", path: "agents/evals/reviewer.eval.json", required: true }],
+		limits: { ...DEFAULT_LIMITS },
+		observability: { ...DEFAULT_OBSERVABILITY },
+		safety: { ...DEFAULT_SAFETY, forbiddenTools: [...P3_FORBIDDEN_TOOLS] },
+	},
+	architect: {
+		name: "architect",
+		description: "System and feature design grounded in cited code: interfaces, invariants, trade-offs.",
+		source: "built-in",
+		tools: [...P3_READONLY_TOOLS],
+		prompt: `${COMMON_PROMPT}
+
+Role: Architect. Design the smallest change grounded in cited code; name exact interfaces and invariants.
+Return sections: Architecture overview; Key decisions; Interfaces/contracts; Trade-offs; Risks; Open questions.
+Do not stage implementation steps (planner) or issue verdicts (reviewer).`,
+		context: ["plan-docs", "changed-files"],
+		instructionsFile: "architect.md",
+		inputContract: { ...DEFAULT_INPUT_CONTRACT },
+		outputContract: {
+			requiredSections: ["Architecture overview", "Key decisions", "Interfaces/contracts", "Trade-offs", "Risks", "Open questions"],
+			maxSummaryChars: DEFAULT_MAX_SUMMARY_CHARS,
+		},
+		evals: [{ id: "architect-basic-contract", path: "agents/evals/architect.eval.json", required: true }],
+		limits: { ...DEFAULT_LIMITS },
+		observability: { ...DEFAULT_OBSERVABILITY },
+		safety: { ...DEFAULT_SAFETY, forbiddenTools: [...P3_FORBIDDEN_TOOLS] },
+	},
+	builder: {
+		name: "builder",
+		description: "Implementation drafting: exact, apply-ready edits as an Edit manifest. Cannot write, edit, or run anything.",
+		source: "built-in",
+		tools: [...P3_READONLY_TOOLS],
+		prompt: `${COMMON_PROMPT}
+
+Role: Builder. Produce an Edit manifest of exact, apply-ready edits as text; you cannot write, edit, or run anything.
+Return sections: Files to change; Edit manifest; New files; Validation commands; Untouched-code notes.
+Do not apply anything — the edit-executor seat applies the manifest.`,
+		context: ["changed-files", "git-diff"],
+		instructionsFile: "builder.md",
+		inputContract: { ...DEFAULT_INPUT_CONTRACT },
+		outputContract: {
+			requiredSections: ["Files to change", "Edit manifest", "New files", "Validation commands", "Untouched-code notes"],
+			maxSummaryChars: DEFAULT_MAX_SUMMARY_CHARS,
+		},
+		evals: [{ id: "builder-basic-contract", path: "agents/evals/builder.eval.json", required: true }],
+		limits: { ...DEFAULT_LIMITS },
+		observability: { ...DEFAULT_OBSERVABILITY },
+		safety: { ...DEFAULT_SAFETY, forbiddenTools: [...P3_FORBIDDEN_TOOLS] },
+	},
+	orchestrator: {
+		name: "orchestrator",
+		description: "Decomposition and delegation planning: returns the plan; cannot spawn agents.",
+		source: "built-in",
+		tools: [...P3_READONLY_TOOLS],
+		prompt: `${COMMON_PROMPT}
+
+Role: Orchestrator. Decompose the goal into bounded delegable tasks and return the delegation plan; you cannot spawn agents.
+Return sections: Goal decomposition; Delegation map; Sequencing; Aggregation strategy; Failure handling.
+Do not present the plan as executed or mix roles within one task.`,
+		context: ["plan-docs"],
+		instructionsFile: "orchestrator.md",
+		inputContract: { ...DEFAULT_INPUT_CONTRACT },
+		outputContract: {
+			requiredSections: ["Goal decomposition", "Delegation map", "Sequencing", "Aggregation strategy", "Failure handling"],
+			maxSummaryChars: DEFAULT_MAX_SUMMARY_CHARS,
+		},
+		evals: [{ id: "orchestrator-basic-contract", path: "agents/evals/orchestrator.eval.json", required: true }],
+		limits: { ...DEFAULT_LIMITS },
+		observability: { ...DEFAULT_OBSERVABILITY },
+		safety: { ...DEFAULT_SAFETY, forbiddenTools: [...P3_FORBIDDEN_TOOLS] },
+	},
+	researcher: {
+		name: "researcher",
+		description: "Deep multi-question investigation to a cited synthesis, including dead ends.",
+		source: "built-in",
+		tools: [...P3_READONLY_TOOLS],
+		prompt: `${COMMON_PROMPT}
+
+Role: Researcher. Pursue a multi-question investigation to a defensible, cited synthesis, including dead ends.
+Return sections: Question framing; Evidence; Synthesis; Confidence; Open threads.
+Do not stop at the first plausible answer or omit negative results.`,
+		context: [],
+		instructionsFile: "researcher.md",
+		inputContract: { ...DEFAULT_INPUT_CONTRACT },
+		outputContract: {
+			requiredSections: ["Question framing", "Evidence", "Synthesis", "Confidence", "Open threads"],
+			maxSummaryChars: DEFAULT_MAX_SUMMARY_CHARS,
+		},
+		evals: [{ id: "researcher-basic-contract", path: "agents/evals/researcher.eval.json", required: true }],
+		limits: { ...DEFAULT_LIMITS },
+		observability: { ...DEFAULT_OBSERVABILITY },
+		safety: { ...DEFAULT_SAFETY, forbiddenTools: [...P3_FORBIDDEN_TOOLS] },
+	},
+	"test-architect": {
+		name: "test-architect",
+		description: "Test design with literal assertions and negative controls; emits the Execution manifest for the test-executor seat.",
+		source: "built-in",
+		tools: [...P3_READONLY_TOOLS],
+		prompt: `${COMMON_PROMPT}
+
+Role: Test Architect. Design discriminating tests with literal assertions and negative controls; you never run them.
+Return sections: Test strategy; Test cases; Edge cases; Execution manifest; Coverage gaps.
+Do not run tests or edit files — the test-executor seat runs your Execution manifest.`,
+		context: [],
+		instructionsFile: "test-architect.md",
+		inputContract: { ...DEFAULT_INPUT_CONTRACT },
+		outputContract: {
+			requiredSections: ["Test strategy", "Test cases", "Edge cases", "Execution manifest", "Coverage gaps"],
+			maxSummaryChars: DEFAULT_MAX_SUMMARY_CHARS,
+		},
+		evals: [{ id: "test-architect-basic-contract", path: "agents/evals/test-architect.eval.json", required: true }],
 		limits: { ...DEFAULT_LIMITS },
 		observability: { ...DEFAULT_OBSERVABILITY },
 		safety: { ...DEFAULT_SAFETY, forbiddenTools: [...P3_FORBIDDEN_TOOLS] },

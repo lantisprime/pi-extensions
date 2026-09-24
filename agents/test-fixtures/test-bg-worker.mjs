@@ -37,7 +37,7 @@ function makeCtx(home) {
 	};
 }
 
-async function setupRegisteredUserAgent(home, name = "researcher") {
+async function setupRegisteredUserAgent(home, name = "reg-user") {
 	const userAgentsDir = path.join(home, ".pi", "agent", "agents");
 	await fs.mkdir(userAgentsDir, { recursive: true });
 	const specPath = path.join(userAgentsDir, `${name}.md`);
@@ -104,7 +104,7 @@ function fakeCompletedResult(name, task) {
 		assert.equal(result.version, 1);
 		assert.equal(result.runId, paths.runId);
 		assert.equal(result.status, "completed");
-		assert.equal(result.agentName, "researcher");
+		assert.equal(result.agentName, "reg-user");
 		assert.ok(result.resultText);
 
 		// Done sentinel exists
@@ -113,7 +113,7 @@ function fakeCompletedResult(name, task) {
 
 		// Runner was called exactly once with correct args
 		assert.equal(runnerCalls.length, 1);
-		assert.equal(runnerCalls[0].spec.name, "researcher");
+		assert.equal(runnerCalls[0].spec.name, "reg-user");
 		assert.equal(runnerCalls[0].task, "hello world");
 
 		// Run is listed as done
@@ -275,7 +275,7 @@ function fakeCompletedResult(name, task) {
 		await runBgWorker(paths.manifestPath, {
 			homeDir: home,
 			runner: async () => ({
-				agentName: "researcher",
+				agentName: "reg-user",
 				status: "completed",
 				exitCode: 0, signal: null, pid: 1, durationMs: 1, stdoutBytes: 0, stderrPreview: "",
 				invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin", stdinText: "x" } },

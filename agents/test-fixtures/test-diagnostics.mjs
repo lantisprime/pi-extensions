@@ -59,7 +59,7 @@ async function testListConfigRegistryAndInspect() {
 		assert.equal(registered.runnable, true);
 		assert.equal(registered.status, "warning");
 		assert.equal(registered.evalStatus, "missing");
-		assert.equal(diagnostics.summary.runnable, 4);
+		assert.equal(diagnostics.summary.runnable, 9);
 
 		assert.match(formatAgentsList(diagnostics), /registered-user \[user\] runnable-with-warnings/);
 		assert.match(formatAgentsConfig(diagnostics), /projectDiscovery: disabled until project trust is active/);

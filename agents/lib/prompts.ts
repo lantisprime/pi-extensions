@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-export const PROMPT_FILES = { scout: "scout.md", planner: "planner.md", reviewer: "reviewer.md" };
+export const PROMPT_FILES = { scout: "scout.md", planner: "planner.md", reviewer: "reviewer.md", architect: "architect.md", builder: "builder.md", orchestrator: "orchestrator.md", "test-architect": "test-architect.md", researcher: "researcher.md" };
 export const MAX_METHOD_BYTES = 6 * 1024;
 /** The only filenames the loader will ever read — never an arbitrary path. */
 const ALLOWED_FILES = new Set(Object.values(PROMPT_FILES));

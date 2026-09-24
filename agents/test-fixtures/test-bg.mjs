@@ -93,7 +93,7 @@ function makeCtx(home, extras = {}) {
 	};
 }
 
-async function setupRegisteredUserAgent(home, name = "researcher", body = "p") {
+async function setupRegisteredUserAgent(home, name = "reg-user", body = "p") {
 	const userAgentsDir = path.join(home, ".pi", "agent", "agents");
 	await fs.mkdir(userAgentsDir, { recursive: true });
 	const specPath = path.join(userAgentsDir, `${name}.md`);

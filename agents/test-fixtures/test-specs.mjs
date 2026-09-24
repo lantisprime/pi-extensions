@@ -36,7 +36,7 @@ function clone(value) {
 function testBuiltInSpecsAreValidAndOrdered() {
 	const specs = listBuiltInAgentSpecs();
 	assert.deepEqual(specs.map((spec) => spec.name), RESERVED_BUILT_IN_AGENT_NAMES);
-	assert.equal(specs.length, 3);
+	assert.equal(specs.length, 8);
 	assert.equal(validateBuiltInAgentSpecs().ok, true);
 
 	for (const spec of specs) {
