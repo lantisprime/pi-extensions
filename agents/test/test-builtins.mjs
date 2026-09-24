@@ -166,3 +166,32 @@ test("diagnosticsListAllBuiltins", () => {
 		assert.ok(text.includes(name), `formatAgentsConfig lists built-in ${name}`);
 	}
 });
+
+// ========== Group 5: charters (2) ==========
+
+test("executorCharterPresent", async () => {
+	// REQ-8: herdr-seat execution charter — allowlist + refuse rules required.
+	const text = await fs.readFile(path.join(import.meta.dirname, "../examples/charter-test-executor.md"), "utf8");
+	const lines = text.split("\n");
+	assert.ok(lines.length >= 40, `charter must be >= 40 lines, got ${lines.length}`);
+	assert.match(text, /## Allowlist/, "charter has an allowlist section");
+	assert.match(text, /node --test/, "allowlist names node --test");
+	assert.match(text, /run-\*\.sh/, "allowlist names repo run-*.sh runners");
+	assert.match(text, /npm test|pnpm test/, "allowlist names npm/pnpm test");
+	assert.match(text, /REFUSE/, "charter has the refuse-outside-manifest rule");
+	assert.match(text, /GREEN\|RED\|NOT-RUN/, "charter defines the per-entry report format");
+	assert.match(text, /Untrusted-data rule/, "charter carries the untrusted-data banner");
+});
+
+test("editExecutorCharterPresent", async () => {
+	// REQ-9: herdr-seat edit charter — allowlist + refuse + anchor rules.
+	const text = await fs.readFile(path.join(import.meta.dirname, "../examples/charter-edit-executor.md"), "utf8");
+	const lines = text.split("\n");
+	assert.ok(lines.length >= 40, `charter must be >= 40 lines, got ${lines.length}`);
+	assert.match(text, /## Allowlist/, "charter has an allowlist section");
+	assert.match(text, /ANCHOR/, "charter defines verbatim anchor matching");
+	assert.match(text, /REFUSE/, "charter has the refuse-and-report rule");
+	assert.match(text, /ANCHOR-NOT-FOUND\|SKIPPED/, "charter defines the per-entry report format");
+	assert.match(text, /Never search for a "close enough" location/, "charter forbids close-enough anchors");
+	assert.match(text, /Untrusted-data rule/, "charter carries the untrusted-data banner");
+});

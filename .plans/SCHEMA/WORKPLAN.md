@@ -116,3 +116,16 @@ REQ-A1 (operator priority).
 | 1 | tmux send.ts anchor L6 pointed at comment, not the cap check | Re-anchored to send L58-59 + constants.ts L7 |
 | 2 | REQ-A1 omitted parseBgArgs (bg mode uncovered in doc) | Added bg-args.ts L9 row |
 | 3 | REQ-B1/B2 tests passed on keyword presence (stub-passable) | Tightened to assert exact bound values |
+
+## Amendments
+
+- 2026-09-24 (SCHEMA1 landed, commits 16933b1/076735a): REQ-A1's "`agent`
+  (enum from built-ins + registry)" and "`profile` (enum from profile
+  library)" are refined to pattern-bounded strings + fail-closed runtime
+  resolution with an available-list error. Schemas are static; the registered
+  agent set and profile library are per-project and dynamic — an enum would go
+  stale silently. Recorded in SCHEMA1_AGENTS_RUN_PLAN.md "Design decision
+  resolved up front". Also landed with the slice: `chain` schema allows
+  maxItems 8 but the relay runtime enforces its documented MAX_CHAIN_LENGTH
+  cap of 3 (runtime strictly finer than schema is the invariant direction;
+  `agents_run` denies with the cap named).

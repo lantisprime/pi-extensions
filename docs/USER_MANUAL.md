@@ -467,7 +467,7 @@ herdr_spawn name=pi-herdr-fixer kind=pi task="Per .plans/AUTH/spec.md@9f3c21ab i
 
 **What happens step by step**
 
-1. `run_subagent` (scout/planner/reviewer) runs in an isolated child and its
+1. `run_subagent` (built-in or registered agent) runs in an isolated child and its
    findings are returned into the conversation as untrusted data.
 2. Monitors **push** their events into context; `bg`/herdr/taskboard must be
    **pulled** (`/agents bg-result`, `herdr_read`, `message_list`) — schedule the
@@ -949,7 +949,7 @@ is matched against the full id.
 
 ## Ephemeral one-shot agents
 
-**Goal**: Run a throwaway scout/planner/reviewer without registration.
+**Goal**: Run a throwaway agent cloned from any built-in base role (all eight) without registration.
 
 ### Quick codebase recon
 
@@ -1299,18 +1299,22 @@ monitor_threads stop name="api-log"
    `herdr_terminal`/tmux (long-lived process). One-shot → inline `bash`.
 2. **Mutation?** Write-capable → `herdr_spawn` (pi/claude/codex/… in a herdr
    pane; waits for real settle state `idle|done|blocked`).
-3. **Coupling?** Bounded + needed now → `run_subagent` (result auto-returns).
-   Decoupled → `/agents bg` (pull `/agents bg-result`) or herdr.
+3. **Coupling?** Bounded + needed now → `run_subagent` (result auto-returns),
+   or `agents_run` for schema-bounded `run`/`bg`/`chain` delegation. Decoupled
+   → `/agents bg` (pull `/agents bg-result`) or herdr.
 
 Read-only role picks: `scout` (recon), `planner` (staged plan), `reviewer`
-(adversarial verdict `go|conditional-go|no-go`); unsure → `/agents do` (LLM
-classifier); up to 3 stages → `/agents chain`.
+(adversarial verdict `go|conditional-go|no-go`), plus `architect`, `builder`,
+`orchestrator`, `researcher`, `test-architect` — full roster via
+`/agents built-ins`; unsure → `/agents do` (LLM classifier); up to 3 stages →
+`/agents chain` (or `agents_run` mode `chain`).
 
 ### Output contracts
 
 | Lane | Result reaches context |
 |---|---|
-| `run_subagent`, `/agents do`, `chain` | **Auto** — returned as tool result (untrusted framing) |
+| `run_subagent`, `agents_run` mode `run`/`chain`, `/agents do` | **Auto** — returned as tool result (untrusted framing) |
+| `agents_run` mode `bg` | **Pull** — `/agents bg-result <id>` (same plane as `/agents bg`) |
 | `monitor_threads` | **Push** — framed event wakes the session |
 | `/agents bg` | **Pull** — `/agents bg-result <id>` |
 | `herdr_spawn` / `herdr_read` | Semi-auto transcript on settle; read later on demand |
