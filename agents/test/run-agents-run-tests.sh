@@ -7,6 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 node --test test/test-agents-run-tool.mjs
+node --test test/test-agents-run-wiring.mjs
 
 # Negative control: with BREAK_VALIDATE=1 the test asserts a known-valid input
 # is rejected — on correct validation code this must exit non-zero.

@@ -25,6 +25,7 @@ import { disposeBackgroundRuns } from "./lib/bg-run.ts";
 import { createBgWakeWatcher, type BgWakeSend } from "./lib/bg-wake.ts";
 import { validateBuiltInAgentSpecs } from "./lib/specs.ts";
 import { registerSubagentTool } from "./lib/subagent-tool.ts";
+import { registerAgentsRunTool } from "./lib/agents-run-tool.ts";
 import { preflightBgAgent } from "./lib/bg-preflight.ts";
 import { getBgTerminalBackend, getBgTerminalBackendByName, listBgTerminalBackends, selectBgTerminalBackend } from "./lib/bg-terminal.ts";
 import { parseBgArgs } from "./lib/bg-args.ts";
@@ -172,6 +173,16 @@ export default function agentsExtension(pi: ExtensionAPI) {
 	});
 
 	registerSubagentTool(pi, () => sessionAgentsCtx);
+	registerAgentsRunTool(pi, () => sessionAgentsCtx, {
+		// Parity with /agents bg: refresh the bg status line + polling after
+		// every tool-driven bg launch outcome (focused-review blocker B3).
+		onBgSettled: async () => {
+			const c = sessionAgentsCtx;
+			if (!c) return;
+			await updateBgStatusLine(c);
+			ensureBgStatusPolling(c);
+		},
+	});
 
 	pi.registerCommand("agents", {
 		description: "Show P3 agent diagnostics and run built-in or registered agents",

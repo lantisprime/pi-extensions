@@ -242,3 +242,274 @@ export function buildAgentsRunToolDefinition() {
 		},
 	};
 }
+
+// --- Execution wiring (SCHEMA1-B) ---
+
+// Focused review (2026-09-24, reviewer subagent) resolved before build:
+//  - tool ctx forces hasUI:false so mode "run" always takes the inline
+//    dispatchChildRun path (UI widget path returns before the child settles,
+//    which would make abort-race + tool-result semantics meaningless);
+//  - the raced exec promise gets a .catch tail so a post-abort rejection
+//    (e.g. bg manifest write) cannot become an UnhandledPromiseRejection;
+//  - bg launch mirrors handleBgCommand (index.ts) including the status-line
+//    refresh on BOTH outcomes via the onBgSettled hook (lib cannot import
+//    index.ts — cycle), and the failure-cleanup writeBgResult+markBgRunDone;
+//  - diagnosticsLoader is a seam (default real collectAgentDiagnostics) so
+//    wiring tests can fake registered-agent discovery (AGENTS.md rule 4).
+import type { AgentsContextLike } from "./run-resolver.ts";
+import { dispatchChildRun, resolveRegisteredRunTarget, runResolvedTarget } from "./run-resolver.ts";
+import { collectAgentDiagnostics, type AgentDiagnostics } from "./diagnostics.ts";
+import { isReservedBuiltInAgentName } from "./specs.ts";
+import { getBgTerminalBackendByName, listBgTerminalBackends, type TermBgBackend } from "./bg-terminal.ts";
+import { preflightBgAgent } from "./bg-preflight.ts";
+import { preflightChain, runChain, MAX_CHAIN_LENGTH } from "./chain-runner.ts";
+import { markBgRunDone, updateBgReservationOwner, writeBgResult } from "./bg-state.ts";
+import type { ChildAgentRunner } from "./child-runner.ts";
+
+export type AgentsRunDetails = {
+	mode: AgentsRunMode;
+	agent: string;
+	runId?: string;
+	backend?: string;
+};
+
+export type AgentsRunOutcome =
+	| { ok: true; text: string; details: AgentsRunDetails; isError: false }
+	| { ok: false; text: string; code: string; details: AgentsRunDetails; isError: true };
+
+function denyOutcome(details: AgentsRunDetails, code: string, reason: string, nextStep?: string): AgentsRunOutcome {
+	return {
+		ok: false,
+		code,
+		text: nextStep ? `agents_run denied: ${reason} Next: ${nextStep}` : `agents_run denied: ${reason}`,
+		details,
+		isError: true,
+	};
+}
+
+function notReadyOutcome(details: AgentsRunDetails): AgentsRunOutcome {
+	return denyOutcome(details, "not-ready", "session context not ready; tool called before session_start or session is uninitialized");
+}
+
+/** Injectable seams for wiring tests. Every field optional; when absent the
+ *  production path is used unchanged. (Plan names three seams; the focused
+ *  review committed two more: backendByName — bg launch is untestable without
+ *  it — and diagnosticsLoader, per AGENTS.md rule 4.) */
+export type AgentsRunSeams = {
+	/** Forwarded into the AgentsContextLike (run + chain modes). */
+	childRunner?: ChildAgentRunner;
+	/** bg mode preflight (default: real preflightBgAgent). */
+	bgPreflight?: typeof preflightBgAgent;
+	/** chain mode runner (default: real runChain). */
+	chainRunner?: typeof runChain;
+	/** bg backend lookup (default: real getBgTerminalBackendByName). */
+	backendByName?: (name: string) => TermBgBackend | undefined;
+	/** Discovery loader (default: real collectAgentDiagnostics). */
+	diagnosticsLoader?: typeof collectAgentDiagnostics;
+	/** Called after every bg launch outcome (success or failure). index.ts
+	 *  wires this to updateBgStatusLine + ensureBgStatusPolling for parity
+	 *  with /agents bg; default no-op. */
+	onBgSettled?: (ctx: AgentsContextLike) => Promise<void> | void;
+};
+
+function availableAgentsList(diagnostics: AgentDiagnostics): string {
+	const names = diagnostics.records.map((r) => `${r.name} [${r.source}]`);
+	return names.length > 0 ? names.join(", ") : "(none discovered)";
+}
+
+// --- Core execution (REQ-3/4/5) ---
+
+export async function executeAgentsRun(
+	validated: Extract<ValidatedAgentsRun, { ok: true }>,
+	runCtx: AgentsContextLike,
+	diagnostics: AgentDiagnostics,
+	seams: AgentsRunSeams = {},
+	signal?: AbortSignal,
+): Promise<AgentsRunOutcome> {
+	const details: AgentsRunDetails = { mode: validated.mode, agent: validated.agent };
+	const timeoutMs = validated.timeout_s !== undefined ? validated.timeout_s * 1000 : undefined;
+
+	// Abort discipline (plan blocker-3): deny before starting, and race the
+	// exec against an abort listener so a mid-flight abort settles the tool
+	// call with code "aborted". The raced promise gets a catch tail (review
+	// blocker B2) so a late rejection cannot surface as unhandled.
+	if (signal?.aborted) {
+		return denyOutcome(details, "aborted", "aborted before the delegation started");
+	}
+
+	const exec = (async (): Promise<AgentsRunOutcome> => {
+		if (validated.mode === "run") {
+			if (isReservedBuiltInAgentName(validated.agent)) {
+				await dispatchChildRun(validated.agent, validated.task, runCtx, "built-in", validated.profile, timeoutMs);
+				return {
+					ok: true,
+					text: `Delegated to built-in agent '${validated.agent}'. The child's findings are delivered to the session (notify + conversation injection).`,
+					details,
+					isError: false,
+				};
+			}
+			const resolved = await resolveRegisteredRunTarget(validated.agent, diagnostics);
+			if (!resolved.ok) {
+				return denyOutcome(details, "unknown-agent", resolved.message, `available: ${availableAgentsList(diagnostics)}`);
+			}
+			await runResolvedTarget(resolved.record, validated.task, runCtx, diagnostics, validated.profile, timeoutMs);
+			return {
+				ok: true,
+				text: `Delegated to registered agent '${validated.agent}'. The child's findings are delivered to the session (notify + conversation injection).`,
+				details,
+				isError: false,
+			};
+		}
+
+		if (validated.mode === "bg") {
+			// Registered-only parity: resolveRegisteredRunTarget filters
+			// source !== "built-in", so /agents bg scout denies today — the
+			// tool denies the same shape explicitly (REQ-4, EC10).
+			if (isReservedBuiltInAgentName(validated.agent)) {
+				return denyOutcome(details, "invalid-input", "bg mode supports registered agents only (built-ins run synchronously in run mode)");
+			}
+			const backend = seams.backendByName ? seams.backendByName(validated.backend ?? "") : getBgTerminalBackendByName(validated.backend ?? "");
+			if (!backend) {
+				const registered = listBgTerminalBackends().map((b) => b.name);
+				return denyOutcome(details, "unknown-backend", `unknown backend '${validated.backend ?? ""}'`, `registered backends: ${registered.join(", ") || "(none)"}`);
+			}
+			const resolved = await resolveRegisteredRunTarget(validated.agent, diagnostics);
+			if (!resolved.ok) {
+				return denyOutcome(details, "unknown-agent", resolved.message, `available: ${availableAgentsList(diagnostics)}`);
+			}
+			const preflight = seams.bgPreflight
+				? await seams.bgPreflight(resolved.record, validated.task, runCtx, diagnostics, {
+						...(validated.profile !== undefined ? { profileOverride: validated.profile } : {}),
+						...(validated.timeout_s !== undefined ? { maxDurationSec: validated.timeout_s } : {}),
+					})
+				: await preflightBgAgent(resolved.record, validated.task, runCtx, diagnostics, {
+						...(validated.profile !== undefined ? { profileOverride: validated.profile } : {}),
+						...(validated.timeout_s !== undefined ? { maxDurationSec: validated.timeout_s } : {}),
+					});
+			if (!preflight.ok) {
+				return denyOutcome(details, preflight.code, preflight.reason);
+			}
+			const launch = await backend.launch({
+				agentName: resolved.record.name ?? resolved.record.filePath,
+				runId: preflight.runId,
+				manifestPath: preflight.paths.manifestPath,
+				cwd: runCtx.cwd ?? process.cwd(),
+			});
+			if (launch.status === "failed") {
+				// Parity with handleBgCommand: free the reservation + manifest so
+				// the slot does not wait for the stale-reaper.
+				try {
+					await writeBgResult(preflight.paths, { version: 1, runId: preflight.runId, status: "failed", error: launch.error ?? "unknown launch error" });
+					await markBgRunDone(preflight.paths);
+				} catch { /* best-effort; the reaper will catch it on next session */ }
+				await seams.onBgSettled?.(runCtx);
+				return denyOutcome(details, "spawn-error", `launch failed via ${backend.name}: ${launch.error ?? "unknown error"}`);
+			}
+			if (launch.windowId) {
+				try {
+					await updateBgReservationOwner(preflight.paths, {
+						ownerHandle: launch.windowId,
+						ownerBackendName: backend.name,
+					});
+				} catch { /* best-effort; age-only fallback is acceptable */ }
+			}
+			await seams.onBgSettled?.(runCtx);
+			return {
+				ok: true,
+				text: `Background agent '${validated.agent}' running (${preflight.runId.slice(0, 16)}…) via ${backend.name}. Track with /agents bg-status.`,
+				details: { ...details, runId: preflight.runId, backend: backend.name },
+				isError: false,
+			};
+		}
+
+		// mode "chain". Runtime is strictly finer than the schema (maxItems 8):
+		// the chain runner documents a hard cap of MAX_CHAIN_LENGTH (3) —
+		// enforce it here because we bypass parseChainArgs (array input).
+		if (validated.chain && validated.chain.length > MAX_CHAIN_LENGTH) {
+			return denyOutcome(details, "invalid-input", `chain length capped at ${MAX_CHAIN_LENGTH} agents (schema allows up to 8; the runner relay caps at ${MAX_CHAIN_LENGTH})`);
+		}
+		const names = validated.chain ?? [];
+		const preflight = await preflightChain(names, diagnostics);
+		if (!preflight.ok) {
+			return denyOutcome(details, preflight.code, preflight.message, preflight.nextStep);
+		}
+		const chainCtx = {
+			cwd: runCtx.cwd,
+			agentsPiCommand: runCtx.agentsPiCommand,
+			agentsChildRunner: runCtx.agentsChildRunner,
+			explicitToolContextLoaderPath: runCtx.explicitToolContextLoaderPath,
+			profileLibrary: runCtx.profileLibrary,
+		};
+		const outcome = seams.chainRunner
+			? await seams.chainRunner(preflight.resolved, validated.task, chainCtx)
+			: await runChain(preflight.resolved, validated.task, chainCtx);
+		if (!outcome.ok) {
+			return denyOutcome(details, outcome.code, outcome.message, outcome.nextStep);
+		}
+		const failed = outcome.results.filter((s) => s.status !== "completed");
+		return {
+			ok: failed.length === 0,
+			text: failed.length === 0
+				? `Chain completed: ${names.join(" → ")}.`
+				: `Chain finished with ${failed.length}/${outcome.results.length} failed step(s): ${failed.map((s) => s.agentName).join(", ")}.`,
+			details,
+			isError: failed.length > 0,
+		};
+	})();
+
+	const abortPromise = new Promise<AgentsRunOutcome>((resolve) => {
+		signal?.addEventListener("abort", () => resolve(denyOutcome(details, "aborted", "aborted before the delegation completed")), { once: true });
+	});
+	exec.catch(() => {}); // review blocker B2: swallow the post-abort tail
+	const raced = await Promise.race([exec, abortPromise]);
+	return raced;
+}
+
+// --- Tool registration (mirrors registerSubagentTool) ---
+
+export function registerAgentsRunTool(pi: import("@earendil-works/pi-coding-agent").ExtensionAPI, sessionCtxRef: () => AgentsContextLike | undefined, seams: AgentsRunSeams = {}): void {
+	const definition = buildAgentsRunToolDefinition() as unknown as Parameters<import("@earendil-works/pi-coding-agent").ExtensionAPI["registerTool"]>[0];
+	pi.registerTool({
+		...definition,
+		async execute(_toolCallId, params, signal, _onUpdate, extensionCtx) {
+			const input = validateAgentsRunInput(params);
+			const fallbackDetails: AgentsRunDetails = { mode: "run", agent: "(missing)" };
+			if (!input.ok) {
+				const outcome = denyOutcome(fallbackDetails, "invalid-input", input.reason);
+				return { content: [{ type: "text", text: outcome.text }], details: { ...outcome.details, code: outcome.code }, isError: outcome.isError };
+			}
+
+			// Fail closed if session context not yet captured (REQ-5).
+			const sessionCtx = sessionCtxRef();
+			if (!sessionCtx) {
+				const outcome = notReadyOutcome({ mode: input.mode, agent: input.agent });
+				return { content: [{ type: "text", text: outcome.text }], details: { ...outcome.details, code: outcome.code }, isError: outcome.isError };
+			}
+
+			const loader = seams.diagnosticsLoader ?? collectAgentDiagnostics;
+			const diagnostics = await loader({
+				cwd: extensionCtx.cwd,
+				homeDir: sessionCtx.agentsHomeDir,
+				projectTrusted: extensionCtx.isProjectTrusted(),
+			});
+
+			// hasUI:false (review blocker B1): the tool awaits the inline
+			// dispatch path so completion + abort semantics are deterministic.
+			const runCtx: AgentsContextLike = {
+				...sessionCtx,
+				cwd: extensionCtx.cwd,
+				hasUI: false,
+				projectTrusted: extensionCtx.isProjectTrusted(),
+				...(seams.childRunner ? { agentsChildRunner: seams.childRunner } : {}),
+			};
+
+			const outcome = await executeAgentsRun(input, runCtx, diagnostics, seams, signal ?? undefined);
+			return {
+				content: [{ type: "text", text: outcome.text }],
+				// Deny code surfaces in details so the caller can branch on it.
+				details: outcome.ok ? outcome.details : { ...outcome.details, code: outcome.code },
+				isError: outcome.isError,
+			};
+		},
+	});
+}
