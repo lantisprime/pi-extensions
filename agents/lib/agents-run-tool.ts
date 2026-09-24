@@ -195,7 +195,7 @@ export function buildAgentsRunToolDefinition() {
 				agent: {
 					type: "string",
 					pattern: "^[A-Za-z][A-Za-z0-9._-]{0,127}$",
-					description: "Built-in agent name (e.g. scout, planner, reviewer) or a registered user/project agent name.",
+					description: "Built-in agent name (discover with /agents built-ins) or a registered user/project agent name.",
 				},
 				task: {
 					type: "string",

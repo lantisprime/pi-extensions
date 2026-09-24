@@ -7,7 +7,7 @@ import os from "node:os";
 import { buildChildPiArgs, getPiInvocation, type ChildPiArgsOptions, type ChildPiInvocation } from "./child-args.ts";
 import { loadAgentMethod, methodFileForSpec } from "./prompts.ts";
 import { reduceChildJsonl, type ChildJsonlSummary } from "./jsonl-monitor.ts";
-import { getBuiltInAgentSpec, isReservedBuiltInAgentName, type AgentSpec } from "./specs.ts";
+import { getBuiltInAgentSpec, isReservedBuiltInAgentName, RESERVED_BUILT_IN_AGENT_NAMES, type AgentSpec } from "./specs.ts";
 import { resolveSpecProfile, type ModelProfileLibrary } from "./profiles.ts";
 import { profileTrustCheck } from "./profile-discovery.ts";
 import type { ProjectAgentRegistry } from "./registry.ts";
@@ -82,7 +82,7 @@ const DEFAULT_KILL_SIGNAL: NodeJS.Signals = "SIGTERM";
 const DEFAULT_FORCE_KILL_AFTER_MS = 1_000;
 
 export async function runBuiltInChildAgent(agentName: string, task: string, options: RunBuiltInChildAgentOptions = {}, profiles?: ModelProfileLibrary, profileOverride?: string): Promise<ChildAgentRunResult> {
-	if (!isReservedBuiltInAgentName(agentName)) throw new Error(`P3c-2 only supports built-in agents: scout, planner, reviewer`);
+	if (!isReservedBuiltInAgentName(agentName)) throw new Error(`P3c-2 only supports built-in agents: ${RESERVED_BUILT_IN_AGENT_NAMES.join(", ")}`);
 	const spec = getBuiltInAgentSpec(agentName);
 	if (!spec || spec.source !== "built-in") throw new Error(`built-in agent '${agentName}' was not found`);
 	return runChildAgent(spec, task, options, profiles, profileOverride);

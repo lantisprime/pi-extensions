@@ -16,7 +16,7 @@ import {
 	type ProjectAgentRegistry,
 	type RegisteredAgent,
 } from "./registry.ts";
-import { listBuiltInAgentSpecs, type AgentSource, type AgentSpec, type AgentValidationIssue } from "./specs.ts";
+import { listBuiltInAgentSpecs, RESERVED_BUILT_IN_AGENT_NAMES, type AgentSource, type AgentSpec, type AgentValidationIssue } from "./specs.ts";
 import type { RiskLevel } from "./security-scan.ts";
 import { BUILT_IN_PROFILES } from "./profiles.ts";
 import { type IntentCandidate } from "./intent-router.ts";
@@ -156,7 +156,7 @@ export function formatAgentsConfig(diagnostics: AgentDiagnostics): string {
 		`userRegistry: ${diagnostics.userRegistryPath}`,
 		`projectRegistry: ${diagnostics.projectRegistryPath}`,
 		`projectRegistryRoot: ${diagnostics.projectRegistryRootOk ? "ok" : `mismatch (${diagnostics.projectRegistryRootIssues.join(", ")})`}`,
-		"Child execution: /agents run scout|planner|reviewer <task> or /agents run <registered-user-or-project-agent> <task>",
+		`Child execution: /agents run ${RESERVED_BUILT_IN_AGENT_NAMES.join("|")} <task> or /agents run <registered-user-or-project-agent> <task>`,
 		"Registered user/project execution requires exact-hash registration and the runtime canRunAgent gate.",
 	]);
 }
