@@ -60,3 +60,18 @@ AC-9 telemetry purity matches harness share ±1 token.
 AC-10 soft excess sets ⚠(queued), no compact that turn; exactly one compact next turn iff purity still ≥ budget.
 AC-11 hard excess compacts same turn with locked customInstructions; cooldown suppresses repeats; next assistant message skips cache-loss attribution (B6).
 AC-12 task-switch apply re-scores ≤30 spans via ONE fetch; degraded updates heuristically; pendingScores resolve before turn_end metrics.
+
+## Amendments
+
+### 2026 (CTX-FIX): M3 compact trigger gains a token floor
+
+AC-10/AC-11 assumed a compact call succeeds once cooldown clears. Proven wrong
+in the field: on small sessions pi rejects with "Compaction failed: Nothing to
+compact (session too small)", surfacing the raw error to the user.
+`triggerCompact` now additionally returns false when `st.lastPromptTokens` is a
+positive measurement below `COMPACT_MIN_TOKENS = 24_000` — the same effective
+floor smart-compaction enforces (smart-compaction/lib/engine.ts:167; pi
+keepRecent ≈ 20k + margin). Fail-open when tokens are unknown (AC-21 spirit).
+On skip: no ledger mutation, no cooldown start; purity excess re-evaluates next
+turn and self-resolves as the session grows. Regression wiring test:
+`context-manager/test/compact-floor.wiring.test.ts`.
