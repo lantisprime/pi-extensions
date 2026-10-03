@@ -53,6 +53,11 @@ export interface EngineState {
 	lastTurnTokens: number | null;
 	/** Turns since the last compaction of ANY origin (pi's or ours). */
 	turnsSinceCompaction: number;
+	/**
+	 * Context size immediately before the last successful compaction, or null if
+	 * none has happened this session. Drives the post-compaction growth gap.
+	 */
+	lastCompactionTokens: number | null;
 	/** pi's most recent cache-warming decision. */
 	recentWarm: { at: number; continuationProbability: number } | null;
 	turnCounter: number;
@@ -66,6 +71,7 @@ export function initState(): EngineState {
 		growthPerTurn: null,
 		lastTurnTokens: null,
 		turnsSinceCompaction: 0,
+		lastCompactionTokens: null,
 		recentWarm: null,
 		turnCounter: 0,
 	};
@@ -163,10 +169,41 @@ export function evaluateEconomy(input: EvalInput): Decision {
 		return { kind: "none", why: `min-interval (${state.turnsSinceCompaction}/${minInterval})` };
 	}
 	// Effective floor respects pi's keepRecent budget: a context below keep+margin
-	// has nothing to summarize (pi fails with "session too small").
-	const effectiveFloor = Math.max(profile.compaction.tokenFloor, 24_000);
+	// has nothing to summarize (pi fails with "session too small"). The window
+	// fraction keeps a flat tokenFloor from firing on a large context window.
+	const windowFloor = profile.compaction.floorFraction ? window * profile.compaction.floorFraction : 0;
+	const keepRecentFloor = 24_000;
+	const effectiveFloor = Math.max(profile.compaction.tokenFloor, windowFloor, keepRecentFloor);
 	if (tokens < effectiveFloor) {
-		return { kind: "none", why: `below tokenFloor (${tokens} < ${effectiveFloor})` };
+		// Name the binding constraint, not merely the first one in the max: a
+		// keepRecentFloor of 24k outranks a smaller tokenFloor, and reporting
+		// "tokenFloor" there sent live debugging after a setting that was not
+		// actually in force.
+		const driver =
+			windowFloor >= effectiveFloor ? "window-floor" : keepRecentFloor >= effectiveFloor ? "keepRecent floor" : "tokenFloor";
+		return { kind: "none", why: `below ${driver} (${tokens} < ${Math.round(effectiveFloor)})` };
+	}
+
+	// Post-compaction gap. A compaction that barely shrank the context leaves the
+	// floor satisfied almost immediately, so without this the economy path
+	// re-compacts the same material every few turns for near-zero net saving.
+	// Opt-in at the engine level: a profile that does not set minGapTokens gets
+	// no gap guard. Note GENERIC_PROFILE is the merge *base* for every profile
+	// (mergeProfile), so an unset value normally arrives as GENERIC's default
+	// rather than undefined; a profile opts out by setting minGapTokens: 0.
+	const minGap = profile.compaction.minGapTokens ?? 0;
+	// A watermark at or beyond pi's overflow line can never be regrown past, so
+	// it must not be allowed to silence the economy path for the rest of the
+	// session. Treat it as "no gap recorded".
+	const overflowLine = window - (config.reserveTokens ?? 0);
+	const gapFrom = state.lastCompactionTokens != null && state.lastCompactionTokens < overflowLine
+		? state.lastCompactionTokens
+		: null;
+	if (minGap > 0 && gapFrom != null && tokens < gapFrom + minGap) {
+		return {
+			kind: "none",
+			why: `post-compaction gap (${tokens} < ${gapFrom} + ${minGap})`,
+		};
 	}
 
 	// quality mode: fixed line at settled time, cache math skipped (AC-5 vacuous).

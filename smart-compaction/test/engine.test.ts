@@ -79,6 +79,185 @@ test("AC-8: guards — null usage, stale tokens, min-interval, tokenFloor", () =
 	assert.ok((dFloor as { why: string }).why.includes("tokenFloor"));
 });
 
+test("economy floor scales with the context window, not just a flat token count", () => {
+	// baseline recipe that the suite already proves selects a compaction
+	const mk = (over?: Partial<EvalInput>) => {
+		const input = baseInput(over);
+		input.state.turnsSinceCompaction = 10;
+		input.state.growthPerTurn = 5_000;
+		return input;
+	};
+
+	// No floorFraction: unchanged behaviour.
+	assert.equal(evaluateEconomy(mk()).kind, "economy");
+
+	// 0.4 of a 1M window is a 419k floor, so 250k must NOT compact. A flat 40k
+	// floor would have let this through.
+	const strict = mk();
+	strict.profile.compaction.floorFraction = 0.4;
+	const dStrict = evaluateEconomy(strict);
+	assert.equal(dStrict.kind, "none");
+	assert.ok((dStrict as { why: string }).why.includes("window-floor"));
+
+	// 0.2 of a 1M window is a 209k floor, which 250k clears.
+	const loose = mk();
+	loose.profile.compaction.floorFraction = 0.2;
+	assert.equal(evaluateEconomy(loose).kind, "economy");
+
+	// Relative, not absolute: 0.4 of a 200k window is an 80k floor, so 60k is
+	// held back there too.
+	const smallWindow = mk({ usage: { tokens: 60_000, contextWindow: 200_000 } });
+	smallWindow.profile.compaction.floorFraction = 0.4;
+	const dSmall = evaluateEconomy(smallWindow);
+	assert.equal(dSmall.kind, "none");
+	assert.ok((dSmall as { why: string }).why.includes("window-floor"));
+});
+
+test("post-compaction gap stops near-zero-savings recompaction churn", () => {
+	const mk = (lastCompactionTokens: number | null) => {
+		const input = baseInput();
+		input.state.turnsSinceCompaction = 10;
+		input.state.growthPerTurn = 5_000;
+		input.profile.compaction.minGapTokens = 20_000;
+		input.state.lastCompactionTokens = lastCompactionTokens;
+		return evaluateEconomy(input);
+	};
+
+	// Nothing compacted yet this session → guard is vacuous.
+	assert.equal(mk(null).kind, "economy");
+
+	// Compacted at 245k, context is 250k — only 5k of regrowth, so wait.
+	const inGap = mk(245_000);
+	assert.equal(inGap.kind, "none");
+	assert.ok((inGap as { why: string }).why.includes("post-compaction gap"));
+
+	// Regrown 50k past the last compaction → proceeds.
+	assert.equal(mk(200_000).kind, "economy");
+
+	// The churn case: the context is smaller than it was when last compacted, so
+	// re-compacting it would reclaim almost nothing.
+	assert.equal(mk(300_000).kind, "none");
+
+	// Inert when minGapTokens is unset → pre-existing behaviour preserved.
+	const noGap = baseInput();
+	noGap.state.turnsSinceCompaction = 10;
+	noGap.state.growthPerTurn = 5_000;
+	noGap.state.lastCompactionTokens = 300_000;
+	assert.equal(evaluateEconomy(noGap).kind, "economy");
+
+	// Never a permanent wedge: a watermark at or beyond pi's overflow line
+	// (window - reserveTokens) can never be regrown past, so it must be ignored
+	// rather than silencing economy for the rest of the session. config here is
+	// the baseInput default, reserveTokens 16_384, so the line is 1_032_192.
+	const atOverflow = baseInput();
+	atOverflow.state.turnsSinceCompaction = 10;
+	atOverflow.state.growthPerTurn = 5_000;
+	atOverflow.profile.compaction.minGapTokens = 20_000;
+	atOverflow.state.lastCompactionTokens = 1_032_192;
+	assert.equal(evaluateEconomy(atOverflow).kind, "economy");
+});
+
+test("tokenFloor still blocks in the band the window fraction does not cover", () => {
+	// 30k sits above the 24k keepRecent minimum but below a 40k tokenFloor, and
+	// no floorFraction is set. Without tokenFloor in the max this would compact.
+	const input = baseInput({ usage: { tokens: 30_000, contextWindow: 1_048_576 } });
+	input.state.turnsSinceCompaction = 10;
+	input.state.growthPerTurn = 5_000;
+	assert.equal(input.profile.compaction.floorFraction, undefined);
+	const d = evaluateEconomy(input);
+	assert.equal(d.kind, "none");
+	assert.ok((d as { why: string }).why.includes("tokenFloor"));
+});
+
+test("the shipped generic profile actually stops the observed compaction treadmill", () => {
+	// Production shape: an unmatched model falls through to GENERIC_PROFILE, and
+	// observed sessions compacted repeatedly at 44k-61k on a 200k window. Resolve
+	// the profile the way the extension does, so the merge path (GENERIC is the
+	// base for every profile, not just a fallback) is covered too.
+	const resolved = resolveProfile("litellm", "minimax-m3.1-flash-preview", loadConfig());
+	const profile = "profile" in resolved ? resolved.profile : resolved;
+	assert.equal(profile.compaction.floorFraction, 0.15);
+	assert.equal(profile.compaction.minGapTokens, 20_000);
+
+	// floorFraction 0.15 only binds when window × 0.15 > tokenFloor, i.e. above
+	// ~267k. On a 200k window it is deliberately inert (windowFloor 30k <
+	// tokenFloor 40k), so the floor is NOT what refuses the treadmill there.
+	assert.ok(200_000 * 0.15 < profile.compaction.tokenFloor);
+
+	// Every context size observed in the treadmill must still decline. The
+	// refusal on a 200k window now comes from the savings guard rather than the
+	// floor, so assert the outcome, not the mechanism.
+	for (const tokens of [44_740, 46_479, 58_691, 60_472, 61_223]) {
+		const input = baseInput({ usage: { tokens, contextWindow: 200_000 } });
+		input.profile = profile;
+		input.state.turnsSinceCompaction = 50; // far past any min-interval
+		input.state.growthPerTurn = 5_000;
+		const d = evaluateEconomy(input);
+		assert.equal(d.kind, "none", `${tokens} tokens on a 200k window should not compact`);
+		assert.ok(
+			(d as { why: string }).why.includes("savings"),
+			`${tokens} on a 200k window should refuse on savings, got: ${(d as { why: string }).why}`,
+		);
+	}
+
+	// The refusal must not depend on the favourable test prices. Live runtime
+	// reports cacheRead 0 for this model, which zeroes hot-cache savings; the
+	// treadmill sizes must still decline on those prices too.
+	for (const tokens of [44_740, 60_472, 98_263]) {
+		const input = baseInput({ usage: { tokens, contextWindow: 200_000 } });
+		input.profile = profile;
+		input.prices = { ...P2, cacheRead: 0 };
+		input.state.turnsSinceCompaction = 50;
+		input.state.growthPerTurn = 5_000;
+		assert.equal(
+			evaluateEconomy(input).kind,
+			"none",
+			`${tokens} must not compact even with cacheRead 0`,
+		);
+	}
+
+	// A context that genuinely needs reclaiming still compacts.
+	const big = baseInput({ usage: { tokens: 180_000, contextWindow: 200_000 } });
+	big.profile = profile;
+	big.state.turnsSinceCompaction = 50;
+	big.state.growthPerTurn = 5_000;
+	assert.equal(evaluateEconomy(big).kind, "economy");
+});
+
+test("floorFraction 0.15 binds above ~267k and blocks the treadmill on a 1M window", () => {
+	// The live production shape: a 1M window is where the window floor actually
+	// engages, and where the 44k-98k treadmill was observed.
+	const resolved = resolveProfile("litellm", "minimax-m3.1-flash-preview", loadConfig());
+	const profile = "profile" in resolved ? resolved.profile : resolved;
+
+	// 0.15 × 1,048,576 ≈ 157,286, which is above the flat 40k floor, so here the
+	// window floor is the binding constraint.
+	assert.equal(Math.round(1_048_576 * 0.15), 157_286);
+
+	for (const tokens of [44_740, 46_479, 58_691, 60_472, 61_223, 98_263]) {
+		const input = baseInput({ usage: { tokens, contextWindow: 1_048_576 } });
+		input.profile = profile;
+		input.state.turnsSinceCompaction = 50;
+		input.state.growthPerTurn = 5_000;
+		const d = evaluateEconomy(input);
+		assert.equal(d.kind, "none", `${tokens} on a 1M window should not compact`);
+		assert.ok(
+			(d as { why: string }).why.includes("window-floor"),
+			`${tokens} should be refused by the window floor, got: ${(d as { why: string }).why}`,
+		);
+	}
+
+	// Well past the floor the floor stops being the objection, so a genuinely
+	// large session is not blocked by it.
+	const big = baseInput({ usage: { tokens: 250_000, contextWindow: 1_048_576 } });
+	big.profile = profile;
+	big.state.turnsSinceCompaction = 50;
+	big.state.growthPerTurn = 5_000;
+	const d = evaluateEconomy(big);
+	assert.notEqual(d.kind, "none");
+	assert.ok(!(d as { why?: string }).why?.includes("window-floor"));
+});
+
 test("AC-5: cache hot/cold detection", () => {
 	const hot = baseInput();
 	hot.state.lastLLMCallAt = 1_000_000 - 60_000; // 60s ago < 300s TTL
@@ -347,4 +526,33 @@ test("part-2 gap: evaluateWarnings no-usage / tokens-stale; isCacheHot ttl<=0", 
 	zeroTtl.state.lastLLMCallAt = 999_999;
 	zeroTtl.state.cacheModelKey = "test/model";
 	assert.equal(isCacheHot(zeroTtl), false);
+});
+
+test("floor guard names the constraint that is actually binding", () => {
+	// Live finding: with tokenFloor 2000, floorFraction 0 and a 1M window the
+	// binding floor is the 24k keepRecent minimum, but the why-string said
+	// "tokenFloor" — sending debugging after a setting that was not in force.
+	const keepRecent = baseInput({ usage: { tokens: 932, contextWindow: 1_048_576 } });
+	keepRecent.state.turnsSinceCompaction = 10;
+	keepRecent.state.growthPerTurn = 5_000;
+	keepRecent.profile.compaction.tokenFloor = 2_000;
+	keepRecent.profile.compaction.floorFraction = 0;
+	const d = evaluateEconomy(keepRecent);
+	assert.equal(d.kind, "none");
+	assert.equal((d as { why: string }).why, "below keepRecent floor (932 < 24000)");
+
+	// Each constraint must be able to win the label in turn.
+	const win = baseInput({ usage: { tokens: 30_000, contextWindow: 1_048_576 } });
+	win.state.turnsSinceCompaction = 10;
+	win.state.growthPerTurn = 5_000;
+	win.profile.compaction.tokenFloor = 40_000;
+	win.profile.compaction.floorFraction = 0;
+	assert.match((evaluateEconomy(win) as { why: string }).why, /^below tokenFloor /);
+
+	const frac = baseInput({ usage: { tokens: 60_000, contextWindow: 1_048_576 } });
+	frac.state.turnsSinceCompaction = 10;
+	frac.state.growthPerTurn = 5_000;
+	frac.profile.compaction.tokenFloor = 40_000;
+	frac.profile.compaction.floorFraction = 0.5;
+	assert.match((evaluateEconomy(frac) as { why: string }).why, /^below window-floor /);
 });

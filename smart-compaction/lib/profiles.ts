@@ -52,6 +52,27 @@ export interface Profile {
 	compaction: {
 		/** Never compact below this context size. */
 		tokenFloor: number;
+		/**
+		 * Floor as a fraction of the live context window. The effective floor is
+		 * the largest of tokenFloor, window × floorFraction, and the keepRecent
+		 * safety minimum. Without it a flat tokenFloor fires on a 200k window long
+		 * before the context is large enough to be worth compacting.
+		 *
+		 * 0.15 engages only when window > tokenFloor / 0.15 (~267k); below that the
+		 * flat tokenFloor governs. Chosen over 0.4 because 0.4 demanded ~419k on
+		 * a 1M window — far above the 44k-98k contexts actually seen here, so it
+		 * disabled the economy path outright. Compaction is measurably lossy
+		 * (specific facts from tool results do not survive the summary), so the
+		 * floor stays conservative while still letting genuinely large sessions
+		 * reclaim context deliberately rather than via pi overflow.
+		 */
+		floorFraction?: number;
+		/**
+		 * Minimum context growth after a compaction before economy may fire again.
+		 * A compaction that barely shrank the context would otherwise re-fire as
+		 * soon as minIntervalTurns elapsed, at near-zero net saving.
+		 */
+		minGapTokens?: number;
 		/** Min turns between compactions (any origin). */
 		minIntervalTurns: number;
 		/** quality mode: compact at settled when tokens > window × line. */
@@ -88,7 +109,12 @@ export const GENERIC_PROFILE: Profile = {
 	mode: "balanced",
 	tiers: [],
 	cache: { readRatio: 0.1, writePremium: 0, ttlShort: 300, ttlLong: 3600 },
-	compaction: { tokenFloor: 40_000, minIntervalTurns: 4 },
+	compaction: {
+		tokenFloor: 40_000,
+		minIntervalTurns: 4,
+		floorFraction: 0.15,
+		minGapTokens: 20_000,
+	},
 	gate: { enabled: true, aggressiveBelow: 0.35, deferAbove: 0.7 },
 };
 
