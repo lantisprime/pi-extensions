@@ -20,7 +20,13 @@ export const AGENTS_RUN_TIMEOUT_MIN_S = 1;
 export const AGENTS_RUN_TIMEOUT_MAX_S = 3600;
 export const AGENTS_RUN_TASK_MAX_CHARS = 8_000;
 export const AGENTS_RUN_CHAIN_MIN = 2;
-export const AGENTS_RUN_CHAIN_MAX = 8;
+// One constant for one concept: the relay runner has a hard cap
+// (MAX_CHAIN_LENGTH), so the schema must advertise the SAME bound. They used to
+// be 8 (schema) and 3 (runner), which spent a model turn discovering the
+// difference. agents-run-tool already imports chain-runner below, so the
+// dependency exists regardless; binding the schema to it is what stops the drift.
+export const AGENTS_RUN_CHAIN_MAX = MAX_CHAIN_LENGTH;
+export const AGENTS_RUN_CHAIN_RANGE = `${AGENTS_RUN_CHAIN_MIN}..${AGENTS_RUN_CHAIN_MAX}`;
 
 // C0 control-char set replicated from subagent-tool.ts semantics so slice A
 // stays zero-dependency: allow ordinary multiline task text (TAB/LF/CR),
@@ -143,11 +149,11 @@ export function validateAgentsRunInput(raw: unknown): ValidatedAgentsRun {
 			if (typeof entry !== "string") return { ok: false, reason: "chain must be an array of strings" };
 		}
 		if (p.chain.length < AGENTS_RUN_CHAIN_MIN || p.chain.length > AGENTS_RUN_CHAIN_MAX) {
-			return { ok: false, reason: "chain requires 2..8 safe agent names" };
+			return { ok: false, reason: `chain requires ${AGENTS_RUN_CHAIN_RANGE} safe agent names` };
 		}
 		for (const entry of p.chain) {
 			if (!AGENTS_RUN_AGENT_RE.test(entry.trim())) {
-				return { ok: false, reason: "chain requires 2..8 safe agent names" };
+				return { ok: false, reason: `chain requires ${AGENTS_RUN_CHAIN_RANGE} safe agent names` };
 			}
 		}
 	}
@@ -178,7 +184,7 @@ export function buildAgentsRunToolDefinition() {
 		promptGuidelines: [
 			"Use agents_run to delegate a task to a built-in agent or a registered user/project agent (mode run, the default).",
 			"Use mode bg to launch a REGISTERED agent as a persistent background terminal via a named backend; built-ins are denied in bg mode.",
-			"Use mode chain with 2..8 agent names to run a relay chain; each name must be a safe identifier.",
+			`Use mode chain with ${AGENTS_RUN_CHAIN_RANGE} agent names to run a relay chain; each name must be a safe identifier. Each step's summary is relayed to the next step as untrusted data, and the chain's findings are returned in this tool result.`,
 			"agent/profile/backend are pattern-bounded names, not enums: unknown names fail closed at runtime with the available list.",
 		],
 		parameters: {
@@ -190,7 +196,7 @@ export function buildAgentsRunToolDefinition() {
 					type: "string",
 					enum: ["run", "bg", "chain"],
 					default: "run",
-					description: "Delegation mode: run (default, synchronous child), bg (registered agents only, persistent terminal), chain (relay 2..8 agents).",
+					description: `Delegation mode: run (default, synchronous child), bg (registered agents only, persistent terminal), chain (relay ${AGENTS_RUN_CHAIN_RANGE} agents).`,
 				},
 				agent: {
 					type: "string",
@@ -206,7 +212,7 @@ export function buildAgentsRunToolDefinition() {
 					type: "integer",
 					minimum: 1,
 					maximum: 3600,
-					description: "Optional timeout in seconds (1..3600).",
+					description: "Optional timeout in seconds (1..3600), applied per child run. In chain mode it bounds EACH step, not the chain as a whole.",
 				},
 				profile: {
 					type: "string",
@@ -230,13 +236,13 @@ export function buildAgentsRunToolDefinition() {
 				},
 				chain: {
 					type: "array",
-					minItems: 2,
-					maxItems: 8,
+					minItems: AGENTS_RUN_CHAIN_MIN,
+					maxItems: AGENTS_RUN_CHAIN_MAX,
 					items: {
 						type: "string",
 						pattern: "^[A-Za-z][A-Za-z0-9._-]{0,127}$",
 					},
-					description: "chain mode only: 2..8 agent names relayed in order.",
+					description: `chain mode only: ${AGENTS_RUN_CHAIN_RANGE} agent names relayed in order.`,
 				},
 			},
 		},
@@ -262,22 +268,30 @@ import { collectAgentDiagnostics, type AgentDiagnostics } from "./diagnostics.ts
 import { isReservedBuiltInAgentName } from "./specs.ts";
 import { getBgTerminalBackendByName, listBgTerminalBackends, type TermBgBackend } from "./bg-terminal.ts";
 import { preflightBgAgent } from "./bg-preflight.ts";
-import { preflightChain, runChain, MAX_CHAIN_LENGTH } from "./chain-runner.ts";
+import { preflightChain, runChain, partialFindings, MAX_CHAIN_LENGTH } from "./chain-runner.ts";
 import { markBgRunDone, updateBgReservationOwner, writeBgResult } from "./bg-state.ts";
 import type { ChildAgentRunner } from "./child-runner.ts";
+import { frameUntrusted } from "./child-runner.ts";
 
 export type AgentsRunDetails = {
 	mode: AgentsRunMode;
 	agent: string;
 	runId?: string;
 	backend?: string;
+	/** chain mode: per-step status of every step that ran (B2 — the caller can
+	 *  see where a chain stopped instead of only that it stopped). */
+	steps?: { agentName: string; status: string; durationMs?: number }[];
+	/** chain mode: only the steps that completed, on a failed chain. */
+	completedSteps?: { agentName: string; status: string }[];
 };
 
 export type AgentsRunOutcome =
 	| { ok: true; text: string; details: AgentsRunDetails; isError: false }
 	| { ok: false; text: string; code: string; details: AgentsRunDetails; isError: true };
 
-function denyOutcome(details: AgentsRunDetails, code: string, reason: string, nextStep?: string): AgentsRunOutcome {
+/** Returns the DENIED variant specifically, not the union — callers that build a
+ *  denial can then read `.code` without a cast. */
+function denyOutcome(details: AgentsRunDetails, code: string, reason: string, nextStep?: string): Extract<AgentsRunOutcome, { ok: false }> {
 	return {
 		ok: false,
 		code,
@@ -287,7 +301,7 @@ function denyOutcome(details: AgentsRunDetails, code: string, reason: string, ne
 	};
 }
 
-function notReadyOutcome(details: AgentsRunDetails): AgentsRunOutcome {
+function notReadyOutcome(details: AgentsRunDetails): Extract<AgentsRunOutcome, { ok: false }> {
 	return denyOutcome(details, "not-ready", "session context not ready; tool called before session_start or session is uninitialized");
 }
 
@@ -422,11 +436,12 @@ export async function executeAgentsRun(
 			};
 		}
 
-		// mode "chain". Runtime is strictly finer than the schema (maxItems 8):
-		// the chain runner documents a hard cap of MAX_CHAIN_LENGTH (3) —
-		// enforce it here because we bypass parseChainArgs (array input).
+		// mode "chain".
+		// Defense in depth: validate() already rejects anything over
+		// AGENTS_RUN_CHAIN_MAX (bound to MAX_CHAIN_LENGTH), but the runner is the
+		// real boundary and can be called with a hand-built array.
 		if (validated.chain && validated.chain.length > MAX_CHAIN_LENGTH) {
-			return denyOutcome(details, "invalid-input", `chain length capped at ${MAX_CHAIN_LENGTH} agents (schema allows up to 8; the runner relay caps at ${MAX_CHAIN_LENGTH})`);
+			return denyOutcome(details, "invalid-input", `chain length capped at ${MAX_CHAIN_LENGTH} agents (the relay runner enforces a hard cap of ${MAX_CHAIN_LENGTH})`);
 		}
 		const names = validated.chain ?? [];
 		const preflight = await preflightChain(names, diagnostics);
@@ -439,21 +454,54 @@ export async function executeAgentsRun(
 			agentsChildRunner: runCtx.agentsChildRunner,
 			explicitToolContextLoaderPath: runCtx.explicitToolContextLoaderPath,
 			profileLibrary: runCtx.profileLibrary,
+			// M3: timeout_s was validated and computed but never reached the chain,
+			// so a model bounding a chain got an unbounded one. Per-step, matching
+			// the schema text.
+			...(timeoutMs !== undefined ? { timeoutMs } : {}),
+			// M4: abort the in-flight child instead of only racing the promise.
+			...(signal ? { signal } : {}),
 		};
 		const outcome = seams.chainRunner
 			? await seams.chainRunner(preflight.resolved, validated.task, chainCtx)
 			: await runChain(preflight.resolved, validated.task, chainCtx);
+		const chainNames = names.join(" → ");
+		// B2/security: step summaries are child output — UNTRUSTED, they can echo
+		// prompt-injection text from repo files the step read. Frame them the same
+		// way the session-delivery path does before they reach a model.
+		const findings = (perStep: number) => {
+			const block = partialFindings(outcome.results, perStep);
+			return block ? frameUntrusted(block) : "";
+		};
 		if (!outcome.ok) {
-			return denyOutcome(details, outcome.code, outcome.message, outcome.nextStep);
+			// B2: keep the findings from the steps that DID run. Spending up to 3
+			// child sessions and reporting only "failed at step 2" is how real work
+			// gets thrown away.
+			return {
+				ok: false,
+				code: outcome.code,
+				text: `agents_run chain failed at '${outcome.agentName}' (${outcome.code}): ${outcome.message} [chain: ${chainNames}]${findings(2000)}`,
+				details: { ...details, completedSteps: outcome.results.map((r) => ({ agentName: r.agentName, status: r.status })) },
+				isError: true,
+			};
 		}
 		const failed = outcome.results.filter((s) => s.status !== "completed");
+		const stepDetails = outcome.results.map((r) => ({ agentName: r.agentName, status: r.status, durationMs: r.durationMs }));
+		if (failed.length > 0) {
+			return {
+				ok: false,
+				code: "chain-partial",
+				text: `Chain finished with ${failed.length}/${outcome.results.length} failed step(s): ${failed.map((s) => s.agentName).join(", ")} [chain: ${chainNames}].${findings(2000)}`,
+				details: { ...details, steps: stepDetails },
+				isError: true,
+			};
+		}
 		return {
-			ok: failed.length === 0,
-			text: failed.length === 0
-				? `Chain completed: ${names.join(" → ")}.`
-				: `Chain finished with ${failed.length}/${outcome.results.length} failed step(s): ${failed.map((s) => s.agentName).join(", ")}.`,
-			details,
-			isError: failed.length > 0,
+			ok: true,
+			// B2: the findings ARE the point of the call. Previously this returned
+			// only "Chain completed: a → b → c." and threw away every summary.
+			text: `Chain completed: ${chainNames}.${findings(2000)}`,
+			details: { ...details, steps: stepDetails },
+			isError: false,
 		};
 	})();
 

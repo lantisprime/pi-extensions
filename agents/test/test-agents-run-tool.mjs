@@ -12,9 +12,11 @@ import {
 	AGENTS_RUN_REF_RE,
 	AGENTS_RUN_RANGE_RE,
 	AGENTS_RUN_TASK_MAX_CHARS,
+	AGENTS_RUN_CHAIN_MAX,
 	buildAgentsRunToolDefinition,
 	validateAgentsRunInput,
 } from "../lib/agents-run-tool.ts";
+import { MAX_CHAIN_LENGTH } from "../lib/chain-runner.ts";
 import { buildSubagentToolDefinition } from "../lib/subagent-tool.ts";
 
 const AGENT_PATTERN_SOURCE = "^[A-Za-z][A-Za-z0-9._-]{0,127}$";
@@ -55,12 +57,16 @@ test("schemaDeclaresAllBounds", () => {
 	assert.equal(props.base.pattern, REF_PATTERN_SOURCE);
 	assert.equal(props.range.pattern, RANGE_PATTERN_SOURCE);
 
-	// chain: array 2..8 of agent-pattern strings (REQ-1)
+	// chain: array 2..MAX_CHAIN_LENGTH of agent-pattern strings. The advertised
+	// bound IS the runner's enforced bound — the schema used to say 8 while the
+	// relay capped at 3, which cost a model a wasted turn discovering it.
 	assert.equal(props.chain.type, "array");
 	assert.equal(props.chain.minItems, 2);
-	assert.equal(props.chain.maxItems, 8);
+	assert.equal(props.chain.maxItems, MAX_CHAIN_LENGTH);
+	assert.equal(props.chain.maxItems, AGENTS_RUN_CHAIN_MAX);
 	assert.equal(props.chain.items.type, "string");
 	assert.equal(props.chain.items.pattern, AGENT_PATTERN_SOURCE);
+	assert.match(props.chain.description, new RegExp(`2\\.\\.${MAX_CHAIN_LENGTH} agent names`));
 
 	// Constants agree with the declared schema bounds (no silent drift).
 	assert.equal(AGENTS_RUN_AGENT_RE.source, AGENT_PATTERN_SOURCE);
@@ -146,18 +152,30 @@ test("validateRejectsEachBadInput", () => {
 		{ ok: false, reason: "timeout_s must be an integer 1..3600" },
 	);
 
-	// State E: bad chain (EC6 single entry; >8; entry fails agent pattern)
+	// State E: bad chain (EC6 single entry; over the cap; entry fails agent pattern)
 	assert.deepEqual(
 		validateAgentsRunInput({ agent: "scout", task: "ok", mode: "chain", chain: ["scout"] }),
-		{ ok: false, reason: "chain requires 2..8 safe agent names" },
+		{ ok: false, reason: "chain requires 2..3 safe agent names" },
 	);
+	// One over the enforced cap must be rejected at the SCHEMA, not discovered
+	// later as a runtime denial.
+	assert.deepEqual(
+		validateAgentsRunInput({ agent: "scout", task: "ok", mode: "chain", chain: Array.from({ length: 4 }, () => "scout") }),
+		{ ok: false, reason: "chain requires 2..3 safe agent names" },
+	);
+	// The old over-cap sample stays rejected (9 entries).
 	assert.deepEqual(
 		validateAgentsRunInput({ agent: "scout", task: "ok", mode: "chain", chain: Array.from({ length: 9 }, () => "scout") }),
-		{ ok: false, reason: "chain requires 2..8 safe agent names" },
+		{ ok: false, reason: "chain requires 2..3 safe agent names" },
+	);
+	// Exactly at the cap must be ACCEPTED (guards against off-by-one in the fix).
+	assert.deepEqual(
+		validateAgentsRunInput({ agent: "scout", task: "ok", mode: "chain", chain: ["a-one", "b-two", "c-three"] }),
+		{ ok: true, mode: "chain", agent: "scout", task: "ok", chain: ["a-one", "b-two", "c-three"] },
 	);
 	assert.deepEqual(
 		validateAgentsRunInput({ agent: "scout", task: "ok", mode: "chain", chain: ["scout", "--bad"] }),
-		{ ok: false, reason: "chain requires 2..8 safe agent names" },
+		{ ok: false, reason: "chain requires 2..3 safe agent names" },
 	);
 
 	// State F: bad refs (base with space; range without "..")

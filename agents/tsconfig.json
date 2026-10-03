@@ -1,0 +1,33 @@
+{
+	// Scoped to lib/ on purpose: index.ts and ~32 pre-existing lib errors
+	// (child-runner, subagent-tool, run-resolver, prompts, specs) are untouched
+	// debt from before this extension was ever typechecked. NOT wired into CI —
+	// do that only after that backlog is cleared, or CI goes red on day one.
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"strict": true,
+		"noEmit": true,
+		"skipLibCheck": true,
+		"allowImportingTsExtensions": true,
+		"typeRoots": [
+			"/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@types"
+		],
+		"types": [
+			"node"
+		],
+		"baseUrl": ".",
+		"paths": {
+			"@earendil-works/pi-coding-agent": [
+				"/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"
+			],
+			"typebox": [
+				"/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox"
+			]
+		}
+	},
+	"include": [
+		"lib/**/*.ts"
+	]
+}
