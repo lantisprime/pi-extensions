@@ -53,6 +53,11 @@ export interface EngineState {
 	lastTurnTokens: number | null;
 	/** Turns since the last compaction of ANY origin (pi's or ours). */
 	turnsSinceCompaction: number;
+	/**
+	 * Context size immediately before the last successful compaction, or null if
+	 * none has happened this session. Drives the post-compaction growth gap.
+	 */
+	lastCompactionTokens: number | null;
 	/** pi's most recent cache-warming decision. */
 	recentWarm: { at: number; continuationProbability: number } | null;
 	turnCounter: number;
@@ -66,6 +71,7 @@ export function initState(): EngineState {
 		growthPerTurn: null,
 		lastTurnTokens: null,
 		turnsSinceCompaction: 0,
+		lastCompactionTokens: null,
 		recentWarm: null,
 		turnCounter: 0,
 	};
@@ -163,10 +169,25 @@ export function evaluateEconomy(input: EvalInput): Decision {
 		return { kind: "none", why: `min-interval (${state.turnsSinceCompaction}/${minInterval})` };
 	}
 	// Effective floor respects pi's keepRecent budget: a context below keep+margin
-	// has nothing to summarize (pi fails with "session too small").
-	const effectiveFloor = Math.max(profile.compaction.tokenFloor, 24_000);
+	// has nothing to summarize (pi fails with "session too small"). The window
+	// fraction keeps a flat tokenFloor from firing on a large context window.
+	const windowFloor = profile.compaction.floorFraction ? window * profile.compaction.floorFraction : 0;
+	const effectiveFloor = Math.max(profile.compaction.tokenFloor, windowFloor, 24_000);
 	if (tokens < effectiveFloor) {
-		return { kind: "none", why: `below tokenFloor (${tokens} < ${effectiveFloor})` };
+		const driver = windowFloor > profile.compaction.tokenFloor ? "window-floor" : "tokenFloor";
+		return { kind: "none", why: `below ${driver} (${tokens} < ${Math.round(effectiveFloor)})` };
+	}
+
+	// Post-compaction gap. A compaction that barely shrank the context leaves the
+	// floor satisfied almost immediately, so without this the economy path
+	// re-compacts the same material every few turns for near-zero net saving.
+	// Opt-in: a profile that does not set minGapTokens keeps the old behaviour.
+	const minGap = profile.compaction.minGapTokens ?? 0;
+	if (minGap > 0 && state.lastCompactionTokens != null && tokens < state.lastCompactionTokens + minGap) {
+		return {
+			kind: "none",
+			why: `post-compaction gap (${tokens} < ${state.lastCompactionTokens} + ${minGap})`,
+		};
 	}
 
 	// quality mode: fixed line at settled time, cache math skipped (AC-5 vacuous).

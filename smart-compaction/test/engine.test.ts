@@ -79,6 +79,102 @@ test("AC-8: guards — null usage, stale tokens, min-interval, tokenFloor", () =
 	assert.ok((dFloor as { why: string }).why.includes("tokenFloor"));
 });
 
+test("economy floor scales with the context window, not just a flat token count", () => {
+	// baseline recipe that the suite already proves selects a compaction
+	const mk = (over?: Partial<EvalInput>) => {
+		const input = baseInput(over);
+		input.state.turnsSinceCompaction = 10;
+		input.state.growthPerTurn = 5_000;
+		return input;
+	};
+
+	// No floorFraction: unchanged behaviour.
+	assert.equal(evaluateEconomy(mk()).kind, "economy");
+
+	// 0.4 of a 1M window is a 419k floor, so 250k must NOT compact. A flat 40k
+	// floor would have let this through.
+	const strict = mk();
+	strict.profile.compaction.floorFraction = 0.4;
+	const dStrict = evaluateEconomy(strict);
+	assert.equal(dStrict.kind, "none");
+	assert.ok((dStrict as { why: string }).why.includes("window-floor"));
+
+	// 0.2 of a 1M window is a 209k floor, which 250k clears.
+	const loose = mk();
+	loose.profile.compaction.floorFraction = 0.2;
+	assert.equal(evaluateEconomy(loose).kind, "economy");
+
+	// Relative, not absolute: 0.4 of a 200k window is an 80k floor, so 60k is
+	// held back there too.
+	const smallWindow = mk({ usage: { tokens: 60_000, contextWindow: 200_000 } });
+	smallWindow.profile.compaction.floorFraction = 0.4;
+	const dSmall = evaluateEconomy(smallWindow);
+	assert.equal(dSmall.kind, "none");
+	assert.ok((dSmall as { why: string }).why.includes("window-floor"));
+});
+
+test("post-compaction gap stops near-zero-savings recompaction churn", () => {
+	const mk = (lastCompactionTokens: number | null) => {
+		const input = baseInput();
+		input.state.turnsSinceCompaction = 10;
+		input.state.growthPerTurn = 5_000;
+		input.profile.compaction.minGapTokens = 20_000;
+		input.state.lastCompactionTokens = lastCompactionTokens;
+		return evaluateEconomy(input);
+	};
+
+	// Nothing compacted yet this session → guard is vacuous.
+	assert.equal(mk(null).kind, "economy");
+
+	// Compacted at 245k, context is 250k — only 5k of regrowth, so wait.
+	const inGap = mk(245_000);
+	assert.equal(inGap.kind, "none");
+	assert.ok((inGap as { why: string }).why.includes("post-compaction gap"));
+
+	// Regrown 50k past the last compaction → proceeds.
+	assert.equal(mk(200_000).kind, "economy");
+
+	// The churn case: the context is smaller than it was when last compacted, so
+	// re-compacting it would reclaim almost nothing.
+	assert.equal(mk(300_000).kind, "none");
+
+	// Inert when minGapTokens is unset → pre-existing behaviour preserved.
+	const noGap = baseInput();
+	noGap.state.turnsSinceCompaction = 10;
+	noGap.state.growthPerTurn = 5_000;
+	noGap.state.lastCompactionTokens = 300_000;
+	assert.equal(evaluateEconomy(noGap).kind, "economy");
+});
+
+test("the shipped generic profile actually stops the observed compaction treadmill", () => {
+	// Production shape: an unmatched model falls through to GENERIC_PROFILE, and
+	// observed sessions compacted repeatedly at 44k-61k on a 200k window. Resolve
+	// the profile the way the extension does, so the merge path (GENERIC is the
+	// base for every profile, not just a fallback) is covered too.
+	const resolved = resolveProfile("litellm", "minimax-m3.1-flash-preview", loadConfig());
+	const profile = "profile" in resolved ? resolved.profile : resolved;
+	assert.equal(profile.compaction.floorFraction, 0.4);
+	assert.equal(profile.compaction.minGapTokens, 20_000);
+
+	// Every context size observed in the treadmill must now decline.
+	for (const tokens of [44_740, 46_479, 58_691, 60_472, 61_223]) {
+		const input = baseInput({ usage: { tokens, contextWindow: 200_000 } });
+		input.profile = profile;
+		input.state.turnsSinceCompaction = 50; // far past any min-interval
+		input.state.growthPerTurn = 5_000;
+		const d = evaluateEconomy(input);
+		assert.equal(d.kind, "none", `${tokens} tokens on a 200k window should not compact`);
+		assert.ok((d as { why: string }).why.includes("window-floor"));
+	}
+
+	// A context that genuinely needs reclaiming still compacts.
+	const big = baseInput({ usage: { tokens: 180_000, contextWindow: 200_000 } });
+	big.profile = profile;
+	big.state.turnsSinceCompaction = 50;
+	big.state.growthPerTurn = 5_000;
+	assert.equal(evaluateEconomy(big).kind, "economy");
+});
+
 test("AC-5: cache hot/cold detection", () => {
 	const hot = baseInput();
 	hot.state.lastLLMCallAt = 1_000_000 - 60_000; // 60s ago < 300s TTL

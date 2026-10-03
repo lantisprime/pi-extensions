@@ -219,6 +219,9 @@ export default function (pi: ExtensionAPI) {
 		rt.state.tokensStale = true;
 		rt.state.growthPerTurn = null;
 		rt.state.lastTurnTokens = null;
+		// model_select invalidates the token basis, and any pre-compaction size
+		// recorded from the old model is no longer comparable.
+		rt.state.lastCompactionTokens = null;
 		refreshModel(ctx);
 		statusLine(ctx, "rebaselining");
 	});
@@ -325,6 +328,10 @@ export default function (pi: ExtensionAPI) {
 		if (!rt) return;
 		// AC-8: reset interval counters regardless of who compacted.
 		rt.state.turnsSinceCompaction = 0;
+		// Remember what the context weighed before the shrink, so economy cannot
+		// re-fire until it has regrown past it (post-compaction gap). Captured
+		// before lastTurnTokens is cleared below.
+		if (rt.state.lastTurnTokens != null) rt.state.lastCompactionTokens = rt.state.lastTurnTokens;
 		rt.state.lastTurnTokens = null; // token basis changed
 		rt.compacting = false;
 		record(ctx, "session_compact", { kind: "none", why: "compacted" });

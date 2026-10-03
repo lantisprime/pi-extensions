@@ -116,7 +116,11 @@ test("LESSON-1 regression 1: gate defer does not wedge the economy trigger", asy
 						{ upTo: 1e9, inputMult: 2, outputMult: 1.5 },
 					],
 					cache: { readRatio: 0.1, writePremium: 0, ttlShort: 300, ttlLong: 3600 },
-					compaction: { tokenFloor: 20_000, minIntervalTurns: 0 },
+					// This scenario deliberately compacts at 40k on a 1M window so the
+					// gate is reached, so opt out of the window-relative floor that
+					// GENERIC_PROFILE would otherwise merge in (0.4 × 1M = 419k).
+					// The subject here is the gate-defer wedge, not the floor.
+					compaction: { tokenFloor: 20_000, minIntervalTurns: 0, floorFraction: 0 },
 					gate: { enabled: true, aggressiveBelow: 0.35, deferAbove: 0.7 },
 				},
 			],
