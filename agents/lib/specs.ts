@@ -1,5 +1,5 @@
 import { isProviderId, type ProviderId } from "./context-providers/provider-id.ts";
-import { PROMPT_FILES } from "./prompts.ts";
+import { PROMPT_FILES, promptFileForName, type PromptName } from "./prompts.ts";
 
 export const AGENT_SPEC_VERSION = 1;
 
@@ -337,8 +337,8 @@ export function validateAgentSpec(spec: unknown, options: SpecValidationOptions 
 		// Allowed for code-owned built-ins and their ephemeral (run-temp) derivations — NEVER from
 		// user/project frontmatter (which agent-markdown already refuses via AGENT_MARKDOWN_ACCEPTED_KEYS).
 		if (spec.source !== "built-in" && spec.source !== "ephemeral") issues.push({ field: "instructionsFile", code: "instructions-not-builtin", message: "instructionsFile is built-in/ephemeral only" });
-		else if (spec.source === "built-in" && (typeof spec.name !== "string" || PROMPT_FILES[spec.name] !== spec.instructionsFile)) issues.push({ field: "instructionsFile", code: "instructions-map-mismatch", message: "built-in instructionsFile must equal PROMPT_FILES[name]" });
-		else if (spec.source === "ephemeral" && !Object.values(PROMPT_FILES).includes(spec.instructionsFile)) issues.push({ field: "instructionsFile", code: "instructions-map-mismatch", message: "ephemeral instructionsFile must be a known method file" });
+		else if (spec.source === "built-in" && (typeof spec.name !== "string" || promptFileForName(spec.name) !== spec.instructionsFile)) issues.push({ field: "instructionsFile", code: "instructions-map-mismatch", message: "built-in instructionsFile must equal PROMPT_FILES[name]" });
+		else if (spec.source === "ephemeral" && (typeof spec.instructionsFile !== "string" || !Object.values(PROMPT_FILES).includes(spec.instructionsFile as typeof PROMPT_FILES[PromptName]))) issues.push({ field: "instructionsFile", code: "instructions-map-mismatch", message: "ephemeral instructionsFile must be a known method file" });
 	}
 
 	return result(issues);

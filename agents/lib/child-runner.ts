@@ -7,7 +7,7 @@ import os from "node:os";
 import { buildChildPiArgs, getPiInvocation, type ChildPiArgsOptions, type ChildPiInvocation } from "./child-args.ts";
 import { loadAgentMethod, methodFileForSpec } from "./prompts.ts";
 import { reduceChildJsonl, type ChildJsonlSummary } from "./jsonl-monitor.ts";
-import { getBuiltInAgentSpec, isReservedBuiltInAgentName, RESERVED_BUILT_IN_AGENT_NAMES, type AgentSpec } from "./specs.ts";
+import { getBuiltInAgentSpec, isReservedBuiltInAgentName, RESERVED_BUILT_IN_AGENT_NAMES, type AgentSpec, type ThinkingLevel } from "./specs.ts";
 import { resolveSpecProfile, type ModelProfileLibrary } from "./profiles.ts";
 import { profileTrustCheck } from "./profile-discovery.ts";
 import type { ProjectAgentRegistry } from "./registry.ts";
@@ -34,7 +34,7 @@ export type ChildAgentRunResult = {
 	error?: string;
 	resolvedProfile?: string;
 	resolvedModel?: string;
-	resolvedThinking?: string;
+	resolvedThinking?: ThinkingLevel;
 };
 
 export type ChildProcessLike = {
@@ -43,7 +43,10 @@ export type ChildProcessLike = {
 	stderr?: { on(event: "data", listener: (chunk: Buffer | string) => void): unknown };
 	stdin?: { end(data?: string): unknown };
 	on: ((event: "close", listener: (code: number | null, signal: string | null) => void) => unknown) & ((event: "error", listener: (error: Error) => void) => unknown);
-	kill(signal?: NodeJS.Signals | string): boolean;
+	/** Node only accepts a real signal name or a numeric pid. Widening this to
+	 *  `string` let a typo ("SIGTERM " / "sigterm") reach child.kill(), throw
+	 *  inside the try/catch in killChild(), and silently escalate to SIGKILL. */
+	kill(signal?: NodeJS.Signals): boolean;
 };
 
 export type ChildProcessSpawner = (command: string, argv: readonly string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; stdio: ["pipe", "pipe", "pipe"] }) => ChildProcessLike;
@@ -58,7 +61,7 @@ export type RunBuiltInChildAgentOptions = ChildPiArgsOptions & {
 	maxStderrChars?: number;
 	maxJsonLineBytes?: number;
 	maxResultChars?: number;
-	killSignal?: NodeJS.Signals | string;
+	killSignal?: NodeJS.Signals;
 	forceKillAfterMs?: number;
 	projectTrusted?: boolean;
 	projectRegistry?: ProjectAgentRegistry;
@@ -81,6 +84,16 @@ export type ChildAgentRunner = (agent: string | AgentSpec, task: string, options
 const DEFAULT_KILL_SIGNAL: NodeJS.Signals = "SIGTERM";
 const DEFAULT_FORCE_KILL_AFTER_MS = 1_000;
 
+/** A well-formed EMPTY ChildJsonlSummary, for the pre-spawn denial paths below
+ *  (project-profile metadata missing, project trust denied). These never reach the
+ *  child, so there is no jsonl to reduce — but the object still has to satisfy the
+ *  full ChildJsonlSummary shape. Hand-rolling the literal here is what produced a
+ *  summary with no eventsSeen/malformedLines counters and a bare `truncation: {}`,
+ *  which made hasTruncation()/`formatTruncation()` report nonsense. */
+function emptyChildSummary(): ChildJsonlSummary {
+	return reduceChildJsonl("");
+}
+
 export async function runBuiltInChildAgent(agentName: string, task: string, options: RunBuiltInChildAgentOptions = {}, profiles?: ModelProfileLibrary, profileOverride?: string): Promise<ChildAgentRunResult> {
 	if (!isReservedBuiltInAgentName(agentName)) throw new Error(`P3c-2 only supports built-in agents: ${RESERVED_BUILT_IN_AGENT_NAMES.join(", ")}`);
 	const spec = getBuiltInAgentSpec(agentName);
@@ -91,7 +104,7 @@ export async function runBuiltInChildAgent(agentName: string, task: string, opti
 export async function runChildAgent(spec: AgentSpec, task: string, options: RunChildAgentOptions = {}, profiles?: ModelProfileLibrary, profileOverride?: string): Promise<ChildAgentRunResult> {
 	let resolvedProfile: string | undefined;
 	let resolvedModel: string | undefined;
-	let resolvedThinking: string | undefined;
+	let resolvedThinking: ThinkingLevel | undefined;
 	// P3f-4: positional profileOverride wins; fall back to options.profileOverride (custom-runner path)
 	const effectiveProfile = profileOverride ?? options.profileOverride ?? spec.profile;
 	if (effectiveProfile) {
@@ -111,7 +124,7 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 					status: "spawn-error" as const,
 					durationMs: 0, stdoutBytes: 0, stderrPreview: "",
 					invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin" as const, stdinText: "" } },
-					summary: { summaryText: "", toolCalls: [], errors: [], usage: undefined, cost: undefined, stopReason: undefined, model: undefined, provider: undefined, truncation: {} },
+					summary: emptyChildSummary(),
 					timedOut: false, outputLimitExceeded: false,
 					error: "project profile missing canonicalPath or rawBytesSha256 metadata",
 				};
@@ -132,7 +145,7 @@ export async function runChildAgent(spec: AgentSpec, task: string, options: RunC
 					stdoutBytes: 0,
 					stderrPreview: "",
 					invocation: { command: "pi", argv: [], argvPreview: [], promptTransport: { kind: "stdin" as const, stdinText: "" } },
-					summary: { summaryText: "", toolCalls: [], errors: [], usage: undefined, cost: undefined, stopReason: undefined, model: undefined, provider: undefined, truncation: {} },
+					summary: emptyChildSummary(),
 					timedOut: false,
 					outputLimitExceeded: false,
 					error: trustCheck.message,
@@ -329,8 +342,14 @@ async function spawnAndCollect(agentName: string, invocation: ChildPiInvocation,
 	timeoutMs: number;
 	maxJsonLineBytes: number;
 	maxResultChars: number;
-	killSignal: NodeJS.Signals | string;
+	killSignal: NodeJS.Signals;
 	forceKillAfterMs: number;
+	/** P3f-3: profile/model/thinking actually applied to the child, surfaced on the
+	 *  result for operator diagnostics. Declared here because the caller passes
+	 *  them in and the result builder below reads them off `options`. */
+	resolvedProfile?: string;
+	resolvedModel?: string;
+	resolvedThinking?: ThinkingLevel;
 	stdoutTmpDir?: string;
 	/** P8-1: per-complete-stdout-line progress sink (display-only); default undefined = no-op. */
 	onProgress?: (line: string) => void;
@@ -572,7 +591,7 @@ function spawnErrorResult(agentName: string, invocation: ChildPiInvocation, erro
 		stdoutBytes: 0,
 		stderrPreview: "",
 		invocation,
-		summary: reduceChildJsonl(""),
+		summary: emptyChildSummary(),
 		timedOut: false,
 		outputLimitExceeded: false,
 		error: message,

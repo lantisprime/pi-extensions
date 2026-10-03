@@ -84,3 +84,9 @@ jobs:
             echo "negative control failed: validation unexpectedly passes broken input" >&2
             exit 1
           fi
+
+      # The agents extension carried a 32-error type backlog for its entire life
+      # because nothing ever ran tsc on it. It is clean now; this step keeps it that
+      # way. Scoped to lib/ on purpose — see the note in agents/tsconfig.json.
+      - name: Typecheck agents extension
+        run: npx --yes -p typescript@5.9.3 tsc --noEmit -p agents/tsconfig.json

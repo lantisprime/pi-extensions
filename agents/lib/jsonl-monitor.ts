@@ -17,6 +17,20 @@ export type ChildJsonlTruncation = {
 	toolCallsTruncated: boolean;
 };
 
+/** A truncation record meaning "nothing was truncated". Use this instead of a bare
+ *  `{}` when synthesizing a summary that never went through the reducer — an empty
+ *  object type-checks against nothing and would make `Object.values(...).some()` in
+ *  hasTruncation() vacuously true-by-accident. Frozen: it is shared, and a caller
+ *  that mutated it would corrupt every other result's truncation report. */
+export const NO_JSONL_TRUNCATION: ChildJsonlTruncation = Object.freeze({
+	stdoutBytesTruncated: false,
+	jsonLineBytesTruncated: false,
+	summaryCharsTruncated: false,
+	toolArgsCharsTruncated: false,
+	toolResultCharsTruncated: false,
+	toolCallsTruncated: false,
+});
+
 export type ChildJsonlSummary = {
 	session?: { id?: string; version?: number; timestamp?: string; cwd?: string };
 	eventsSeen: number;
@@ -52,14 +66,7 @@ const DEFAULT_OPTIONS: Required<ChildJsonlReduceOptions> = Object.freeze({
 
 export function reduceChildJsonl(stdout: string | readonly string[], options: ChildJsonlReduceOptions = {}): ChildJsonlSummary {
 	const limits = validateReduceOptions({ ...DEFAULT_OPTIONS, ...options });
-	const truncation: ChildJsonlTruncation = {
-		stdoutBytesTruncated: false,
-		jsonLineBytesTruncated: false,
-		summaryCharsTruncated: false,
-		toolArgsCharsTruncated: false,
-		toolResultCharsTruncated: false,
-		toolCallsTruncated: false,
-	};
+	const truncation: ChildJsonlTruncation = { ...NO_JSONL_TRUNCATION };
 	const errors: string[] = [];
 	const text = normalizeStdout(stdout);
 	const boundedText = boundUtf8(text, limits.maxStdoutBytes);
@@ -184,7 +191,10 @@ function rememberTool(summary: ChildToolCallSummary, toolCalls: ChildToolCallSum
 }
 
 function normalizeStdout(stdout: string | readonly string[]): string {
-	return Array.isArray(stdout) ? stdout.join("\n") : stdout;
+	// `typeof`, not `Array.isArray`: Array.isArray does not narrow a readonly
+	// array out of a `string | readonly string[]` union, so the else branch
+	// stayed `string | readonly string[]` and would not assign to string.
+	return typeof stdout === "string" ? stdout : stdout.join("\n");
 }
 
 function boundUtf8(value: string, maxBytes: number): { value: string; truncated: boolean } {
