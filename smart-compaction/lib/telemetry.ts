@@ -18,7 +18,9 @@ export interface TelemetryRecord {
 	decision: string;
 	why?: string;
 	estimates?: Record<string, number | string | boolean | null>;
-	gate?: { probability: number; source: string; action: string };
+	// probability is optional: a policy defer (all-settled task board) makes no
+	// judgment claim, so there is nothing to record.
+	gate?: { probability?: number; source: string; action: string; detail?: string };
 }
 
 export class Telemetry {

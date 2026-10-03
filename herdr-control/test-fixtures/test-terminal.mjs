@@ -90,6 +90,29 @@ const BASE = { cwd: "/tmp/x", direction: "auto" };
 	assert.equal((await runInPane(fake.executor, "bogus", "ls")).ok, false, "bad pane ref rejected");
 }
 
+// Regression (2026-10-03): herdr's workspace/pane counters are base-36, so a
+// workspace with more than 10 panes yields refs like w2:pV. The stale
+// /^w\d+:p\d+$/ guard rejected them, so every `pane *` subcommand below refused
+// to run — which is how herdr_terminal created a pane and then failed to rename
+// or start its command, leaking the pane. Assert the guards PASS a base-36 ref
+// and that the real argv is forwarded, not swallowed at the validation layer.
+{
+	const fake = createFakeHerdr();
+	fake.onSubcommand("pane", (args) =>
+		args[1] === "run" || args[1] === "rename" || args[1] === "read" ? okResult("out\n") : errResult("x", 1),
+	);
+	assert.equal((await runInPane(fake.executor, "w2:pV", "npm test")).ok, true, "base-36 pane ref runs");
+	assert.deepEqual(fake.callsTo("pane").at(-1).slice(2), ["w2:pV", "npm test"]);
+	assert.equal((await renamePane(fake.executor, "wH:p1", "logs")).ok, true, "letter workspace ref renames");
+	assert.deepEqual(fake.callsTo("pane").at(-1).slice(2), ["wH:p1", "logs"]);
+	const read = await readPane(fake.executor, "w2:pV", { lines: 5 });
+	assert.equal(read.ok, true, "base-36 pane ref reads");
+	assert.deepEqual(fake.callsTo("pane").at(-1).slice(2), ["w2:pV", "--source", "recent-unwrapped", "--lines", "5"]);
+	// A tab id is still not a pane id: the guard must not widen to accept tabs.
+	assert.equal((await runInPane(fake.executor, "w2:tM", "ls")).ok, false, "tab id rejected as pane ref");
+	assert.equal((await runInPane(fake.executor, "w2:pV; rm -rf /", "ls")).ok, false, "injection still rejected");
+}
+
 // renamePane
 {
 	const fake = createFakeHerdr();

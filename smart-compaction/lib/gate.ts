@@ -3,8 +3,14 @@
 // Estimates P(summarized context is related to the current session tasks):
 //   - primary: one Jev noul question (same gateway as the jev extension)
 //   - fallback: keyword-overlap heuristic
-// Any failure / timeout / no-tasks resolves to a conservative default so the
-// caller can proceed (spec AC-6, AC-10). Never throws.
+//   - policy:  a task board that is present but all-settled defers outright
+// Any failure / timeout / no-tasks-at-all resolves to a conservative default so
+// the caller can proceed (spec AC-6, AC-10). Never throws.
+//
+// The all-settled defer is a deliberate exception to "resolve to proceed": see
+// lib/task-subjects.ts for why conflating an all-settled board with "no tasks"
+// made this gate authorize compaction of the exact context it exists to
+// protect.
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -60,9 +66,9 @@ export function heuristicRelevance(subjects: string[], excerpt: string): number 
 }
 
 export interface GateResult {
-	/** P(context is related to current tasks), 0..1. */
-	probability: number;
-	source: "jev" | "heuristic" | "default";
+	/** P(context is related to current tasks), 0..1. Absent for a policy defer. */
+	probability?: number;
+	source: "jev" | "heuristic" | "default" | "task-board";
 	/** Action mapped per profile gate thresholds (design D2). */
 	action: "aggressive" | "focused" | "defer";
 	detail?: string;
@@ -85,8 +91,22 @@ export async function relevanceGate(
 	excerpt: string,
 	gate: { enabled: boolean; aggressiveBelow: number; deferAbove: number },
 	signal?: AbortSignal,
+	board?: { state: "none" | "active" | "settled"; settledCount: number },
 ): Promise<GateResult> {
 	if (subjects.length === 0) {
+		// A task board exists but has no ACTIVE rows: every task is settled and
+		// the set has not been cleared. The conversation being summarized is the
+		// work those tasks describe, so deferring is the safe reading. This is
+		// NOT a judgment call, so no probability is claimed.
+		if (board && board.state === "settled") {
+			return {
+				source: "task-board",
+				action: "defer",
+				detail:
+					`task board present with no active tasks (${board.settledCount} settled, awaiting task_clear) — ` +
+					"the context being summarized is the completed work itself",
+			};
+		}
 		const p = 0.5;
 		return { probability: p, source: "default", action: mapAction(p, gate), detail: "no active tasks" };
 	}

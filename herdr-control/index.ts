@@ -34,7 +34,7 @@ import {
 import { defaultHerdrExecutor, type HerdrExecutor } from "./lib/exec.ts";
 import { ensureServer } from "./lib/gate.ts";
 import { stringEnum, Type } from "./lib/string-enum.ts";
-import { isValidAgentName, matchesPrefix, requirePaneRef, validateKeyTokens } from "./lib/safety.ts";
+import { isValidAgentName, isPaneRef, matchesPrefix, requirePaneRef, validateKeyTokens } from "./lib/safety.ts";
 import { formatAgent, getAgent, listAgents, type HerdrAgentInfo } from "./lib/list.ts";
 import { spawnAgent, type SpawnOutcome } from "./lib/launch.ts";
 import { promptAgent } from "./lib/prompt.ts";
@@ -495,9 +495,10 @@ function registerTools(pi: ExtensionAPI, executor: HerdrExecutor): void {
 	});
 }
 
-function isPaneId(raw: string): boolean {
-	return /^w\d+:p\d+$/.test(raw);
-}
+// Single source of truth for the pane-ref grammar lives in lib/constants.ts
+// (PANE_REF_RE). This used to be a second hardcoded `/^w\d+:p\d+$/` that went
+// stale independently of the library one; delegate instead of re-literal.
+const isPaneId = isPaneRef;
 
 // Next free registry name for a plain terminal (not a herdr agent name —
 // just our registry key): pi-herdr-term-1, -2, ...

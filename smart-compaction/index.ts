@@ -25,7 +25,8 @@ import {
 	type Decision,
 	type EngineState,
 } from "./lib/engine.ts";
-import { relevanceGate } from "./lib/gate.ts";
+import { relevanceGate, type GateResult } from "./lib/gate.ts";
+import { parseTaskBoard, type TaskBoard } from "./lib/task-subjects.ts";
 import {
 	loadConfig,
 	resolvePrices,
@@ -118,21 +119,17 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setStatus(STATUS_KEY, text);
 	}
 
-	/** Active task subjects from the system prompt's task block (bounded). */
-	function taskSubjects(ctx: ExtensionContext): string[] {
+	/**
+	 * Task board state from the system prompt's <session-tasks> block.
+	 * Distinguishes "no board" from "board with nothing active" — see
+	 * lib/task-subjects.ts; conflating them made the relevance gate authorize
+	 * compaction of the work it exists to protect.
+	 */
+	function taskBoard(ctx: ExtensionContext): TaskBoard {
 		try {
-			const prompt = ctx.getSystemPrompt();
-			const subjects: string[] = [];
-			const re = /^[^\w\n]*[A-Z][A-Z0-9]*-\d+\s+\[([^\]]+)\]\s+(.+)$/gm;
-			let m: RegExpExecArray | null;
-			while ((m = re.exec(prompt)) !== null) {
-				const [, status, subject] = m;
-				if (status !== "completed" && status !== "cancelled") subjects.push(subject.trim());
-				if (subjects.length >= 8) break;
-			}
-			return subjects;
+			return parseTaskBoard(ctx.getSystemPrompt());
 		} catch {
-			return [];
+			return { state: "none", activeSubjects: [], settledCount: 0 };
 		}
 	}
 
@@ -176,7 +173,7 @@ export default function (pi: ExtensionAPI) {
 		};
 	}
 
-	function record(ctx: ExtensionContext, event: string, decision: Decision, gate?: { probability: number; source: string; action: string }, estimates?: Record<string, number | string | boolean | null>): void {
+	function record(ctx: ExtensionContext, event: string, decision: Decision, gate?: GateResult, estimates?: Record<string, number | string | boolean | null>): void {
 		if (!rt) return;
 		rt.lastDecision = { decision, at: Date.now() };
 		const key = modelKey(ctx);
@@ -199,7 +196,7 @@ export default function (pi: ExtensionAPI) {
 						},
 					}
 				: {}),
-			...(gate ? { gate } : {}),
+			...(gate ? { gate: { ...gate, probability: gate.probability } } : {}),
 		});
 	}
 
@@ -290,15 +287,15 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		try {
-			const subjects = taskSubjects(ctx);
-			const gate = await relevanceGate(subjects, oldContextExcerpt(ctx), rt.profile!.gate, ctx.signal);
+			const board = taskBoard(ctx);
+			const gate = await relevanceGate(board.activeSubjects, oldContextExcerpt(ctx), rt.profile!.gate, ctx.signal, board);
 			record(ctx, "gate", d, gate);
 
 			if (gate.action === "defer") {
 				statusLine(ctx, "deferred (task-relevant)");
 				return;
 			}
-			const instructions = focusInstructions(gate.action === "aggressive" ? "aggressive" : "focused", subjects);
+			const instructions = focusInstructions(gate.action === "aggressive" ? "aggressive" : "focused", board.activeSubjects);
 			statusLine(ctx, "compacting");
 			// Guard flag set only at the point of no return: a defer or gate error
 			// above must leave the trigger live (review blocker fix).
@@ -379,14 +376,14 @@ export default function (pi: ExtensionAPI) {
 			const d = evaluateEconomy(forced);
 			record(ctx, "compact:smart", d);
 			if (d.kind === "economy" || d.kind === "quality") {
-				const subjects = taskSubjects(ctx);
-				const gate = await relevanceGate(subjects, oldContextExcerpt(ctx), rt.profile.gate, ctx.signal);
+				const board = taskBoard(ctx);
+				const gate = await relevanceGate(board.activeSubjects, oldContextExcerpt(ctx), rt.profile.gate, ctx.signal, board);
 				if (gate.action === "defer") {
-					ctx.ui.notify(`smart-compaction: deferred — context is task-relevant (p=${gate.probability.toFixed(2)}, ${gate.source})`, "info");
+					ctx.ui.notify(`smart-compaction: deferred — ${gate.detail ?? "context is task-relevant"}`, "info");
 					return;
 				}
-				ctx.compact({ customInstructions: focusInstructions(gate.action === "aggressive" ? "aggressive" : "focused", subjects) });
-				ctx.ui.notify(`smart-compaction: compacting (${gate.action}, p=${gate.probability.toFixed(2)}, ${gate.source})`, "info");
+				ctx.compact({ customInstructions: focusInstructions(gate.action === "aggressive" ? "aggressive" : "focused", board.activeSubjects) });
+				ctx.ui.notify(`smart-compaction: compacting (${gate.action}, p=${gate.probability?.toFixed(2) ?? "n/a"}, ${gate.source})`, "info");
 			} else {
 				ctx.ui.notify(`smart-compaction: no compaction — ${(d as { why?: string }).why ?? d.kind}`, "info");
 			}
