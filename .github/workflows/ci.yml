@@ -60,3 +60,27 @@ jobs:
 
       - name: Run herdr-control tests
         run: bash herdr-control/test-fixtures/run-tests.sh
+
+      # The agents extension had NO CI coverage until now, which is how its
+      # chain schema (advertised 2..8) and its enforced cap (3) drifted apart
+      # unnoticed, and how runChain's relay handoff went untested entirely.
+      # Run through tsx rather than bare `node --test`: the suites import
+      # ../lib/*.ts, and Node's native type stripping is still version-dependent.
+      - name: Run agents tool, wiring, and chain-runner tests
+        run: |
+          npx --yes tsx --test agents/test/test-agents-run-tool.mjs
+          npx --yes tsx --test agents/test/test-agents-run-wiring.mjs
+          npx --yes tsx --test agents/test/test-chain-runner.mjs
+          npx --yes tsx --test agents/test/test-bg-trust.mjs
+          npx --yes tsx --test agents/test/test-bg-wake.mjs
+          npx --yes tsx --test agents/test/test-builtins.mjs
+
+      # Negative control: BREAK_VALIDATE=1 makes the tool suite assert that a
+      # known-valid input is rejected. It MUST fail here, proving the guards
+      # above are actually exercised.
+      - name: agents validation negative control (must fail)
+        run: |
+          if BREAK_VALIDATE=1 npx --yes tsx --test agents/test/test-agents-run-tool.mjs; then
+            echo "negative control failed: validation unexpectedly passes broken input" >&2
+            exit 1
+          fi

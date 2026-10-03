@@ -232,9 +232,15 @@ test("chainRoutesToRunner", async () => {
 		const definition = setupTool({
 			sessionCtx: () => sessionCtx,
 			seams: {
-				chainRunner: async (resolved, task) => {
-					runnerCalls.push({ resolved, task });
-					return { ok: true, results: [] };
+				chainRunner: async (resolved, task, ctx) => {
+					runnerCalls.push({ resolved, task, ctx });
+					return {
+						ok: true,
+						results: [
+							{ agentName: "scout", status: "completed", summaryText: "SCOUT-FINDING", durationMs: 5 },
+							{ agentName: "planner", status: "completed", summaryText: "PLANNER-FINDING", durationMs: 7 },
+						],
+					};
 				},
 			},
 		});
@@ -248,17 +254,64 @@ test("chainRoutesToRunner", async () => {
 		assert.deepEqual(runnerCalls[0].resolved.map((r) => r.name), ["scout", "planner"]);
 		assert.ok(runnerCalls[0].task.includes("sentinel-chain"), "sentinel task reaches the runner");
 
-		// Runtime strictly finer than schema: 4 entries pass validate (max 8)
-		// but the runner cap (MAX_CHAIN_LENGTH 3) denies before any runner call.
-		const capped = await definition.execute(
+		// B2 regression: the tool must RETURN the findings. It used to answer
+		// "Chain completed: scout → planner." and drop every summary.
+		assert.match(result.content[0].text, /SCOUT-FINDING/, "step 1 findings reach the caller");
+		assert.match(result.content[0].text, /PLANNER-FINDING/, "step 2 findings reach the caller");
+		// …framed as untrusted, because child output can echo injection text.
+		assert.match(result.content[0].text, /UNTRUSTED SUBAGENT OUTPUT/);
+
+		// M3 regression: timeout_s is per-step and must actually reach the runner.
+		const timed = await definition.execute(
 			"id7",
+			{ mode: "chain", agent: "scout", task: "x", chain: ["scout", "planner"], timeout_s: 90 },
+			undefined, undefined, extensionCtx(tmpDir),
+		);
+		assert.equal(timed.isError, false, timed.content?.[0]?.text);
+		assert.equal(runnerCalls[1].ctx.timeoutMs, 90_000, "timeout_s reaches the chain runner as ms");
+
+		// B1: the schema now advertises the enforced cap, so 4 entries are
+		// rejected during validation and never reach the runner.
+		const capped = await definition.execute(
+			"id8",
 			{ mode: "chain", agent: "scout", task: "x", chain: ["a-one", "b-two", "c-three", "d-four"] },
 			undefined, undefined, extensionCtx(tmpDir),
 		);
 		assert.equal(capped.isError, true);
 		assert.equal(capped.details.code, "invalid-input");
-		assert.match(capped.content[0].text, /capped at 3/);
-		assert.equal(runnerCalls.length, 1, "cap denies before the runner is invoked");
+		assert.match(capped.content[0].text, /chain requires 2\.\.3/);
+		assert.equal(runnerCalls.length, 2, "cap denies before the runner is invoked");
+	} finally {
+		await fs.rm(tmpDir, { recursive: true, force: true });
+	}
+});
+
+test("chainFailureKeepsCompletedStepFindings", async () => {
+	const tmpDir = await makeTmpDir("chainfail");
+	try {
+		const { ctx: sessionCtx } = makeSessionCtx();
+		const definition = setupTool({
+			sessionCtx: () => sessionCtx,
+			seams: {
+				chainRunner: async () => ({
+					ok: false,
+					agentName: "planner",
+					code: "timeout",
+					message: "agent 'planner' failed with status timeout",
+					results: [{ agentName: "scout", status: "completed", summaryText: "EARLY-SURVIVOR", durationMs: 5 }],
+				}),
+			},
+		});
+		const result = await definition.execute(
+			"id9",
+			{ mode: "chain", agent: "scout", task: "x", chain: ["scout", "planner"] },
+			undefined, undefined, extensionCtx(tmpDir),
+		);
+		assert.equal(result.isError, true);
+		assert.equal(result.details.code, "timeout");
+		// The step that DID complete must not be thrown away with the failure.
+		assert.match(result.content[0].text, /EARLY-SURVIVOR/, "partial findings survive a late failure");
+		assert.deepEqual(result.details.completedSteps, [{ agentName: "scout", status: "completed" }]);
 	} finally {
 		await fs.rm(tmpDir, { recursive: true, force: true });
 	}

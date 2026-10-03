@@ -390,7 +390,7 @@ Features:
 - `canRunAgent` runtime gate before child argv construction
 - Project trust required for project agents
 - Ephemeral one-shot agents via `/agents run-temp` (non-TUI fail-closed)
-- Command-only chain mode via `/agents chain scout,planner <task>` (max 3 agents)
+- Chain mode via `/agents chain scout,planner <task>` (max 3 agents) and the `agents_run` tool (mode `chain`, same 3-agent cap; per-step summaries are relayed as framed untrusted data and returned in the tool result)
 - Model profiles with capability hints (`model`, `thinking`) and hash-registered trust
 - Child argv safety: task text via stdin, `--no-approve` by default, forbidden tools blocked
 
