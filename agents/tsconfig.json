@@ -15,19 +15,10 @@
 		"noEmit": true,
 		"skipLibCheck": true,
 		"allowImportingTsExtensions": true,
-		"typeRoots": [
-			"/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@types"
-		],
-		"types": [
-			"node"
-		],
 		"baseUrl": ".",
 		"paths": {
 			"@earendil-works/pi-coding-agent": [
-				"/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"
-			],
-			"typebox": [
-				"/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox"
+				"./node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"
 			]
 		}
 	},

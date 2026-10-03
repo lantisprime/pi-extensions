@@ -1,0 +1,9 @@
+{
+  "name": "pi-agents-extension-types",
+  "private": true,
+  "description": "Type-only dependencies for typechecking this extension. The extension is loaded by pi from source and is not published as a package; these exist so `tsc -p agents/tsconfig.json` resolves the host API's types identically on a developer machine and on a clean CI runner. Previously agents/tsconfig.json hardcoded absolute /opt/homebrew/... paths to a globally-installed pi, so the typecheck could only ever pass on one machine and failed on any clean checkout.",
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.0.0",
+    "@types/node": "^22.0.0"
+  }
+}

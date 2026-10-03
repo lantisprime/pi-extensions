@@ -1,5 +1,6 @@
 .episodic-memory/
 .pi/
+node_modules/
 *.swp
 .*.swp
 .DS_Store
