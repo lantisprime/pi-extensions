@@ -182,6 +182,18 @@ export function evaluateEconomy(input: EvalInput): Decision {
 	const summaryTokens = config.summaryTokens ?? 2000;
 	const { savings, cost, horizonTurns } = savingsEstimate(input, tokens, window, hot, continuation, summaryTokens);
 
+	// Defense in depth. resolvePrices already refuses an all-zero catalog, so this
+	// should be unreachable — but if pricing ever degenerates again, the gate would
+	// compare 0 > 0 and decline forever while looking like an ordinary "no warning".
+	// Report it as the distinct, actionable condition it is instead of failing
+	// silently.
+	if (savings === 0 && cost === 0) {
+		return {
+			kind: "none",
+			why: "pricing-unavailable (savings and cost are both 0 — every resolved price is zero; set config.defaultPrices to restore the economy gate)",
+		};
+	}
+
 	if (savings > cost * margin) {
 		return { kind: "economy", cacheHot: hot, savings, cost, continuationProbability: continuation, horizonTurns };
 	}

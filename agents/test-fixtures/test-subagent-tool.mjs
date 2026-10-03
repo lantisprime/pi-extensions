@@ -221,13 +221,21 @@ async function testBuiltInTrimsAgentAndPreservesMultilineTask() {
 
 // --- Group 4: Registered user execution ---
 
+// NOTE: the user agent below is named "field-researcher", NOT "researcher".
+// "researcher" is one of the eight RESERVED_BUILT_IN_AGENT_NAMES, and
+// registrationEligibility() (lib/registration.ts) deliberately refuses any
+// user/project spec that shadows one — see the `shadowed` branch. This test
+// used to register "researcher" and assert status "registered", which only
+// worked before "researcher" became a built-in; it has been failing with
+// status "blocked" ever since. The reserved-name check is correct and stays.
+// Any user-source spec named after a built-in will be refused by design.
 async function testRegisteredUserRunsAfterGate() {
 	const userDir = await fs.mkdtemp(path.join(os.tmpdir(), "subagent-user-"));
 	const userAgentsDir = path.join(userDir, ".pi", "agent", "agents");
 	await fs.mkdir(userAgentsDir, { recursive: true });
-	const specPath = path.join(userAgentsDir, "researcher.md");
+	const specPath = path.join(userAgentsDir, "field-researcher.md");
 	const specBody = `---
-name: researcher
+name: field-researcher
 description: A research agent
 source: user
 tools: [read, grep]
@@ -242,7 +250,7 @@ Body.
 	assert.equal(regResult.status, "registered");
 
 	let runnerCalled = false;
-	const result = await executeSubagentRun("researcher", "investigate", baseCtx({
+	const result = await executeSubagentRun("field-researcher", "investigate", baseCtx({
 		cwd: userDir,
 		homeDir: userDir,
 		childRunner: async (agent, task) => {
@@ -255,13 +263,42 @@ Body.
 	await fs.rm(userDir, { recursive: true, force: true });
 }
 
+// Counterpart to the test above: a user spec named after a RESERVED built-in
+// must be REFUSED at registration, not merely flagged. This is the fail-closed
+// branch in registrationEligibility() (lib/registration.ts) that made the
+// previous version of testRegisteredUserRunsAfterGate fail — it asserted
+// status "registered" for a spec named "researcher", which has since become a
+// built-in. Detection is already pinned by test-agent-markdown; this pins the
+// refusal itself, which nothing covered.
+async function testRegisteredUserShadowsReservedBuiltInIsRefused() {
+	const userDir = await fs.mkdtemp(path.join(os.tmpdir(), "subagent-shadow-"));
+	const userAgentsDir = path.join(userDir, ".pi", "agent", "agents");
+	await fs.mkdir(userAgentsDir, { recursive: true });
+	const specPath = path.join(userAgentsDir, "researcher.md");
+	await fs.writeFile(specPath, `---
+name: researcher
+description: A research agent
+source: user
+tools: [read, grep]
+prompt: Research the codebase for the question.
+---
+Body.
+`);
+	const { registerAgent } = await import("../lib/registration.ts");
+	const regResult = await registerAgent(specPath, { cwd: userDir, homeDir: userDir, projectTrusted: false, hasUI: true, ui: confirmAllUi() });
+	assert.equal(regResult.status, "blocked");
+	assert.equal(regResult.reason, "shadowed");
+	assert.match(regResult.message, /shadows a reserved built-in name/);
+	await fs.rm(userDir, { recursive: true, force: true });
+}
+
 async function testRunSubagentRegisteredForwardsToolContextLoaderPath() {
 	const userDir = await fs.mkdtemp(path.join(os.tmpdir(), "subagent-user-loader-"));
 	const userAgentsDir = path.join(userDir, ".pi", "agent", "agents");
 	await fs.mkdir(userAgentsDir, { recursive: true });
-	const specPath = path.join(userAgentsDir, "researcher.md");
+	const specPath = path.join(userAgentsDir, "field-researcher.md");
 	const specBody = `---
-name: researcher
+name: field-researcher
 description: A research agent
 source: user
 tools: [read, grep]
@@ -275,7 +312,7 @@ Body.
 	assert.equal(regResult.status, "registered");
 
 	let captured;
-	const result = await executeSubagentRun("researcher", "investigate", baseCtx({
+	const result = await executeSubagentRun("field-researcher", "investigate", baseCtx({
 		cwd: userDir,
 		homeDir: userDir,
 		explicitToolContextLoaderPath: "/trusted/tool-context-loader/index.ts",
@@ -286,7 +323,7 @@ Body.
 	}));
 	assert.equal(result.isError, false, result.text);
 	assert.deepEqual(captured, {
-		name: "researcher",
+		name: "field-researcher",
 		task: "investigate",
 		opts: { cwd: userDir, piCommand: undefined, explicitToolContextLoaderPath: "/trusted/tool-context-loader/index.ts" },
 	});
@@ -1055,6 +1092,7 @@ async function main() {
 		testBuiltInPlannerAndReviewerRun,
 		testBuiltInTrimsAgentAndPreservesMultilineTask,
 		testRegisteredUserRunsAfterGate,
+		testRegisteredUserShadowsReservedBuiltInIsRefused,
 		testRunSubagentRegisteredForwardsToolContextLoaderPath,
 		testUnregisteredUserDeniedNoSpawn,
 		testHashMismatchDeniedNoSpawn,

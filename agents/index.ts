@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, InputEventResult } from "@earendil-works/pi-coding-agent";
 
 export * from "./lib/specs.ts";
 export * from "./lib/agent-markdown.ts";
@@ -29,7 +29,7 @@ import { registerAgentsRunTool } from "./lib/agents-run-tool.ts";
 import { preflightBgAgent } from "./lib/bg-preflight.ts";
 import { getBgTerminalBackend, getBgTerminalBackendByName, listBgTerminalBackends, selectBgTerminalBackend } from "./lib/bg-terminal.ts";
 import { parseBgArgs } from "./lib/bg-args.ts";
-import { formatBuiltInProfilesList, toProfileLibrary, buildProfileLibrary, type ModelProfileLibrary, type ProfileLibraryBuildWarning } from "./lib/profiles.ts";
+import { formatBuiltInProfilesList, toProfileLibrary, buildProfileLibrary, type ModelProfile, type ModelProfileLibrary, type ProfileLibraryBuildWarning } from "./lib/profiles.ts";
 import { discoverProfiles, rejectDuplicateProfileNames, DEFAULT_PROFILE_DISCOVERY_LIMITS, type ParsedProfile } from "./lib/profile-discovery.ts";
 import { addOrReplaceRegisteredProfile, findMatchingRegisteredProfile, type RegisteredProfile } from "./lib/registry.ts";
 import { runChainCommand } from "./lib/chain-runner.ts";
@@ -83,13 +83,19 @@ function attachDeliverResult(pi: ExtensionAPI, ctx: AgentsContext): void {
 }
 
 export default function agentsExtension(pi: ExtensionAPI) {
-	const eventApi = pi as ExtensionAPI & { on?: (name: string, handler: (event: unknown, ctx: AgentsContext) => Promise<void> | void) => void };
+	// NOTE: this used to re-declare `on` via a cast
+	// (`pi as ExtensionAPI & { on?: (name, handler: (event: unknown, ctx: AgentsContext) => Promise<void>|void) => void }`),
+	// which threw away pi's per-event overloads — including the InputEventResult that
+	// the "input" handler legitimately returns. The cast is gone: the module
+	// augmentation in lib/pi-context-augmentation.d.ts lets pi's real ExtensionContext
+	// carry this extension's fields, so `pi.on` can be used directly and each event's
+	// real event/result types are checked.
 	let sessionAgentsCtx: AgentsContext | undefined;
 	// P8-4: clear any live background-run spinner timer + widget when the session shuts down.
 	// N3: bg-state authority root is ALWAYS resolveTrustedHome() (os.userInfo().homedir).
 	// The write path (preflight, worker) and every bg-state read must use the same root;
 	// agentsHomeDir is for user-config discovery only, not bg-run state.
-	eventApi.on?.("session_shutdown", async (_event, ctx) => {
+	pi.on("session_shutdown", async (_event, ctx) => {
 		disposeBackgroundRuns(ctx?.ui ?? { setWidget: () => {} });
 		// Clear status line + stop polling BEFORE async reap so they're always
 		// cleaned up even if reapStaleBgRuns rejects.
@@ -104,7 +110,7 @@ export default function agentsExtension(pi: ExtensionAPI) {
 		}
 		await reapStaleBgRuns(resolveTrustedHome()); // free slots only — NOT key retirement (N5)
 	});
-	eventApi.on?.("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (_event, ctx) => {
 		sessionAgentsCtx = ctx;
 		// Wire deliverResult onto the session ctx so BOTH dispatch paths can reach it: the /agents
 		// command handler (via attachDeliverResult on its own ctx) and the NL `input`-gate handler
@@ -131,7 +137,10 @@ export default function agentsExtension(pi: ExtensionAPI) {
 		bgWakeWatcher = createBgWakeWatcher({
 			sendMessage: (pi as ExtensionAPI & { sendMessage?: BgWakeSend }).sendMessage?.bind(pi),
 			notify: (message: string, level?: string) => {
-				try { ctx.ui.notify(message, level ?? "info"); } catch { /* detached UI */ }
+				// pi's notify takes a closed union. The bg-wake watcher hands us an
+				// open `string`, so map anything unrecognized to "info" instead of
+				// forwarding a level pi would reject.
+				try { ctx.ui.notify(message, level === "warning" || level === "error" ? level : "info"); } catch { /* detached UI */ }
 			},
 		});
 		void bgWakeWatcher.start({ hasUI: ctx?.hasUI });
@@ -167,8 +176,10 @@ export default function agentsExtension(pi: ExtensionAPI) {
 
 	// P7-2: prompt-intent gate — intercept natural-language prompts before model processing.
 	// Gate disables itself for /commands, non-TUI sessions, untrusted projects, and missing config.
-	eventApi.on?.("input", async (event: { text: string }, ctx: AgentsContext) => {
-		const result = await handleGateInput(event.text, ctx, sessionAgentsCtx);
+	pi.on("input", async (event, ctx) => {
+		// pi types this event as InputEvent; narrow defensively anyway so a malformed
+		// event degrades to "no text" instead of throwing inside the gate.
+		const result = await handleGateInput(inputEventText(event), ctx, sessionAgentsCtx);
 		return result;
 	});
 
@@ -337,7 +348,10 @@ export async function handleGateInput(
 	text: string,
 	ctx: AgentsContext,
 	sessionCtx?: AgentsContext,
-): Promise<{ action: "continue" | "handled" | "transform"; text?: string }> {
+// Returns pi's own InputEventResult rather than a loose hand-rolled shape. The
+// discriminated union is a real guarantee: `{action:"transform"}` must carry
+// `text`, and the old optional-`text` signature could not express that.
+): Promise<InputEventResult> {
 	// REQ-9: skip non-TUI sessions
 	if (!ctx.hasUI) return { action: "continue" };
 
@@ -383,7 +397,11 @@ export async function handleGateInput(
 		if (!ctx.deliverResult && sessionCtx?.deliverResult) {
 			ctx.deliverResult = sessionCtx.deliverResult;
 		}
-		if (decision.profile) {
+		// Only the `route` and `bg-launch` decisions carry a profile; the `confirm`
+	// variant has no `profile` member at all. Read it once through an explicit
+	// narrowing instead of reaching for a property the union does not guarantee.
+	const decisionProfile = decision.kind === "confirm" ? undefined : decision.profile;
+	if (decisionProfile) {
 			const diagnostics = await collectAgentDiagnostics({ cwd: ctx.cwd, homeDir: ctx.agentsHomeDir, projectTrusted });
 			ctx.projectTrusted = diagnostics.projectTrusted;
 			ctx.projectRegistry = diagnostics.projectRegistry;
@@ -396,7 +414,7 @@ export async function handleGateInput(
 			// Thread decision.profile through to handleBgCommand as `--profile <name>` (parsed
 			// by parseBgArgs). Mirrors the slash-command path; the gate's profile is the
 			// user's explicit override for this run.
-			const bgArgs = decision.profile ? `--profile ${decision.profile} ${decision.agent} ${text}` : `${decision.agent} ${text}`;
+			const bgArgs = decisionProfile ? `--profile ${decisionProfile} ${decision.agent} ${text}` : `${decision.agent} ${text}`;
 			void __bgLaunchTestHook.fn(bgArgs, ctx, diagnostics).catch((err) => {
 				ctx.ui.notify(`Background launch failed: ${err instanceof Error ? err.message : String(err)}`, "error");
 			});
@@ -404,7 +422,7 @@ export async function handleGateInput(
 			// C3: config-chosen agent = spawned agent — direct dispatch, no re-classification.
 			// Bypasses runIntentCommand's classifier + auto-run rail (SEC-3 satisfied).
 			// Profile passed structurally, not via string interpolation (SEC-2).
-			void __gateDispatch.fn(decision.agent, text, ctx, "built-in", decision.profile).catch((err) => {
+			void __gateDispatch.fn(decision.agent, text, ctx, "built-in", decisionProfile).catch((err) => {
 				ctx.ui.notify(`Gate dispatch failed: ${err instanceof Error ? err.message : String(err)}`, "error");
 			});
 		}
@@ -437,18 +455,32 @@ function resolveProjectTrusted(ctx: AgentsContext): boolean {
 }
 
 function registrationOptions(ctx: AgentsContext, diagnostics: Awaited<ReturnType<typeof collectAgentDiagnostics>>) {
+	// RegistrationPrompt.confirm is REQUIRED, but ctx.ui.confirm is optional (a
+	// headless ctx has none). Build the prompt explicitly and only when a confirm
+	// function actually exists, so registration never calls into a missing method
+	// and can fall back to its non-interactive path. A conditional spread of
+	// `ctx.ui` does NOT narrow the method's optionality, hence the explicit shape.
+	const confirm = ctx.ui.confirm;
 	return {
 		cwd: ctx.cwd,
 		homeDir: ctx.agentsHomeDir,
 		projectTrusted: diagnostics.projectTrusted,
 		hasUI: Boolean(ctx.hasUI),
-		ui: ctx.ui,
+		...(typeof confirm === "function" ? { ui: { confirm: (title: string, message: string) => confirm.call(ctx.ui, title, message) } } : {}),
 		diagnostics,
 	};
 }
 
 function parseFlags(input: string): Set<string> {
 	return new Set(input.split(/\s+/).filter((part) => part.startsWith("--")));
+}
+
+/** Extract the prompt text from pi's `input` event, which its own types declare as
+ *  `unknown`. Returns "" for anything that is not `{ text: string }`. */
+function inputEventText(event: unknown): string {
+	if (typeof event !== "object" || event === null) return "";
+	const text = (event as { text?: unknown }).text;
+	return typeof text === "string" ? text : "";
 }
 
 async function maybeNotifyProjectRecommendation(ctx: AgentsContext, force: boolean, diagnostics = undefined as Awaited<ReturnType<typeof collectAgentDiagnostics>> | undefined): Promise<void> {

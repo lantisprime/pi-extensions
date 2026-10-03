@@ -90,7 +90,9 @@ function validateChildArgInputs(spec: AgentSpec, task: string, options: ChildPiA
 	const maxTaskChars = spec.inputContract?.maxTaskChars ?? spec.limits?.maxTaskChars;
 	if (Number.isInteger(maxTaskChars) && task.length > maxTaskChars) throw new Error(`task exceeds maxTaskChars (${maxTaskChars})`);
 	if (!Array.isArray(spec.tools) || spec.tools.length === 0) throw new Error("agent spec must include at least one tool");
-	const forbidden = new Set(P3_FORBIDDEN_TOOLS);
+	// Set<string>, not Set<typeof P3_FORBIDDEN_TOOLS[number]>: `tool` is validated as a
+	// plain string above, and the set is only ever probed with one.
+	const forbidden = new Set<string>(P3_FORBIDDEN_TOOLS);
 	for (const tool of spec.tools) {
 		if (typeof tool !== "string" || !SAFE_CLI_TOKEN_RE.test(tool)) throw new Error(`unsafe tool name '${String(tool)}'`);
 		if (forbidden.has(tool)) throw new Error(`forbidden child tool '${tool}'`);

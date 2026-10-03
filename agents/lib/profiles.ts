@@ -49,6 +49,13 @@ export type ModelProfile = {
   purpose?: string;
   /** P3f-3: Which source this profile came from. Used for trust check. */
   sourceOrigin?: "built-in" | "user" | "project";
+  /** P3f-3/P3f-4: canonical (realpath'd) file this profile was loaded from, and the
+   *  SHA-256 of the exact bytes read. These ARE the trust identity a project-source
+   *  profile is checked against, so they are part of the contract rather than an
+   *  extra: profile-discovery sets them and resolveSpecProfile forwards them.
+   *  Absent on built-in profiles, which are trusted extension code. */
+  canonicalPath?: string;
+  rawBytesSha256?: string;
 };
 
 /** A collection of profiles. Order determines lookup precedence (built-in > user > project). */
@@ -321,8 +328,8 @@ export function resolveSpecProfile(
     profileProvidedModel: profileHasModel,
     profileProvidedThinking: profileHasThinking,
     profileSourceOrigin: profile.sourceOrigin,
-    profileCanonicalPath: (profile as { canonicalPath?: string }).canonicalPath,
-    profileRawBytesSha256: (profile as { rawBytesSha256?: string }).rawBytesSha256,
+    profileCanonicalPath: profile.canonicalPath,
+    profileRawBytesSha256: profile.rawBytesSha256,
   };
 }
 

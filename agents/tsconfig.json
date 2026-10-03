@@ -1,8 +1,9 @@
 {
-	// Scoped to lib/ on purpose: index.ts and ~32 pre-existing lib errors
-	// (child-runner, subagent-tool, run-resolver, prompts, specs) are untouched
-	// debt from before this extension was ever typechecked. NOT wired into CI —
-	// do that only after that backlog is cleared, or CI goes red on day one.
+	// The WHOLE extension: index.ts + every lib module. 0 errors as of 2026-10-03.
+	// Two batches were cleared in sequence — the 32-error lib/ backlog, then the
+	// 27-error index.ts batch (mostly custom fields this extension attaches to the
+	// host ExtensionContext, now declared in lib/pi-context-augmentation.d.ts).
+	// Wired into CI so neither can return.
 	"compilerOptions": {
 		"target": "ES2022",
 		"module": "ESNext",
@@ -11,23 +12,15 @@
 		"noEmit": true,
 		"skipLibCheck": true,
 		"allowImportingTsExtensions": true,
-		"typeRoots": [
-			"/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@types"
-		],
-		"types": [
-			"node"
-		],
 		"baseUrl": ".",
 		"paths": {
 			"@earendil-works/pi-coding-agent": [
-				"/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"
-			],
-			"typebox": [
-				"/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox"
+				"./node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"
 			]
 		}
 	},
 	"include": [
+		"index.ts",
 		"lib/**/*.ts"
 	]
 }

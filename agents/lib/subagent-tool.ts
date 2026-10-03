@@ -140,7 +140,14 @@ export async function executeSubagentRun(agent: string, task: string, runCtx: Su
 				? await runCtx.childRunner(validatedAgent, prepared.task, childOptions)
 				: await runBuiltInChildAgent(validatedAgent, prepared.task, childOptions, runCtx.profileLibrary);
 			const { text, details } = compactResult(result);
-			return { ok: result.status === "completed", text, details, isError: result.status !== "completed" };
+			// Split the branches so the discriminated union stays honest: a computed
+			// `ok: boolean` matches neither member, and the failure member REQUIRES a
+			// `code`. The child's own status is the most useful code here — it is what
+			// a caller switches on to tell timed-out from spawn-error from failed.
+			if (result.status !== "completed") {
+				return { ok: false, code: result.status, text, details, isError: true };
+			}
+			return { ok: true, text, details, isError: false };
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			return denyOutcome(validatedAgent, "spawn-error", `built-in child execution failed: ${message}`);
@@ -217,7 +224,10 @@ export async function executeSubagentRun(agent: string, task: string, runCtx: Su
 			? await runCtx.childRunner(currentParsed.spec, prepared.task, childOptions)
 			: await runChildAgent(currentParsed.spec, prepared.task, directRunnerOptions, runCtx.profileLibrary);
 		const { text, details } = compactResult(result);
-		return { ok: result.status === "completed", text, details, isError: result.status !== "completed" };
+		if (result.status !== "completed") {
+			return { ok: false, code: result.status, text, details, isError: true };
+		}
+		return { ok: true, text, details, isError: false };
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		return denyOutcome(validatedAgent, "spawn-error", `child execution failed: ${message}`);
@@ -261,8 +271,14 @@ export function registerSubagentTool(pi: ExtensionAPI, sessionCtxRef: SessionAge
 	pi.registerTool({
 		...definition,
 		async execute(_toolCallId, params, _signal, _onUpdate, extensionCtx) {
-			const agent = typeof params.agent === "string" ? params.agent : "";
-			const task = typeof params.task === "string" ? params.task : "";
+			// `params` arrives as unknown (the definition is cast to registerTool's
+			// parameter type, which erases the TypeBox-inferred shape). Narrow to a
+			// record BEFORE reading properties: the old `typeof params.agent` threw
+			// a TypeError if the harness ever passed null/undefined, and this tool's
+			// posture is fail-closed, not fail-crash.
+			const input = (typeof params === "object" && params !== null ? params : {}) as Record<string, unknown>;
+			const agent = typeof input.agent === "string" ? input.agent : "";
+			const task = typeof input.task === "string" ? input.task : "";
 
 			// Fail closed if session context not yet captured.
 			const sessionCtx = sessionCtxRef();

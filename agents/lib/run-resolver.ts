@@ -148,7 +148,7 @@ function resolveJevPath(ctx?: { explicitJevExtensionPath?: string }): string | u
 	return defaultJevExtensionPath();
 }
 
-export function buildChildRunOptions(ctx: { cwd?: string; agentsPiCommand?: string; explicitToolContextLoaderPath?: string; explicitJevExtensionPath?: string }) {
+export function buildChildRunOptions(ctx: Pick<AgentsContextLike, "cwd" | "agentsPiCommand" | "explicitToolContextLoaderPath" | "explicitJevExtensionPath" | "disableContextFiles">) {
 	const explicitToolContextLoaderPath = resolveExplicitToolContextLoaderPath(ctx);
 	const explicitJevExtensionPath = resolveExplicitJevExtensionPath(ctx);
 	return {
@@ -364,11 +364,18 @@ function parseLeadingRunFlags(tokens: string[], start: number, _usage: string, o
 /** P4-2: shared preflight gate — re-read current spec bytes, recompute status, run canRunAgent.
  *  Used by runResolvedTarget (sync, behavior-preserving) and preflightBgAgent (background).
  *  Returns the live parsed spec + gate result, or a denial with a user-facing reason. */
+/** The preflight's ok:true payload: a parsed spec that is PROVEN present. The
+ *  parse type has `spec?`, but the bad-status check below rejects every parse
+ *  without one, so the invariant is real and belongs in the signature. */
+type PreflightParsed = Awaited<ReturnType<typeof parseAgentMarkdownFile>> & {
+	spec: NonNullable<Awaited<ReturnType<typeof parseAgentMarkdownFile>>["spec"]>;
+};
+
 export async function preflightAgentGate(
 	record: RunnableRegisteredRecord,
 	ctx: AgentsContextLike,
 	diagnostics: AgentDiagnostics,
-): Promise<{ ok: true; parsed: Awaited<ReturnType<typeof parseAgentMarkdownFile>>; gate: Awaited<ReturnType<typeof canRunAgent>> } | { ok: false; reason: string; code: string }> {
+): Promise<{ ok: true; parsed: PreflightParsed; gate: Awaited<ReturnType<typeof canRunAgent>> } | { ok: false; reason: string; code: string }> {
 	let currentParsed: Awaited<ReturnType<typeof parseAgentMarkdownFile>>;
 	try {
 		currentParsed = await parseAgentMarkdownFile(record.filePath, { source: record.source });
@@ -376,7 +383,12 @@ export async function preflightAgentGate(
 		const message = error instanceof Error ? error.message : String(error);
 		return { ok: false, code: "re-read-failed", reason: `Agent '${record.name}' is not runnable: failed to re-read current spec bytes: ${message}. Next: /agents inspect ${record.name}` };
 	}
-	if (!currentParsed.spec || currentParsed.status === "invalid" || currentParsed.status === "dangerous" || currentParsed.status === "shadowed") {
+	// Narrow `spec` into a local: the ok:true branch below is only reachable once
+	// the spec has been proven present, but the return type is derived from
+	// parseAgentMarkdownFile whose `spec` is optional — so without this, every
+	// caller had to re-check and `currentParsed.spec.name` was a possible crash.
+	const spec = currentParsed.spec;
+	if (!spec || currentParsed.status === "invalid" || currentParsed.status === "dangerous" || currentParsed.status === "shadowed") {
 		return { ok: false, code: "bad-status", reason: `Agent '${record.name}' is not runnable: current spec status=${currentParsed.status}. Next: /agents inspect ${record.name}` };
 	}
 	const gate = await canRunAgent(
@@ -386,7 +398,7 @@ export async function preflightAgentGate(
 	if (!gate.ok) {
 		return { ok: false, code: gate.code, reason: `Agent '${record.name}' is not runnable: ${gate.reason}. Next: ${nextStepForRunBlock(record, gate.code)}` };
 	}
-	return { ok: true, parsed: currentParsed, gate };
+	return { ok: true, parsed: { ...currentParsed, spec }, gate };
 }
 
 export async function runResolvedTarget(record: RunnableRegisteredRecord, task: string, ctx: AgentsContextLike, diagnostics: AgentDiagnostics, profileOverride?: string, timeoutMs?: number, reviewTarget?: ReviewTargetInput): Promise<void> {
@@ -452,6 +464,13 @@ export async function runIntentCommand(input: string, ctx: AgentsContextLike, di
 	const readOnly = tools.length > 0 && tools.every((t) => READ_ONLY_TOOLS.has(t));
 	const autoRun = decision.confidence >= INTENT_AUTORUN_CONFIDENCE && readOnly;
 	if (!autoRun) {
+		// Headless hosts (bg worker, non-TUI) expose no confirm(). Fail CLOSED: when
+		// there is no way to ask, do NOT auto-run a low-confidence route — a crash
+		// here would be worse, but silently proceeding would be worse still.
+		if (!ctx.ui.confirm) {
+			ctx.ui.notify(`Cannot ask for confirmation in this context, so not routing to '${decision.agent}'.`, "warning");
+			return;
+		}
 		const ok = await ctx.ui.confirm(`Route to ${decision.agent}?`, `${decision.reason} (confidence ${decision.confidence.toFixed(2)})`);
 		if (!ok) { ctx.ui.notify("Routing cancelled.", "info"); return; }
 	}

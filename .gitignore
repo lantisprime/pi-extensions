@@ -1,5 +1,6 @@
 .episodic-memory/
 .pi/
+node_modules/
 *.swp
 .*.swp
 .DS_Store
@@ -9,3 +10,10 @@
 
 # Episodic memory install-version manifest
 .episodic-memory-install.json
+
+# Operator memory index. Points at the active handoff episode in
+# .episodic-memory/ (already ignored above) and is regenerated per session, so
+# tracking it would mean committing a churning pointer to a directory that is
+# deliberately untracked. It was untracked but NOT ignored, which meant a
+# `git add -A` would sweep it into a commit.
+MEMORY.md

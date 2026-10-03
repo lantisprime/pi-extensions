@@ -467,7 +467,17 @@ async function testChainCommandBackgroundsAfterPreflight() {
 		assert.equal(notifications.some((n) => /Chain complete/.test(n.message)), false, "no completion notify until settle");
 		assert.ok(widgets.some((w) => Array.isArray(w.c)), "progress widget rendered while running");
 		release();
-		await new Promise((r) => setImmediate(r)); await new Promise((r) => setImmediate(r));
+		// Poll the actual condition with a bounded deadline. The previous version
+		// waited exactly two setImmediate ticks, which cannot cover the background
+		// chain's real filesystem work (mkdtemp, chmod 0700, spill-file open) — each
+		// of those is a macrotask. The test therefore raced and failed with
+		// "completion notify fired after settle" even though the notify always
+		// arrives. The bound keeps it honest: if the notify never comes, this still
+		// fails rather than hanging.
+		const settledBy = Date.now() + 5_000;
+		while (!notifications.some((n) => /Chain complete/.test(n.message)) && Date.now() < settledBy) {
+			await new Promise((r) => setTimeout(r, 20));
+		}
 		assert.equal(settled, true, "chain settled after release");
 		assert.ok(notifications.some((n) => /Chain complete/.test(n.message)), "completion notify fired after settle");
 		__resetBackgroundRuns();
