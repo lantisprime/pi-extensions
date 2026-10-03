@@ -249,3 +249,99 @@ export function expandEnvString(input: string): string {
 	result = result.replace(/\$([A-Za-z_][A-Za-z0-9_]*)/g, (_, name: string) => process.env[name] ?? "");
 	return result;
 }
+
+/**
+ * pi's built-in-style raw server entry (docs/mcp.md "Configure servers") as
+ * handed to us via getMcpServers()/mcp_servers_change. Loosely typed on
+ * purpose: we map the fields the bridge understands and skip the rest.
+ */
+export interface BuiltinServerConfig {
+	type?: string;
+	command?: string;
+	args?: string[];
+	env?: Record<string, string>;
+	cwd?: string;
+	url?: string;
+	headers?: Record<string, string>;
+	oauth?: unknown;
+	auth?: unknown;
+	exposure?: string;
+	description?: string;
+	toolExposure?: unknown;
+	enabled?: boolean;
+	/** Per-request timeout in seconds (built-in semantics). */
+	timeout?: number;
+}
+
+/** Structural shape of pi's RegisteredMcpServer (kept pi-import-free for tests). */
+export interface RegisteredServerLike {
+	name: string;
+	config?: unknown;
+	extensionPath?: string;
+}
+
+/**
+ * Map a server registered by another extension (pi.registerMcpServer) to the
+ * bridge's internal config shape. Honors pi's built-in-style fields where they
+ * make sense:
+ *   - `timeout` is per-request seconds → mapped to the tools/call timeout in ms.
+ *   - `exposure`: pi's documented default is "codemode"; "codemode",
+ *     "codemode-deferred" and "deferred" map to the bridge's lazy meta tools.
+ *     "direct" registers every tool. "hidden" (registered but unreachable)
+ *     is skipped, and so are `oauth`/`auth` entries the bridge cannot serve.
+ *   - `toolExposure` per-tool overrides are not supported — warned and ignored.
+ * Returns null (with a message pushed onto `warnings`) when the entry cannot
+ * be served.
+ */
+export function registeredToServerConfig(
+	registered: RegisteredServerLike,
+	warnings: string[],
+): McpServerConfig | null {
+	const raw = (expandEnvDeep(registered.config ?? {}) ?? {}) as BuiltinServerConfig;
+	const src = registered.extensionPath ? ` (registered by ${registered.extensionPath.split("/").pop()})` : "";
+	if (raw.oauth) {
+		warnings.push(`server "${registered.name}"${src} uses OAuth; the bridge does not support OAuth, skipping`);
+		return null;
+	}
+	if (raw.auth) {
+		warnings.push(
+			`server "${registered.name}"${src} uses provider-token auth (auth.provider); the bridge cannot authenticate it, skipping`,
+		);
+		return null;
+	}
+	const exposure = typeof raw.exposure === "string" && raw.exposure.length > 0 ? raw.exposure : "codemode";
+	if (exposure === "hidden") {
+		warnings.push(`server "${registered.name}"${src} has exposure "hidden" (registered but unreachable), skipping`);
+		return null;
+	}
+	if (raw.toolExposure !== undefined) {
+		warnings.push(
+			`server "${registered.name}"${src} has toolExposure overrides; the bridge applies the server exposure only`,
+		);
+	}
+	const hasCommand = typeof raw.command === "string" && raw.command.trim().length > 0;
+	const hasUrl = typeof raw.url === "string" && raw.url.trim().length > 0;
+	if (hasCommand === hasUrl) {
+		warnings.push(`server "${registered.name}"${src} needs exactly one of "command" or "url", skipping`);
+		return null;
+	}
+	const config: McpServerConfig = {};
+	if (hasCommand) {
+		config.command = (raw.command as string).trim();
+		if (Array.isArray(raw.args)) config.args = raw.args;
+		if (isStringRecord(raw.env)) config.env = raw.env;
+		if (typeof raw.cwd === "string") config.cwd = raw.cwd;
+	} else {
+		config.url = (raw.url as string).trim();
+		if (isStringRecord(raw.headers)) config.headers = raw.headers;
+	}
+	if (raw.enabled === false) config.enabled = false;
+	if (typeof raw.timeout === "number" && Number.isFinite(raw.timeout) && raw.timeout > 0) {
+		// pi's `timeout` is per-request seconds; the bridge's call timeout is ms.
+		config.callTimeout = Math.round(raw.timeout * 1000);
+	}
+	if (exposure === "codemode" || exposure === "codemode-deferred" || exposure === "deferred") {
+		config.lazy = true;
+	}
+	return config;
+}

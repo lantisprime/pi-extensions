@@ -104,6 +104,51 @@ Zero runtime dependencies — the MCP protocol (JSON-RPC 2.0) is implemented dir
 - **Sampling/roots/elicitation** are declined (`-32601`); server `ping`s are answered.
 - Tools removed server-side after `tools/list_changed` stay registered until session restart (pi has no unregister API); new/changed tools are picked up live.
 
+## Relationship to pi's built-in MCP extension
+
+Registering `/mcp` makes this bridge **replace** pi's built-in MCP extension in
+sessions — the documented replacement mechanism (pi `docs/mcp.md`, "Replace the
+built-in MCP support"). The startup notice about `builtin:mcp` is expected and
+harmless; shell-level `pi mcp add/list` commands keep working because they edit
+`mcp.json`, which this bridge reads.
+
+The bridge also connects servers that other extensions register with
+`pi.registerMcpServer()` (pi `docs/extensions.md`, "MCP servers"): they are read
+via `pi.getMcpServers()` on `session_start` and reconciled on
+`mcp_servers_change` — new registrations connect, config changes reconnect,
+unregistrations disconnect (tools stay registered until restart). A
+file-configured server with the same name takes precedence.
+
+Built-in-style fields are accepted where they make sense:
+
+- `headers` values starting with `!` run a shell command whose entire stdout
+  becomes the header value (pi's `!command` contract), re-evaluated after a 401
+  just like `headersCommand`. Command failures are reported exit-code/signal
+  only — command text, stderr, and secrets never reach error messages.
+- `timeout` (built-in: per-request **seconds**) maps to the bridge's tools/call
+  timeout in ms.
+- `exposure`: pi's documented default (`codemode`) and `deferred` map to the
+  bridge's lazy meta tools; `direct` registers every tool; `hidden` is skipped.
+  Per-tool `toolExposure` overrides are not supported (warned, ignored).
+- `oauth` and `auth: { provider }` entries are skipped with a warning (the
+  bridge implements neither).
+
+Unregister semantics: when the source extension calls `pi.unregisterMcpServer()`
+or a config change arrives, the bridge closes the connection, refuses later
+auto-reconnects, and re-registers the affected tools as `hidden` + erroring so
+stale entries are unreachable (pi has no tool-unregister API). A later
+re-registration with the same name revives the server under the same tool names.
+
+## Known limitations
+
+- Registered servers without explicit `timeout` get the bridge's default tools/
+  call timeout (120s), not pi's per-request 60s; initialize/tools/list stay at
+  the bridge's 30s connect timeout.
+- Tools a server removes after `tools/list_changed` stay registered (failing
+  remotely) until restart.
+- A server-side connection drop while a connect is still in flight waits for
+  that connect to finish before the next reconnect.
+
 ## Testing
 
 ```bash
@@ -115,6 +160,9 @@ npm exec -y --package=tsx -- tsx test/run-http-test.mjs
 
 # Config loader
 npm exec -y --package=tsx -- tsx test/run-config-test.mjs
+
+# Registered-server wiring (config mapping + !cmd resolution)
+npm exec -y --package=tsx -- tsx test/run-wiring-test.mjs
 
 # Typecheck
 npm exec -y --package=typescript@5.9.3 -- tsc --noEmit -p tsconfig.json

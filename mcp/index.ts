@@ -5,24 +5,47 @@
 //   - stdio: spawns the server process (stdio transport)
 //   - http:  Streamable HTTP endpoint (remote servers)
 //
+// This extension REPLACES pi's built-in MCP support in sessions (registering
+// /mcp is the documented replacement mechanism — docs/mcp.md "Replace the
+// built-in MCP support"). It also connects servers that other extensions
+// register with pi.registerMcpServer(): they are read via pi.getMcpServers()
+// on session_start and reconciled on mcp_servers_change (docs/extensions.md
+// "MCP servers"). mcp.json stays the single config surface; built-in-style
+// fields are accepted where they make sense (headers "!cmd" values, `timeout`
+// seconds, `exposure` codemode/deferred → lazy).
+//
 // Servers are configured in `~/.pi/agent/mcp.json` (global) or `.pi/mcp.json`
 // (project-local); see README.md for the format. Use `/mcp` in a session to
 // inspect status or reconnect.
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	McpServersChangeEvent,
+	ToolExposure,
+} from "@earendil-works/pi-coding-agent";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateHead } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import fsSync, { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { McpClient, type McpToolDefinition } from "./lib/client";
-import { loadMcpConfig, type McpServerConfig } from "./lib/config";
-import { mergeHeaders, runHeadersCommand } from "./lib/headers";
+import {
+	loadMcpConfig,
+	registeredToServerConfig,
+	type McpServerConfig,
+} from "./lib/config";
+import {
+	mergeHeaders,
+	resolveEnvCommands,
+	resolveInlineHeaders,
+	runHeadersCommand,
+} from "./lib/headers";
 import { HttpTransport } from "./lib/http";
 import { StdioTransport, type Transport } from "./lib/stdio";
 
 const CLIENT_NAME = "pi-mcp-bridge";
-const CLIENT_VERSION = "0.1.0";
+const CLIENT_VERSION = "0.2.1";
 
 type ServerStatus = "disabled" | "connecting" | "connected" | "error";
 
@@ -35,7 +58,11 @@ interface ServerState {
 	tools: McpToolDefinition[];
 	/** Registered pi tool names for this server. */
 	registered: Set<string>;
+	/** Stable upstream-tool-key → pi tool name, so reconnects reuse the same names. */
+	toolNames: Map<string, string>;
 	connecting: Promise<void> | null;
+	/** Where the entry came from: mcp.json ("file") or another extension's registerMcpServer ("registered"). */
+	source: "file" | "registered";
 }
 
 interface McpContentBlock {
@@ -75,6 +102,40 @@ export default function mcpBridgeExtension(pi: ExtensionAPI) {
 		}
 		takenNames.add(name);
 		return name;
+	}
+
+	/**
+	 * Stable pi tool name for an upstream tool key: re-connects reuse the same
+	 * name instead of allocating `_2`, `_3`… duplicates (same-name registration
+	 * replaces the earlier tool).
+	 */
+	function piNameFor(state: ServerState, key: string): string {
+		const existing = state.toolNames.get(key);
+		if (existing) return existing;
+		const name = allocateToolName(state.name, key);
+		state.toolNames.set(key, name);
+		return name;
+	}
+
+	/**
+	 * Withdraw a server's tools after unregistration: re-register each name as
+	 * hidden and erroring, so stale entries can neither be seen nor silently
+	 * auto-reconnect the server (docs/extensions.md "MCP servers": unregister
+	 * makes the server's tools unreachable).
+	 */
+	function withdrawTools(pi: ExtensionAPI, state: ServerState): void {
+		for (const piName of state.registered) {
+			pi.registerTool({
+				name: piName,
+				label: `${state.name}: withdrawn`,
+				description: `MCP server "${state.name}" was unregistered by its source extension; this tool is withdrawn.`,
+				parameters: Type.Object({}),
+				exposure: "hidden" as ToolExposure,
+				execute(): never {
+					throw new Error(`MCP server "${state.name}" was unregistered by its source extension`);
+				},
+			});
+		}
 	}
 
 	// --- Connection ----------------------------------------------------------
@@ -144,23 +205,28 @@ export default function mcpBridgeExtension(pi: ExtensionAPI) {
 	async function createTransport(config: McpServerConfig): Promise<Transport> {
 		if (config.url) {
 			const authCommand = config.headersCommand;
-			let headers = config.headers;
+			const inline = await resolveInlineHeaders(config.headers);
+			let headers = inline;
 			if (authCommand) {
 				headers = mergeHeaders(headers, await runHeadersCommand(authCommand));
 			}
 			return new HttpTransport({
 				url: config.url,
 				headers,
-				refreshHeaders: authCommand
-					? async () => mergeHeaders(config.headers, await runHeadersCommand(authCommand))
-					: undefined,
+				refreshHeaders: async () => {
+					// Re-run both dynamic header sources after a 401: "!cmd"
+					// values and the headersCommand JSON contract.
+					let fresh = (await resolveInlineHeaders(config.headers)) ?? {};
+					if (authCommand) fresh = mergeHeaders(fresh, await runHeadersCommand(authCommand));
+					return fresh;
+				},
 			});
 		}
 		if (config.command) {
 			return new StdioTransport({
 				command: config.command,
 				args: config.args,
-				env: config.env,
+				env: await resolveEnvCommands(config.env),
 				cwd: config.cwd,
 			});
 		}
@@ -168,6 +234,16 @@ export default function mcpBridgeExtension(pi: ExtensionAPI) {
 	}
 
 	async function disconnectServer(state: ServerState): Promise<void> {
+		// If a connect is in flight, let it finish so we close the client it just
+		// built — and so a later connectServer isn't short-circuited by the stale
+		// in-flight promise, which captured the previous config.
+		if (state.connecting) {
+			try {
+				await state.connecting;
+			} catch {
+				// ignore — the connect failed; nothing to close
+			}
+		}
 		const client = state.client;
 		state.client = null;
 		if (client) {
@@ -197,8 +273,7 @@ export default function mcpBridgeExtension(pi: ExtensionAPI) {
 		if (!tool.name || !/^[A-Za-z0-9_-]{1,128}$/.test(tool.name)) {
 			return; // Skip tools with names we cannot represent safely.
 		}
-		const piName = allocateToolName(state.name, tool.name);
-		if (state.registered.has(piName)) return;
+		const piName = piNameFor(state, tool.name);
 		state.registered.add(piName);
 
 		const description = buildToolDescription(state, tool);
@@ -223,8 +298,8 @@ export default function mcpBridgeExtension(pi: ExtensionAPI) {
 	 * costs a small, fixed context footprint.
 	 */
 	function registerLazyServerTools(pi: ExtensionAPI, state: ServerState): void {
-		const listName = allocateToolName(state.name, "tools");
-		const callName = allocateToolName(state.name, "call");
+		const listName = piNameFor(state, "tools");
+		const callName = piNameFor(state, "call");
 		state.registered.add(listName);
 		state.registered.add(callName);
 
@@ -490,12 +565,21 @@ export default function mcpBridgeExtension(pi: ExtensionAPI) {
 			const transport = state.config.url ? "http" : "stdio";
 			const target = state.config.url ?? `${state.config.command} ${(state.config.args ?? []).join(" ")}`.trim();
 			let line = `${icons[state.status]} ${state.name} [${transport}] ${state.status}`;
+			if (state.source === "registered") line += " (registered)";
 			if (state.status === "connected") line += ` · ${state.tools.length} tools`;
 			else if (state.error) line += ` — ${state.error}`;
 			line += `\n    ${target}`;
 			lines.push(line);
 		}
 		return lines.join("\n");
+	}
+
+	// Names differing only in "-" vs "_" are the same server per pi's
+	// configuration rules; match on the normalized form everywhere.
+	const serverKey = (name: string): string => name.replace(/[-_]/g, "_");
+	function findState(name: string): ServerState | undefined {
+		const key = serverKey(name);
+		return [...states.values()].find((s) => serverKey(s.name) === key);
 	}
 
 	// --- Lifecycle -----------------------------------------------------------
@@ -515,6 +599,9 @@ export default function mcpBridgeExtension(pi: ExtensionAPI) {
 			ctx.ui.notify(`MCP config: ${warning}`, "warning");
 		}
 
+		// Drop previous states without leaking live clients/stdio children
+		// (session_start can re-fire on reload without a session_shutdown).
+		await Promise.allSettled([...states.values()].map(disconnectServer));
 		states.clear();
 		for (const [name, serverConfig] of Object.entries(config.servers)) {
 			states.set(name, {
@@ -524,8 +611,40 @@ export default function mcpBridgeExtension(pi: ExtensionAPI) {
 				client: null,
 				tools: [],
 				registered: new Set(),
+				toolNames: new Map(),
 				connecting: null,
+				source: "file",
 			});
+		}
+
+		// Servers other extensions registered with pi.registerMcpServer() connect
+		// through the bridge too: handling mcp_servers_change marks this extension
+		// as the connector for registered servers (docs/extensions.md "MCP
+		// servers"). A file-configured server with the same name takes precedence.
+		const registerWarnings: string[] = [];
+		for (const registered of pi.getMcpServers()) {
+			if (findState(registered.name)) {
+				registerWarnings.push(
+					`server "${registered.name}" is also configured in mcp.json; the file entry takes precedence, ignoring the registration`,
+				);
+				continue;
+			}
+			const mappedConfig = registeredToServerConfig(registered, registerWarnings);
+			if (!mappedConfig) continue;
+			states.set(registered.name, {
+				name: registered.name,
+				config: mappedConfig,
+				status: mappedConfig.enabled === false ? "disabled" : "connecting",
+				client: null,
+				tools: [],
+				registered: new Set(),
+				toolNames: new Map(),
+				connecting: null,
+				source: "registered",
+			});
+		}
+		for (const warning of registerWarnings) {
+			ctx.ui.notify(`MCP: ${warning}`, "warning");
 		}
 
 		const enabled = [...states.values()].filter((s) => s.config.enabled !== false);
@@ -541,6 +660,84 @@ export default function mcpBridgeExtension(pi: ExtensionAPI) {
 				"warning",
 			);
 		}
+	});
+
+	/**
+	 * Reconcile servers other extensions register/unregister at runtime
+	 * (docs/extensions.md "MCP servers"): handling this event marks the bridge
+	 * as the connector for registered servers. New registrations connect,
+	 * config changes reconnect, re-registrations revive, and unregistrations
+	 * withdraw tools + disable auto-reconnect (tool names stay bound until
+	 * restart, re-registered as hidden).
+	 */
+	pi.on("mcp_servers_change", async (event: McpServersChangeEvent, ctx) => {
+		const wantedByKey = new Map(event.servers.map((server) => [server.name, server] as const));
+		const messages: string[] = [];
+
+		for (const state of states.values()) {
+			if (state.source !== "registered") continue;
+			const next = wantedByKey.get(serverKey(state.name));
+			if (!next) {
+				await disconnectServer(state);
+				state.config.enabled = false; // refuse executeServerTool auto-reconnect
+				state.status = "disabled";
+				state.error = "unregistered by source extension";
+				withdrawTools(pi, state);
+				continue;
+			}
+			const mapped = registeredToServerConfig(next, messages);
+			if (mapped && JSON.stringify(mapped) !== JSON.stringify(state.config)) {
+				await disconnectServer(state);
+				state.config = mapped;
+				state.status = "connecting";
+				await connectServer(state, ctx, true);
+			}
+		}
+
+		for (const [name, registered] of wantedByKey) {
+			const existing = findState(name);
+			if (existing) {
+				if (existing.source === "file") {
+					messages.push(
+						`server "${name}" matches file-configured "${existing.name}"; the file entry takes precedence`,
+					);
+					continue;
+				}
+				// Re-registered after unregistration (or re-listed while disabled):
+				// revive with the current config. toolNames are kept, so the
+				// re-registration replaces the withdrawn hidden tools under the
+				// same names.
+				if (existing.config.enabled === false) {
+					const mapped = registeredToServerConfig(registered, messages);
+					if (!mapped) continue;
+					existing.config = mapped;
+					existing.registered.clear();
+					existing.status = "connecting";
+					await connectServer(existing, ctx, true);
+				}
+				continue;
+			}
+			const mapped = registeredToServerConfig(registered, messages);
+			if (!mapped) continue;
+			const state: ServerState = {
+				name,
+				config: mapped,
+				status: mapped.enabled === false ? "disabled" : "connecting",
+				client: null,
+				tools: [],
+				registered: new Set(),
+				toolNames: new Map(),
+				connecting: null,
+				source: "registered",
+			};
+			states.set(name, state);
+			await connectServer(state, ctx, true);
+		}
+
+		for (const message of messages) {
+			ctx.ui.notify(`MCP: ${message}`, "warning");
+		}
+		updateStatusWidget(ctx);
 	});
 
 	pi.on("session_shutdown", async () => {

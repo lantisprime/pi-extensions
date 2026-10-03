@@ -1,4 +1,5 @@
-// headersCommand + HTTP 401-refresh tests. Run: node test/run-headers-test.mjs
+// headersCommand + HTTP 401-refresh tests. Run: npx tsx test/run-headers-test.mjs
+// (imports ../lib/*.ts, so it needs the tsx loader — bare node cannot resolve them)
 
 import assert from "node:assert";
 import http from "node:http";
@@ -32,11 +33,17 @@ await check("runHeadersCommand rejects non-string values", async () => {
 	await assert.rejects(() => runHeadersCommand(`printf '{"a":1}'`), /string values/);
 });
 
-await check("runHeadersCommand surfaces command failure with stderr tail", async () => {
-	await assert.rejects(
-		() => runHeadersCommand("echo mint failed >&2; exit 3"),
-		/headersCommand failed: mint failed/,
+// Secret discipline: the failure message carries the exit code only — never the
+// command text, never stderr (both can embed the minted token).
+await check("runHeadersCommand reports failure by exit code, never stderr", async () => {
+	const error = await runHeadersCommand("echo Bearer supersecret >&2; exit 3").then(
+		() => undefined,
+		(err) => err,
 	);
+	assert.ok(error, "expected runHeadersCommand to reject");
+	assert.match(error.message, /^headersCommand failed \(exit code 3\)$/);
+	assert.ok(!error.message.includes("supersecret"), `leaked stderr: ${error.message}`);
+	assert.ok(!error.message.includes("exit 3"), `leaked the command text: ${error.message}`);
 });
 
 await check("mergeHeaders: fresh values win over base", () => {
