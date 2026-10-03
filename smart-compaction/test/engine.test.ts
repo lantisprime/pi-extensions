@@ -176,10 +176,17 @@ test("the shipped generic profile actually stops the observed compaction treadmi
 	// base for every profile, not just a fallback) is covered too.
 	const resolved = resolveProfile("litellm", "minimax-m3.1-flash-preview", loadConfig());
 	const profile = "profile" in resolved ? resolved.profile : resolved;
-	assert.equal(profile.compaction.floorFraction, 0.4);
+	assert.equal(profile.compaction.floorFraction, 0.15);
 	assert.equal(profile.compaction.minGapTokens, 20_000);
 
-	// Every context size observed in the treadmill must now decline.
+	// floorFraction 0.15 only binds when window × 0.15 > tokenFloor, i.e. above
+	// ~267k. On a 200k window it is deliberately inert (windowFloor 30k <
+	// tokenFloor 40k), so the floor is NOT what refuses the treadmill there.
+	assert.ok(200_000 * 0.15 < profile.compaction.tokenFloor);
+
+	// Every context size observed in the treadmill must still decline. The
+	// refusal on a 200k window now comes from the savings guard rather than the
+	// floor, so assert the outcome, not the mechanism.
 	for (const tokens of [44_740, 46_479, 58_691, 60_472, 61_223]) {
 		const input = baseInput({ usage: { tokens, contextWindow: 200_000 } });
 		input.profile = profile;
@@ -187,7 +194,26 @@ test("the shipped generic profile actually stops the observed compaction treadmi
 		input.state.growthPerTurn = 5_000;
 		const d = evaluateEconomy(input);
 		assert.equal(d.kind, "none", `${tokens} tokens on a 200k window should not compact`);
-		assert.ok((d as { why: string }).why.includes("window-floor"));
+		assert.ok(
+			(d as { why: string }).why.includes("savings"),
+			`${tokens} on a 200k window should refuse on savings, got: ${(d as { why: string }).why}`,
+		);
+	}
+
+	// The refusal must not depend on the favourable test prices. Live runtime
+	// reports cacheRead 0 for this model, which zeroes hot-cache savings; the
+	// treadmill sizes must still decline on those prices too.
+	for (const tokens of [44_740, 60_472, 98_263]) {
+		const input = baseInput({ usage: { tokens, contextWindow: 200_000 } });
+		input.profile = profile;
+		input.prices = { ...P2, cacheRead: 0 };
+		input.state.turnsSinceCompaction = 50;
+		input.state.growthPerTurn = 5_000;
+		assert.equal(
+			evaluateEconomy(input).kind,
+			"none",
+			`${tokens} must not compact even with cacheRead 0`,
+		);
 	}
 
 	// A context that genuinely needs reclaiming still compacts.
@@ -196,6 +222,40 @@ test("the shipped generic profile actually stops the observed compaction treadmi
 	big.state.turnsSinceCompaction = 50;
 	big.state.growthPerTurn = 5_000;
 	assert.equal(evaluateEconomy(big).kind, "economy");
+});
+
+test("floorFraction 0.15 binds above ~267k and blocks the treadmill on a 1M window", () => {
+	// The live production shape: a 1M window is where the window floor actually
+	// engages, and where the 44k-98k treadmill was observed.
+	const resolved = resolveProfile("litellm", "minimax-m3.1-flash-preview", loadConfig());
+	const profile = "profile" in resolved ? resolved.profile : resolved;
+
+	// 0.15 × 1,048,576 ≈ 157,286, which is above the flat 40k floor, so here the
+	// window floor is the binding constraint.
+	assert.equal(Math.round(1_048_576 * 0.15), 157_286);
+
+	for (const tokens of [44_740, 46_479, 58_691, 60_472, 61_223, 98_263]) {
+		const input = baseInput({ usage: { tokens, contextWindow: 1_048_576 } });
+		input.profile = profile;
+		input.state.turnsSinceCompaction = 50;
+		input.state.growthPerTurn = 5_000;
+		const d = evaluateEconomy(input);
+		assert.equal(d.kind, "none", `${tokens} on a 1M window should not compact`);
+		assert.ok(
+			(d as { why: string }).why.includes("window-floor"),
+			`${tokens} should be refused by the window floor, got: ${(d as { why: string }).why}`,
+		);
+	}
+
+	// Well past the floor the floor stops being the objection, so a genuinely
+	// large session is not blocked by it.
+	const big = baseInput({ usage: { tokens: 250_000, contextWindow: 1_048_576 } });
+	big.profile = profile;
+	big.state.turnsSinceCompaction = 50;
+	big.state.growthPerTurn = 5_000;
+	const d = evaluateEconomy(big);
+	assert.notEqual(d.kind, "none");
+	assert.ok(!(d as { why?: string }).why?.includes("window-floor"));
 });
 
 test("AC-5: cache hot/cold detection", () => {
