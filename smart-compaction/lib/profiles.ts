@@ -264,15 +264,30 @@ export function resolvePrices(
 		!!c && Object.values(c).some((v) => typeof v === "number" && v > 0);
 	const cat = hasAnyPrice(catalog) ? (catalog as Partial<Prices>) : {};
 	const baseInput = cat.input ?? fallback.input ?? generic.input;
+	// A catalog cacheRead of exactly 0 alongside a positive input price is the
+	// same "provider has no data" signal as an all-zero catalog: LiteLLM reports
+	// a real input price but leaves the cache fields at 0 for unpriced cache
+	// tiers. Honoring that 0 makes the engine's hot-cache marginal savings
+	// (horizon × shrink × cacheRead) identically $0, so the economy path can
+	// never fire for such models in ANY cache state — live-verified on
+	// litellm/minimax 2026-10-04: 'savings $0.0000 <= cost $0.0527' at 167,828
+	// tokens, past the window floor. So a catalog 0 falls through to the derived
+	// readRatio price, while a genuinely free-cache model can still pin
+	// cacheRead: 0 explicitly via config (defaultPrices or profile prices),
+	// which outranks the catalog-zero fallback below.
+	const explicitCacheRead = profile.prices?.cacheRead ?? config.defaultPrices?.cacheRead;
+	const catalogCacheRead = cat.cacheRead !== undefined && cat.cacheRead !== 0 ? cat.cacheRead : undefined;
 	return {
 		input: baseInput,
 		output: cat.output ?? fallback.output ?? generic.output,
 		cacheRead:
-			cat.cacheRead !== undefined
-				? cat.cacheRead
-				: cat.input !== undefined
-					? baseInput * profile.cache.readRatio
-					: (fallback.cacheRead ?? generic.cacheRead),
+			catalogCacheRead !== undefined
+				? catalogCacheRead
+				: explicitCacheRead !== undefined
+					? explicitCacheRead
+					: cat.input !== undefined
+						? baseInput * profile.cache.readRatio
+						: (fallback.cacheRead ?? generic.cacheRead),
 		cacheWrite: cat.cacheWrite ?? baseInput * profile.cache.writePremium,
 	};
 }

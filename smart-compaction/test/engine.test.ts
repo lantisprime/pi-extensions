@@ -389,12 +389,48 @@ test("AC-12: an all-zero catalog is treated as ABSENT, not as a free model", () 
 	assert.ok(zeroed.input > 0, "input price must not stay 0 — that is what killed the gate");
 	// null must behave the same way (the live path passed null in one build).
 	assert.deepEqual(resolvePrices(null, prof, cfg), absent);
-	// A PARTIAL catalog is still honoured field-by-field: a real zero alongside a
-	// real price is meaningful data, not a missing catalog.
+	// A PARTIAL catalog is honoured field-by-field for POSITIVE prices. But a
+	// cacheRead of exactly 0 alongside a positive input price is treated as
+	// "no cache pricing data" (LiteLLM leaves cache fields 0 on unpriced cache
+	// tiers), not as "cache reads are free": honouring that 0 made the engine's
+	// hot marginal (H × shrink × cacheRead) identically $0 and the economy path
+	// permanently dead (live 2026-10-04, litellm/minimax: 'savings $0.0000 <=
+	// cost $0.0527' at 167,828 tokens, hot, past the window floor). It falls
+	// through to input × readRatio. A genuinely free-cache model pins
+	// cacheRead: 0 explicitly via config instead.
 	const partial = resolvePrices({ input: 3, output: 9, cacheRead: 0, cacheWrite: 0 }, prof, cfg);
 	assert.equal(partial.input, 3);
 	assert.equal(partial.output, 9);
-	assert.equal(partial.cacheRead, 0, "an explicit 0 cacheRead on a priced model is real and must survive");
+	assert.ok(Math.abs(partial.cacheRead - 0.3) < 1e-9, `catalog cacheRead 0 + priced input must derive from input × readRatio, got ${partial.cacheRead}`);
+	// An explicit user pin of 0 IS honoured (genuinely free cache reads):
+	const cfgPin = loadConfig();
+	cfgPin.defaultPrices = { cacheRead: 0 };
+	const pinned = resolvePrices({ input: 3, output: 9, cacheRead: 0, cacheWrite: 0 }, prof, cfgPin);
+	assert.equal(pinned.cacheRead, 0, "an explicit config pin of cacheRead 0 must survive");
+});
+
+test("AC-10: priced catalog with cacheRead 0 falls to readRatio — economy fires (live minimax regression)", () => {
+	// Live failure 2026-10-04: litellm/minimax catalog {input≈0.278, cacheRead: 0}.
+	// resolvePrices honoured the 0, the hot marginal (H × shrink × cacheRead) was
+	// identically $0, and the settle refused "savings $0.0000 <= cost $0.0527 × 1.25"
+	// at 167,828 tokens — hot, growing, PAST the 157,286 window floor. The economy
+	// path was unreachable in every cache state for such models. Exact live numbers:
+	const prof = { mode: "cost", cache: { readRatio: 0.1, writePremium: 0, ttlShort: 300, ttlLong: 3600 }, tiers: [], compaction: { minIntervalTurns: 4, tokenFloor: 40_000, floorFraction: 0.15, minGapTokens: 20_000 } } as never;
+	const config = { reserveTokens: 16_384, continuationProbability: 0.7, marginFactor: 1.25, summaryTokens: 2000 } as never;
+	const prices = resolvePrices({ input: 0.278, output: 1.2, cacheRead: 0, cacheWrite: 0 }, prof, config);
+	assert.ok(Math.abs(prices.cacheRead - 0.0278) < 1e-9, `cacheRead must derive from input × readRatio, got ${prices.cacheRead}`);
+	const input = {
+		usage: { tokens: 167_828, contextWindow: 1_048_576 },
+		state: { turnsSinceCompaction: 8, growthPerTurn: 5074, tokensStale: false, recentWarm: null },
+		profile: prof, prices, config, modelKey: "litellm/minimax", cacheHot: true,
+	} as never;
+	const d = evaluateEconomy(input);
+	assert.equal(d.kind, "economy", `expected economy at the exact live blocker size, got ${JSON.stringify(d)}`);
+	// Guards that protect the user's original complaint (compaction at ~2%) hold:
+	const small = { ...input, usage: { tokens: 15_000, contextWindow: 1_048_576 } } as never;
+	assert.match((evaluateEconomy(small) as { why: string }).why, /below window-floor \(15000 < 157286\)/);
+	const mid = { ...input, usage: { tokens: 100_000, contextWindow: 1_048_576 } } as never;
+	assert.match((evaluateEconomy(mid) as { why: string }).why, /below window-floor \(100000 < 157286\)/);
 });
 
 test("economy gate fires for a proxied model with an all-zero catalog", () => {

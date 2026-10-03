@@ -44,3 +44,11 @@ pi's own compaction remains the backstop.
 
 - 2026-09-21 v2: AC-3/4/5 reworked per GLM review (executor policy split,
   cache-warner respect, model-switch handling); AC-12 added (precedence).
+- 2026-10-04 v2.2 (AC-10 clarification, live-verified): a catalog `cacheRead: 0`
+  alongside a positive input price counts as MISSING cost data, not as
+  "cache reads are free" — resolvePrices falls through to
+  `input × profile.cache.readRatio`; an explicit `cacheRead: 0` in
+  `defaultPrices`/profile `prices` still pins genuinely free cache reads.
+  Evidence: litellm/minimax live session refused `savings $0.0000 <= cost
+  $0.0527` at 167,828 tokens (hot, past the 157,286 window floor) because the
+  honoured catalog 0 made hot-cache savings identically zero.
