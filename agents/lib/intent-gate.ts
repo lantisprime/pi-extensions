@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import { Worker } from "node:worker_threads";
+import type { BuiltInAgentName } from "./specs.ts";
 
 // ── Types ──
 
@@ -22,7 +23,7 @@ export type IntentGateEntry = {
 };
 
 export type GateDecision =
-	| { kind: "route"; agent: "reviewer"; task: string; profile?: string; metadata: GateMetadata }
+	| { kind: "route"; agent: BuiltInAgentName; task: string; profile?: string; metadata: GateMetadata }
 	| { kind: "inject"; instruction: GateInstruction }
 	| { kind: "confirm"; agent: string; task: string; metadata: GateMetadata }
 	| { kind: "bg-launch"; agent: string; task: string; profile?: string; metadata: GateMetadata }

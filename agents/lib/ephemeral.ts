@@ -9,7 +9,7 @@ import path from "node:path";
 import { promises as fs } from "node:fs";
 
 /** Base roles supported by run-temp, drawing from built-in agent spec prompts. */
-export const EPHEMERAL_BASE_ROLES = ["scout", "planner", "reviewer"] as const;
+export const EPHEMERAL_BASE_ROLES = ["scout", "planner", "reviewer", "architect", "builder", "orchestrator", "researcher", "test-architect"] as const;
 export type EphemeralBaseRole = (typeof EPHEMERAL_BASE_ROLES)[number];
 
 /** Build an in-memory ephemeral AgentSpec cloned from a built-in base role. */
@@ -22,9 +22,9 @@ export function buildEphemeralSpec(baseRole: string): AgentSpec | undefined {
 /** Parse /agents run-temp <base-role> <task> argv. */
 export function parseEphemeralRunArgs(input: string): { ok: true; baseRole: EphemeralBaseRole; task: string } | { ok: false; message: string } {
 	const trimmed = input.trim();
-	if (!trimmed) return { ok: false, message: "Usage: /agents run-temp <scout|planner|reviewer> <task>" };
+	if (!trimmed) return { ok: false, message: `Usage: /agents run-temp <${EPHEMERAL_BASE_ROLES.join("|")}> <task>` };
 	const parts = trimmed.split(/\s+/);
-	if (parts.length < 2) return { ok: false, message: "Usage: /agents run-temp <scout|planner|reviewer> <task>" };
+	if (parts.length < 2) return { ok: false, message: `Usage: /agents run-temp <${EPHEMERAL_BASE_ROLES.join("|")}> <task>` };
 	const role = parts[0];
 	if (!(EPHEMERAL_BASE_ROLES as readonly string[]).includes(role)) {
 		return { ok: false, message: `base-role must be one of: ${EPHEMERAL_BASE_ROLES.join(", ")}` };

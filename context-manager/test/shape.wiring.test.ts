@@ -76,7 +76,10 @@ function asstMsg(id: string) {
 			{ type: "text", text: "working" },
 			{ type: "toolCall", id, name: "bash", arguments: { cmd: "x" } },
 		],
-		usage: { input: 10, cacheRead: 0, cacheWrite: 0 },
+		// CTX-FIX: realistic session size — pi rejects compact below ~24k tokens
+		// (keepRecent + margin), so tests that assert "hard compact fired" must
+		// model a session above that floor (see compact-floor.wiring.test.ts).
+		usage: { input: 24_100, cacheRead: 0, cacheWrite: 0 },
 	};
 }
 function toolMsg(id: string, text: string, toolName = "bash", isError = false) {

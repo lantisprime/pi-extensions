@@ -1,5 +1,6 @@
 import { redactChildPiArgv, type ChildPiInvocation } from "./child-args.ts";
 import type { ChildAgentRunResult } from "./child-runner.ts";
+import type { BuiltInAgentName } from "./specs.ts";
 
 export const INTENT_AUTORUN_CONFIDENCE = 0.8;
 export const HEURISTIC_SATURATION = 6;           // confidence = min(1, weight / SATURATION)
@@ -9,10 +10,18 @@ export const ROLE_DEFAULT_PROFILE = Object.freeze({
   scout: "fast-local", planner: "reasoning-deep", reviewer: "adversarial-review",
 }) as Readonly<Record<string, string>>;
 // keyword → weight, grouped by role. Matched case-insensitively as whole words / phrases.
+// New-role entries (BUILTINS REQ-5): architect design/system/interface;
+// builder implement/patch/draft; orchestrator decompose/delegation/orchestrate;
+// researcher investigate/research/synthesize; test-architect test design/coverage/assertions.
 export const ROLE_KEYWORDS = Object.freeze({
   reviewer: { review: 3, critique: 3, audit: 3, verdict: 2, bug: 2, bugs: 2, assess: 2, evaluate: 2 },
   planner:  { plan: 3, design: 3, "break down": 3, roadmap: 2, steps: 2, architecture: 2, approach: 2 },
   scout:    { find: 2, where: 2, locate: 2, explore: 2, recon: 2, inspect: 2, search: 2, "which files": 2 },
+  architect: { design: 3, system: 3, interface: 3 },
+  builder: { implement: 3, patch: 3, draft: 3 },
+  orchestrator: { decompose: 3, delegation: 3, orchestrate: 3 },
+  researcher: { investigate: 3, research: 3, synthesize: 3 },
+  "test-architect": { "test design": 3, coverage: 3, assertions: 3 },
 }) as Readonly<Record<string, Readonly<Record<string, number>>>>;
 // profileEffect: defined HERE (P6-1) — not in P6-4 — so BOTH P6-3b (runIntentCommand role-default
 // guard) and P6-4 (display labels) import it from intent-router.ts. Structural param (no profiles.ts
@@ -30,7 +39,7 @@ export const CLASSIFIER_LIMITS = Object.freeze({
 export type IntentDecision = { agent: string; confidence: number; reason: string;
   engine: "llm" | "heuristic-fallback"; signals?: string[] };
 export type IntentCandidate = { name: string; source: "built-in" | "user" | "project";
-  description: string; role?: "scout" | "planner" | "reviewer" };
+  description: string; role?: BuiltInAgentName };
 
 export function classifyIntentHeuristic(task: string, candidates: string[]): IntentDecision {
   if (task.trim() === "") throw new Error("task must be non-empty");
@@ -69,12 +78,24 @@ export function classifyIntentHeuristic(task: string, candidates: string[]): Int
     };
   }
 
-  // Pick highest-weight role; break ties by TIE_ORDER
+  // Pick highest-weight role; legacy TIE_ORDER breaks ties among the original
+  // three first (documented: /agents do legacy behavior stays). If no legacy
+  // role reached maxWeight, settle among the newer roles in ROLE_KEYWORDS
+  // insertion order — deterministic, and a new-role winner can no longer fall
+  // through to winner === "" (which crashed on scores[""]).
   let winner = "";
   for (const role of TIE_ORDER) {
     if (scores[role]?.weight === maxWeight) {
       winner = role;
       break;
+    }
+  }
+  if (!winner) {
+    for (const role of Object.keys(ROLE_KEYWORDS)) {
+      if (scores[role]?.weight === maxWeight) {
+        winner = role;
+        break;
+      }
     }
   }
 

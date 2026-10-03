@@ -62,9 +62,7 @@ cp -R agents/index.ts agents/lib ~/.pi/agent/extensions/agents/
 mkdir -p ~/.pi/agent/extensions/tool-context-loader
 cp tool-context-loader/index.ts ~/.pi/agent/extensions/tool-context-loader/index.ts
 
-mkdir -p ~/.pi/agent/extensions/mcp
-cp mcp/index.ts ~/.pi/agent/extensions/mcp/index.ts
-cp -R mcp/lib ~/.pi/agent/extensions/mcp/lib
+ln -sfn "$PWD/mcp" ~/.pi/agent/extensions/mcp
 ```
 
 Then in Pi:
@@ -380,11 +378,12 @@ Defines, registers, vets, and runs constrained child Pi agents.
 
 Features:
 
-- Three built-in agents: `scout`, `planner`, `reviewer` — all read-only (`read`, `grep`, `find`, `ls`)
+- Eight built-in agents: `scout`, `planner`, `reviewer`, `architect`, `builder`, `orchestrator`, `researcher`, `test-architect` — all read-only (`read`, `grep`, `find`, `ls`)
 - Auto-assembled **review context**: the trusted parent hands `reviewer`/`planner` a bounded bundle (branch-vs-base diff + uncommitted + changed files + commits + referenced plan docs) via a temp file, under a root-containment regime (symlink/hardlink-escape refused); child runs with `cwd` = work-tree root
 - Externalized **agent method prompts** in `lib/prompts/<role>.md` (`instructionsFile`, built-in-only) appended to the child system prompt — reaches every dispatch path incl. the NL gate
 - Intent-based routing via `/agents do <task>` — LLM classifier picks the right agent, auto-runs high-confidence read-only picks, confirms below threshold. Falls back to deterministic keyword heuristic on classifier failure
 - `run_subagent` LLM-callable tool for single read-only child runs
+- `agents_run` LLM-callable tool: schema-bounded delegation across `run`/`bg`/`chain` modes (bg: registered agents only via named terminal backend; chain relay caps at 3; `agent`/`profile`/`backend` are pattern-bounded, not enums — unknown names fail closed with the available list)
 - User/project agent registration with Markdown frontmatter specs
 - Deterministic security scanner: safe/suspicious/dangerous classification; dangerous specs never register
 - Raw-byte SHA-256 hash registration with runtime mismatch detection (fail-closed)
@@ -465,6 +464,8 @@ See [`tool-context-loader/README.md`](tool-context-loader/README.md) for details
 
 Connects [Model Context Protocol](https://modelcontextprotocol.io) servers to pi. Every tool an MCP server exposes becomes a native pi tool (`mcp_<server>_<tool>`), whether the server runs locally over stdio (`command`) or remotely over Streamable HTTP (`url`).
 
+**Replaces pi's built-in MCP extension in sessions** — the documented replacement mechanism (registering `/mcp`; pi `docs/mcp.md`). `~/.pi/agent/mcp.json` stays the single config surface; built-in-style fields are accepted where they make sense (`headers` `!cmd` values, `timeout` seconds, `exposure` codemode/deferred → lazy meta tools). The bridge also connects servers other extensions register with `pi.registerMcpServer()` (`pi.getMcpServers()` + `mcp_servers_change`), so `pi mcp add`/`list` keep working from the shell.
+
 Files:
 
 ```text
@@ -475,9 +476,7 @@ mcp/lib/
 Install globally:
 
 ```bash
-mkdir -p ~/.pi/agent/extensions/mcp
-cp mcp/index.ts ~/.pi/agent/extensions/mcp/index.ts
-cp -R mcp/lib ~/.pi/agent/extensions/mcp/lib
+ln -s "$PWD/mcp" ~/.pi/agent/extensions/mcp
 ```
 
 Declare servers in `~/.pi/agent/mcp.json` (global) or `.pi/mcp.json` (project):
@@ -485,13 +484,9 @@ Declare servers in `~/.pi/agent/mcp.json` (global) or `.pi/mcp.json` (project):
 ```json
 {
   "mcpServers": {
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/projects"]
-    },
     "docs": {
       "url": "https://docs.example.com/mcp",
-      "headers": { "Authorization": "Bearer ${DOCS_TOKEN}" }
+      "headers": { "Authorization": "!/path/to/token-script.sh" }
     }
   }
 }
@@ -505,7 +500,7 @@ Commands:
 /mcp tools [server]
 ```
 
-Project-local configs are honored only in trusted projects. See [`mcp/README.md`](mcp/README.md) for the full config format, behavior details, and tests.
+Project-local configs are honored only in trusted projects. See [`mcp/README.md`](mcp/README.md) for the full config format, behavior details, known limitations, and tests.
 
 ### Herdr Control
 
@@ -716,7 +711,7 @@ The ecosystem has several executors; the LLM classifies each task before delegat
 
 | Work | Executor |
 |---|---|
-| Judgment, read-only, bounded | `run_subagent` (scout/planner/reviewer) |
+| Judgment, read-only, bounded | `run_subagent`, or `agents_run` mode `run` (eight built-ins — `/agents built-ins`) |
 | Judgment, read-only, decoupled | `/agents bg` (pull `/agents bg-result`) |
 | Judgment, write-capable | `herdr_spawn` (pi/claude/codex/… in a herdr pane) |
 | Mechanical, continuous | `monitor_threads` monitor |

@@ -59,6 +59,11 @@ interface CMConfig {
 	};
 }
 
+// pi's compact fails with "Nothing to compact (session too small)" when the
+// context sits below its keepRecent budget (~20k tokens) + margin. Floor mirrors
+// smart-compaction's effectiveFloor (smart-compaction/lib/engine.ts:167).
+const COMPACT_MIN_TOKENS = 24_000;
+
 const DEFAULTS: CMConfig = {
 	enabled: true,
 	probeFreshness: true,
@@ -823,6 +828,10 @@ export default function (pi: ExtensionAPI) {
 		if (!st || st.compactInFlight) return false;
 		const now = Date.now();
 		if (st.lastCompactAt !== null && now - st.lastCompactAt < st.config.purityBudget.compactCooldownMin * 60_000) return false;
+		// Token floor: pi rejects compact with "session too small" below keepRecent +
+		// margin (smart-compaction engine.ts:167 precedent). Skip on a positive
+		// below-floor measurement; fail-open when tokens are unknown (AC-21).
+		if (st.lastPromptTokens !== null && st.lastPromptTokens < COMPACT_MIN_TOKENS) return false;
 		st.compactInFlight = true;
 		st.compacting = true; // Phase 3 M6: forced-prompt calls bypass shaping until the next user turn
 		try {

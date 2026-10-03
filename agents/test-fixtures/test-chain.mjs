@@ -319,11 +319,11 @@ async function testChainCombinesBuiltInAndRegistered() {
 	const userAgentsDir = path.join(userDir, ".pi", "agent", "agents");
 	await fs.mkdir(userAgentsDir, { recursive: true });
 	try {
-		await fs.writeFile(path.join(userAgentsDir, "researcher.md"), `---\nname: researcher\ndescription: d\nsource: user\ntools: [read]\nprompt: p\n---\nb`);
+		await fs.writeFile(path.join(userAgentsDir, "reg-user.md"), `---\nname: reg-user\ndescription: d\nsource: user\ntools: [read]\nprompt: p\n---\nb`);
 		const { registerAgent } = await import("../lib/registration.ts");
-		await registerAgent(path.join(userAgentsDir, "researcher.md"), { cwd: userDir, homeDir: userDir, projectTrusted: false, hasUI: true, ui: { notify: () => {}, confirm: async () => true } });
+		await registerAgent(path.join(userAgentsDir, "reg-user.md"), { cwd: userDir, homeDir: userDir, projectTrusted: false, hasUI: true, ui: { notify: () => {}, confirm: async () => true } });
 		const diag = await collectAgentDiagnostics({ cwd: userDir, homeDir: userDir, projectTrusted: false });
-		const preflight = await preflightChain(["scout", "researcher"], diag);
+		const preflight = await preflightChain(["scout", "reg-user"], diag);
 		assert.equal(preflight.ok, true);
 		assert.equal(preflight.resolved[0].source, "built-in");
 		assert.equal(preflight.resolved[1].source, "user");

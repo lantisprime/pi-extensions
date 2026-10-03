@@ -17,7 +17,7 @@ export * from "./lib/context-providers/review-context.ts";
 export { dispatchChildRun, executeChildRun, nextStepForRunBlock, parseDoArgs, parseRunArgs, resolveRegisteredRunTarget, runAgentCommand, runIntentCommand, runResolvedTarget, type AgentsContextLike, type RunnableRegisteredRecord } from "./lib/run-resolver.ts";
 
 import { buildProjectAgentRecommendation, collectAgentDiagnostics, formatAgentInspect, formatAgentsConfig, formatAgentsDoctor, formatAgentsList, formatAgentsRegistry, formatAgentsVerify } from "./lib/diagnostics.ts";
-import { runEphemeralCommand, saveTempCommand, type EphemeralRunHandlerContext } from "./lib/ephemeral.ts";
+import { runEphemeralCommand, saveTempCommand, EPHEMERAL_BASE_ROLES, type EphemeralRunHandlerContext } from "./lib/ephemeral.ts";
 import { registerAgent, registerProjectAgents, unregisterAgent } from "./lib/registration.ts";
 import { runAgentCommand, runIntentCommand, dispatchChildRun, resolveRegisteredRunTarget } from "./lib/run-resolver.ts";
 import type { AgentsContextLike } from "./lib/run-resolver.ts";
@@ -25,6 +25,7 @@ import { disposeBackgroundRuns } from "./lib/bg-run.ts";
 import { createBgWakeWatcher, type BgWakeSend } from "./lib/bg-wake.ts";
 import { validateBuiltInAgentSpecs } from "./lib/specs.ts";
 import { registerSubagentTool } from "./lib/subagent-tool.ts";
+import { registerAgentsRunTool } from "./lib/agents-run-tool.ts";
 import { preflightBgAgent } from "./lib/bg-preflight.ts";
 import { getBgTerminalBackend, getBgTerminalBackendByName, listBgTerminalBackends, selectBgTerminalBackend } from "./lib/bg-terminal.ts";
 import { parseBgArgs } from "./lib/bg-args.ts";
@@ -172,6 +173,16 @@ export default function agentsExtension(pi: ExtensionAPI) {
 	});
 
 	registerSubagentTool(pi, () => sessionAgentsCtx);
+	registerAgentsRunTool(pi, () => sessionAgentsCtx, {
+		// Parity with /agents bg: refresh the bg status line + polling after
+		// every tool-driven bg launch outcome (focused-review blocker B3).
+		onBgSettled: async () => {
+			const c = sessionAgentsCtx;
+			if (!c) return;
+			await updateBgStatusLine(c);
+			ensureBgStatusPolling(c);
+		},
+	});
 
 	pi.registerCommand("agents", {
 		description: "Show P3 agent diagnostics and run built-in or registered agents",
@@ -307,7 +318,7 @@ export default function agentsExtension(pi: ExtensionAPI) {
 				await handleBgOpen(parsed.rest, ctx);
 				return;
 			}
-			ctx.ui.notify("Usage: /agents [list|built-ins|config|inspect <name>|registry|verify|doctor|register <path-or-name>|register-project [--all-safe]|unregister <name>|run <agent> <task>|chain <agent>,<agent>[,<agent>] <task>|run-temp <scout|planner|reviewer> <task>|save-temp <name>|profiles|bg <agent> <task>|bg-status|bg-stop <id>|bg-result <id>|bg-open <id>].", "warning");
+			ctx.ui.notify(`Usage: /agents [list|built-ins|config|inspect <name>|registry|verify|doctor|register <path-or-name>|register-project [--all-safe]|unregister <name>|run <agent> <task>|chain <agent>,<agent>[,<agent>] <task>|run-temp <${EPHEMERAL_BASE_ROLES.join("|")}> <task>|save-temp <name>|profiles|bg <agent> <task>|bg-status|bg-stop <id>|bg-result <id>|bg-open <id>].`, "warning");
 		},
 	});
 }

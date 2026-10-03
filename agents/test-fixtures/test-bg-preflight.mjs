@@ -36,7 +36,7 @@ function makeCtx(home) {
   };
 }
 
-async function setupRegisteredUserAgent(home, name = "researcher") {
+async function setupRegisteredUserAgent(home, name = "reg-user") {
   const userAgentsDir = path.join(home, ".pi", "agent", "agents");
   await fs.mkdir(userAgentsDir, { recursive: true });
   const specPath = path.join(userAgentsDir, `${name}.md`);
@@ -63,7 +63,7 @@ async function testPreflightWritesSignedManifest() {
     assert.ok(result.runId.startsWith("bg-"), "runId is a bg- id");
     assert.equal(result.manifest.version, 1);
     assert.equal(result.manifest.runId, result.runId);
-    assert.equal(result.manifest.identity.agentName, "researcher");
+    assert.equal(result.manifest.identity.agentName, "reg-user");
     assert.equal(result.manifest.identity.canonicalPath, record.canonicalPath);
     assert.equal(result.manifest.options.homeDir, home);
     assert.equal(result.manifest.options.maxDurationSec, 120);
