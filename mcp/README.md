@@ -148,6 +148,13 @@ re-registration with the same name revives the server under the same tool names.
   remotely) until restart.
 - A server-side connection drop while a connect is still in flight waits for
   that connect to finish before the next reconnect.
+- Tool names are `mcp_<server>_<tool>` (single underscores) where pi's built-in
+  MCP support uses `mcp__<server>__<tool>`. The bridge also collapses any `-` to
+  `_`, so an upstream LiteLLM gateway alias like `searxng-web-search` becomes
+  `mcp_searxng_searxng_searxng_web_search` (server × alias × tool, all three
+  tokens underscored). Anything that keys off pi's native `mcp__server__tool`
+  shape — codemode `describeNamespace()` hints, docs, external scripts — will
+  not match the bridge's names. Names are also capped at 120 chars.
 
 ## Testing
 
