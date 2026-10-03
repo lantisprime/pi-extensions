@@ -1,12 +1,9 @@
 {
-	// lib/ is CLEAN (0 errors as of 2026-10-03 — the 32-error backlog was cleared
-	// and is now enforced in CI). index.ts is deliberately still EXCLUDED: it carries
-	// a separate ~27-error batch, mostly the custom `profileLibrary` / `agentsHomeDir` /
-	// `agentsPiCommand` / `deliverResult` fields this extension bolts onto the host
-	// ExtensionContext, which need proper module augmentation of the pi types rather
-	// than casts. Two of those are real bugs, not type noise (see the handoff):
-	// reading `.profile` off a gate-decision union that has no `profile` member.
-	// Add "index.ts" here once that batch is done, in the same PR.
+	// The WHOLE extension: index.ts + every lib module. 0 errors as of 2026-10-03.
+	// Two batches were cleared in sequence — the 32-error lib/ backlog, then the
+	// 27-error index.ts batch (mostly custom fields this extension attaches to the
+	// host ExtensionContext, now declared in lib/pi-context-augmentation.d.ts).
+	// Wired into CI so neither can return.
 	"compilerOptions": {
 		"target": "ES2022",
 		"module": "ESNext",
@@ -23,6 +20,7 @@
 		}
 	},
 	"include": [
+		"index.ts",
 		"lib/**/*.ts"
 	]
 }

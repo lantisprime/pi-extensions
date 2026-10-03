@@ -226,7 +226,13 @@ async function testNoInputInterception() {
 // P8-4: index.ts must wire disposeBackgroundRuns to session_shutdown (REQ-11 integration).
 async function testIndexRegistersShutdownDispose() {
 	const src = readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "index.ts"), "utf8");
-	assert.match(src, /on\?\.\(\s*"session_shutdown"/, "index.ts registers a session_shutdown handler");
+	// The requirement is that a session_shutdown handler is registered, not HOW it is
+	// spelled. This used to assert the literal `on?.("session_shutdown"`, which pinned the
+	// optional-call syntax that only existed because index.ts cast pi's `on` to an
+	// optional. That cast is gone (pi's own per-event overloads are used now), so the
+	// regex accepts either `pi.on(` or `pi.on?.(`. It still fails if the handler is
+	// removed altogether, which is the actual guard.
+	assert.match(src, /on(?:\?\.)?\(\s*"session_shutdown"/, "index.ts registers a session_shutdown handler");
 	assert.match(src, /disposeBackgroundRuns\(/, "index.ts calls disposeBackgroundRuns on shutdown");
 }
 
