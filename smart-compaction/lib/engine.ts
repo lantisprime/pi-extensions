@@ -172,9 +172,15 @@ export function evaluateEconomy(input: EvalInput): Decision {
 	// has nothing to summarize (pi fails with "session too small"). The window
 	// fraction keeps a flat tokenFloor from firing on a large context window.
 	const windowFloor = profile.compaction.floorFraction ? window * profile.compaction.floorFraction : 0;
-	const effectiveFloor = Math.max(profile.compaction.tokenFloor, windowFloor, 24_000);
+	const keepRecentFloor = 24_000;
+	const effectiveFloor = Math.max(profile.compaction.tokenFloor, windowFloor, keepRecentFloor);
 	if (tokens < effectiveFloor) {
-		const driver = windowFloor > profile.compaction.tokenFloor ? "window-floor" : "tokenFloor";
+		// Name the binding constraint, not merely the first one in the max: a
+		// keepRecentFloor of 24k outranks a smaller tokenFloor, and reporting
+		// "tokenFloor" there sent live debugging after a setting that was not
+		// actually in force.
+		const driver =
+			windowFloor >= effectiveFloor ? "window-floor" : keepRecentFloor >= effectiveFloor ? "keepRecent floor" : "tokenFloor";
 		return { kind: "none", why: `below ${driver} (${tokens} < ${Math.round(effectiveFloor)})` };
 	}
 

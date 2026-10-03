@@ -467,3 +467,32 @@ test("part-2 gap: evaluateWarnings no-usage / tokens-stale; isCacheHot ttl<=0", 
 	zeroTtl.state.cacheModelKey = "test/model";
 	assert.equal(isCacheHot(zeroTtl), false);
 });
+
+test("floor guard names the constraint that is actually binding", () => {
+	// Live finding: with tokenFloor 2000, floorFraction 0 and a 1M window the
+	// binding floor is the 24k keepRecent minimum, but the why-string said
+	// "tokenFloor" — sending debugging after a setting that was not in force.
+	const keepRecent = baseInput({ usage: { tokens: 932, contextWindow: 1_048_576 } });
+	keepRecent.state.turnsSinceCompaction = 10;
+	keepRecent.state.growthPerTurn = 5_000;
+	keepRecent.profile.compaction.tokenFloor = 2_000;
+	keepRecent.profile.compaction.floorFraction = 0;
+	const d = evaluateEconomy(keepRecent);
+	assert.equal(d.kind, "none");
+	assert.equal((d as { why: string }).why, "below keepRecent floor (932 < 24000)");
+
+	// Each constraint must be able to win the label in turn.
+	const win = baseInput({ usage: { tokens: 30_000, contextWindow: 1_048_576 } });
+	win.state.turnsSinceCompaction = 10;
+	win.state.growthPerTurn = 5_000;
+	win.profile.compaction.tokenFloor = 40_000;
+	win.profile.compaction.floorFraction = 0;
+	assert.match((evaluateEconomy(win) as { why: string }).why, /^below tokenFloor /);
+
+	const frac = baseInput({ usage: { tokens: 60_000, contextWindow: 1_048_576 } });
+	frac.state.turnsSinceCompaction = 10;
+	frac.state.growthPerTurn = 5_000;
+	frac.profile.compaction.tokenFloor = 40_000;
+	frac.profile.compaction.floorFraction = 0.5;
+	assert.match((evaluateEconomy(frac) as { why: string }).why, /^below window-floor /);
+});
