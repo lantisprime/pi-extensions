@@ -4,8 +4,13 @@ export const DEFAULT_HERDR_PREFIX = "pi-herdr-";
 // herdr agent names: [a-z][a-z0-9_-]{0,31} (herdr.dev/docs/agent-automation).
 export const AGENT_NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 
-// herdr pane refs: w<pN>:p<pN>, e.g. w9:p1. Closed IDs are never reused.
-export const PANE_REF_RE = /^w\d+:p\d+$/;
+// herdr pane refs: w<id>:p<id>, e.g. w9:p1, w2:pV, wH:p1. Closed IDs are never
+// reused. Since herdr 0.9.x the workspace and pane counters are base-36, NOT
+// decimal — a decimal-only regex silently rejected every ref whose counter had
+// reached 10 (wH:p1, pV, tM), which broke herdr_read/herdr_close/terminal
+// targeting on live panes. Keep this the ONLY pane-ref pattern in the codebase:
+// index.ts must import isPaneRef rather than re-literal the regex.
+export const PANE_REF_RE = /^w[0-9A-Za-z]{1,12}:p[0-9A-Za-z]{1,12}$/;
 
 // agent start waits for interactive readiness: 30s default, (3000, 300000] ms.
 export const AGENT_START_TIMEOUT_MS = 30_000;

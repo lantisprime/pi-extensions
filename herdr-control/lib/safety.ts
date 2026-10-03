@@ -15,7 +15,7 @@ export function isPaneRef(raw: string): boolean {
 }
 
 export function requirePaneRef(raw: string): { ok: true; ref: string } | { ok: false; error: string } {
-	if (!isPaneRef(raw)) return { ok: false, error: `invalid herdr pane ref: ${raw} (expected w<N>:p<N>)` };
+	if (!isPaneRef(raw)) return { ok: false, error: `invalid herdr pane ref: ${raw} (expected w<id>:p<id>, ids are base-36, e.g. w9:p1 or w2:pV)` };
 	return { ok: true, ref: raw };
 }
 
