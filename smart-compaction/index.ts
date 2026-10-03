@@ -48,6 +48,13 @@ interface SessionRuntime {
 	profileSource?: string;
 	lastDecision?: { decision: Decision; at: number };
 	compacting: boolean;
+	/**
+	 * Reason from the most recent session_before_compact. Defaults to "overflow"
+	 * so an unrecognised origin never arms the post-compaction gap. pi uses
+	 * "overflow" for its automatic near-limit compaction and "manual" for both
+	 * the user's /compact and this extension's ctx.compact().
+	 */
+	compactionReason: string;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -202,6 +209,7 @@ export default function (pi: ExtensionAPI) {
 			state: initState(),
 			telemetry: new Telemetry(ctx.sessionManager.getSessionId?.()),
 			compacting: false,
+			compactionReason: "overflow",
 		};
 		rendererSeen = false;
 		refreshModel(ctx);
@@ -318,6 +326,9 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_before_compact", async (event: SessionBeforeCompactEvent, ctx) => {
 		if (!rt) return;
+		// Stash the origin so session_compact can tell our/our-user's compaction
+		// (reason "manual") apart from pi's automatic one ("overflow").
+		rt.compactionReason = event.reason;
 		// Observation only in v1: pi-initiated compactions pass through untouched
 		// (never cancel — design A4). Telemetry pairs with outcomes via
 		// session_compact / session_compact_failed.
@@ -328,10 +339,15 @@ export default function (pi: ExtensionAPI) {
 		if (!rt) return;
 		// AC-8: reset interval counters regardless of who compacted.
 		rt.state.turnsSinceCompaction = 0;
-		// Remember what the context weighed before the shrink, so economy cannot
-		// re-fire until it has regrown past it (post-compaction gap). Captured
-		// before lastTurnTokens is cleared below.
-		if (rt.state.lastTurnTokens != null) rt.state.lastCompactionTokens = rt.state.lastTurnTokens;
+		// Arm the post-compaction gap ONLY for compactions that were not pi's
+		// automatic overflow compaction. An overflow compaction fires near
+		// window - reserveTokens and fires this same event, so arming the gap
+		// from it would demand regrowth past the context window itself, silencing
+		// the economy path for the rest of the session.
+		if (rt.compactionReason !== "overflow" && rt.state.lastTurnTokens != null) {
+			rt.state.lastCompactionTokens = rt.state.lastTurnTokens;
+		}
+		rt.compactionReason = "overflow"; // back to the safe default
 		rt.state.lastTurnTokens = null; // token basis changed
 		rt.compacting = false;
 		record(ctx, "session_compact", { kind: "none", why: "compacted" });

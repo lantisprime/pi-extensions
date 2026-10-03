@@ -229,3 +229,95 @@ test("status-line consolidation: legacy segment standalone, bus publish after re
 	assert.equal(statusSets.length, segmentWrites, "bus mode: no further direct setStatus writes");
 	fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test("post-compaction gap is armed by our compaction but not by pi's overflow", async () => {
+	// Regression (GLM review of c5d385d): the gap was recorded in session_compact
+	// for EVERY origin. A pi overflow compaction fires near window - reserveTokens,
+	// so arming the gap from it demanded regrowth past the window itself and
+	// silenced the economy path for the rest of the session. Unit tests over
+	// lib/ cannot catch this: it is a handler state-lifecycle bug.
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sc-gap-"));
+	fs.mkdirSync(path.join(dir, ".pi"));
+	fs.writeFileSync(
+		path.join(dir, ".pi", "smart-compaction.json"),
+		JSON.stringify({
+			enabled: true,
+			profiles: [
+				{
+					match: "litellm/minimax",
+					mode: "cost",
+					prices: { input: 0.3, output: 1.2, cacheRead: 0, cacheWrite: 0 },
+					tiers: [
+						{ upTo: 30_000, inputMult: 1, outputMult: 1 },
+						{ upTo: 1e9, inputMult: 2, outputMult: 1.5 },
+					],
+					cache: { readRatio: 0.1, writePremium: 0, ttlShort: 300, ttlLong: 3600 },
+					// floorFraction 0 opts out of the window floor so this scenario
+					// reaches the gap guard; minGapTokens is the subject under test.
+					compaction: { tokenFloor: 20_000, minIntervalTurns: 0, floorFraction: 0, minGapTokens: 20_000 },
+					gate: { enabled: false, aggressiveBelow: 0.35, deferAbove: 0.7 },
+				},
+			],
+		}),
+	);
+
+	const { pi, handlers } = mockPi();
+	createExtension(pi);
+	const whyOf = (sessionId: string) => telemetryLines(sessionId).map((l) => String(l.why ?? ""));
+
+	// --- Case A: pi's own overflow compaction must NOT arm the gap -----------
+	{
+		const sessionId = `gap-overflow-${Date.now()}`;
+		const { ctx } = mockCtx({ sessionId, cwd: dir, tokens: 250_000 });
+		await drive(handlers, "session_start", {}, ctx);
+		await drive(handlers, "message_end", { message: { role: "assistant", usage: { totalTokens: 250_000 } } }, ctx);
+		await drive(handlers, "turn_end", {}, ctx);
+
+		await drive(handlers, "session_before_compact", { reason: "overflow" }, ctx);
+		await drive(handlers, "session_compact", {}, ctx);
+
+		// Context regrows only 5k past the watermark, well inside minGapTokens.
+		const near = mockCtx({ sessionId, cwd: dir, tokens: 255_000 });
+		await drive(handlers, "turn_end", {}, near.ctx);
+		await drive(handlers, "agent_settled", {}, near.ctx);
+		const whys = whyOf(sessionId);
+		assert.ok(
+			!whys.some((w) => w.includes("post-compaction gap")),
+			`overflow compaction must not arm the gap, saw: ${JSON.stringify(whys)}`,
+		);
+	}
+
+	// --- Case B: a compaction we initiated must arm it -----------------------
+	{
+		const sessionId = `gap-manual-${Date.now()}`;
+		const { ctx } = mockCtx({ sessionId, cwd: dir, tokens: 250_000 });
+		await drive(handlers, "session_start", {}, ctx);
+		await drive(handlers, "message_end", { message: { role: "assistant", usage: { totalTokens: 250_000 } } }, ctx);
+		await drive(handlers, "turn_end", {}, ctx);
+
+		await drive(handlers, "session_before_compact", { reason: "manual" }, ctx);
+		await drive(handlers, "session_compact", {}, ctx);
+
+		// Same 5k regrowth: now the gap must hold economy back.
+		const near = mockCtx({ sessionId, cwd: dir, tokens: 255_000 });
+		await drive(handlers, "turn_end", {}, near.ctx);
+		await drive(handlers, "agent_settled", {}, near.ctx);
+		assert.ok(
+			whyOf(sessionId).some((w) => w.includes("post-compaction gap")),
+			"a manual compaction must arm the post-compaction gap",
+		);
+
+		// Regrown past watermark + gap → the economy path is live again, so the
+		// guard is a delay and never a permanent wedge.
+		const far = mockCtx({ sessionId, cwd: dir, tokens: 275_000 });
+		await drive(handlers, "turn_end", {}, far.ctx);
+		await drive(handlers, "agent_settled", {}, far.ctx);
+		const settled = whyOf(sessionId).slice(-1)[0] ?? "";
+		assert.ok(
+			!settled.includes("post-compaction gap"),
+			`gap must release after regrowth, saw: ${settled}`,
+		);
+	}
+
+	fs.rmSync(dir, { recursive: true, force: true });
+});

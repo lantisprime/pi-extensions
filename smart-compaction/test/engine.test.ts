@@ -144,6 +144,29 @@ test("post-compaction gap stops near-zero-savings recompaction churn", () => {
 	noGap.state.growthPerTurn = 5_000;
 	noGap.state.lastCompactionTokens = 300_000;
 	assert.equal(evaluateEconomy(noGap).kind, "economy");
+
+	// Never a permanent wedge: a watermark at or beyond pi's overflow line
+	// (window - reserveTokens) can never be regrown past, so it must be ignored
+	// rather than silencing economy for the rest of the session. config here is
+	// the baseInput default, reserveTokens 16_384, so the line is 1_032_192.
+	const atOverflow = baseInput();
+	atOverflow.state.turnsSinceCompaction = 10;
+	atOverflow.state.growthPerTurn = 5_000;
+	atOverflow.profile.compaction.minGapTokens = 20_000;
+	atOverflow.state.lastCompactionTokens = 1_032_192;
+	assert.equal(evaluateEconomy(atOverflow).kind, "economy");
+});
+
+test("tokenFloor still blocks in the band the window fraction does not cover", () => {
+	// 30k sits above the 24k keepRecent minimum but below a 40k tokenFloor, and
+	// no floorFraction is set. Without tokenFloor in the max this would compact.
+	const input = baseInput({ usage: { tokens: 30_000, contextWindow: 1_048_576 } });
+	input.state.turnsSinceCompaction = 10;
+	input.state.growthPerTurn = 5_000;
+	assert.equal(input.profile.compaction.floorFraction, undefined);
+	const d = evaluateEconomy(input);
+	assert.equal(d.kind, "none");
+	assert.ok((d as { why: string }).why.includes("tokenFloor"));
 });
 
 test("the shipped generic profile actually stops the observed compaction treadmill", () => {

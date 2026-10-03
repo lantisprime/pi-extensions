@@ -181,12 +181,22 @@ export function evaluateEconomy(input: EvalInput): Decision {
 	// Post-compaction gap. A compaction that barely shrank the context leaves the
 	// floor satisfied almost immediately, so without this the economy path
 	// re-compacts the same material every few turns for near-zero net saving.
-	// Opt-in: a profile that does not set minGapTokens keeps the old behaviour.
+	// Opt-in at the engine level: a profile that does not set minGapTokens gets
+	// no gap guard. Note GENERIC_PROFILE is the merge *base* for every profile
+	// (mergeProfile), so an unset value normally arrives as GENERIC's default
+	// rather than undefined; a profile opts out by setting minGapTokens: 0.
 	const minGap = profile.compaction.minGapTokens ?? 0;
-	if (minGap > 0 && state.lastCompactionTokens != null && tokens < state.lastCompactionTokens + minGap) {
+	// A watermark at or beyond pi's overflow line can never be regrown past, so
+	// it must not be allowed to silence the economy path for the rest of the
+	// session. Treat it as "no gap recorded".
+	const overflowLine = window - (config.reserveTokens ?? 0);
+	const gapFrom = state.lastCompactionTokens != null && state.lastCompactionTokens < overflowLine
+		? state.lastCompactionTokens
+		: null;
+	if (minGap > 0 && gapFrom != null && tokens < gapFrom + minGap) {
 		return {
 			kind: "none",
-			why: `post-compaction gap (${tokens} < ${state.lastCompactionTokens} + ${minGap})`,
+			why: `post-compaction gap (${tokens} < ${gapFrom} + ${minGap})`,
 		};
 	}
 
