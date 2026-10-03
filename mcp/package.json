@@ -1,0 +1,10 @@
+{
+  "name": "pi-mcp-extension-types",
+  "private": true,
+  "description": "Type-only dependencies for typechecking this extension. The extension is loaded by pi from source and is not published as a package; these exist so `tsc -p mcp/tsconfig.json` resolves the host API's types identically on a developer machine and on a clean CI runner. mcp/tsconfig.json previously hardcoded absolute /opt/homebrew/... paths to a globally-installed pi, so its typecheck could only pass on that one machine and failed on any clean checkout.",
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.0.0",
+    "@types/node": "^22.0.0",
+    "typebox": "1.3.27"
+  }
+}
