@@ -6,6 +6,7 @@ economics) and **what** the summary should focus on (relevance gate vs the
 current session tasks, via Jev with a heuristic fallback).
 
 - Spec: `.plans/COMPACT/spec.md` · Design: `.plans/COMPACT/design.md` · Research: `.plans/COMPACT/research.md`
+- Live test method: [`TESTING.md`](./TESTING.md) — needle-in-a-haystack protocol, results, and findings log
 - Status line: `sc <pct>% <mode>` standalone, or published to context-manager's consolidated `ctx-suite` segment when present (see `shared/status-line-protocol.md`) · Commands: `/compact:smart`, `/compact:why`, `/compact:config`
 - Telemetry: JSONL at `~/.pi/agent/cache/smart-compaction/`
 
