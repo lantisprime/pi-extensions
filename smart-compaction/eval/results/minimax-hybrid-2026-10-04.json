@@ -1,0 +1,152 @@
+{
+  "meta": {
+    "approach": "hybrid",
+    "seed": 20261004,
+    "scoredAt": "2026-10-03T23:32:58.520Z"
+  },
+  "perKind": {
+    "crossref": {
+      "pass": 5,
+      "total": 6
+    },
+    "detail": {
+      "pass": 0,
+      "total": 1
+    }
+  },
+  "total": {
+    "pass": 5,
+    "of": 7,
+    "rate": 0.714
+  },
+  "questions": [
+    {
+      "id": "C-codec-lzw",
+      "kind": "fact",
+      "status": "not-asked",
+      "given": ""
+    },
+    {
+      "id": "C-auth-jwt",
+      "kind": "fact",
+      "status": "not-asked",
+      "given": ""
+    },
+    {
+      "id": "C-net-ratelimit",
+      "kind": "fact",
+      "status": "not-asked",
+      "given": ""
+    },
+    {
+      "id": "C-archive-tar",
+      "kind": "fact",
+      "status": "not-asked",
+      "given": ""
+    },
+    {
+      "id": "C-ds-heap",
+      "kind": "fact",
+      "status": "not-asked",
+      "given": ""
+    },
+    {
+      "id": "C-text-diff",
+      "kind": "fact",
+      "status": "not-asked",
+      "given": ""
+    },
+    {
+      "id": "F-codec-lzw",
+      "kind": "location",
+      "status": "not-asked",
+      "given": ""
+    },
+    {
+      "id": "F-auth-jwt",
+      "kind": "location",
+      "status": "not-asked",
+      "given": ""
+    },
+    {
+      "id": "F-net-ratelimit",
+      "kind": "location",
+      "status": "not-asked",
+      "given": ""
+    },
+    {
+      "id": "F-archive-tar",
+      "kind": "location",
+      "status": "not-asked",
+      "given": ""
+    },
+    {
+      "id": "F-ds-heap",
+      "kind": "location",
+      "status": "not-asked",
+      "given": ""
+    },
+    {
+      "id": "F-text-diff",
+      "kind": "location",
+      "status": "not-asked",
+      "given": ""
+    },
+    {
+      "id": "X-req-verifyJwtKeyStamp",
+      "kind": "crossref",
+      "pass": true,
+      "hits": 1,
+      "of": 1,
+      "given": "REQ-114"
+    },
+    {
+      "id": "X-dec-sweepRateLimiterBuckets",
+      "kind": "crossref",
+      "pass": true,
+      "hits": 1,
+      "of": 1,
+      "given": "D-9"
+    },
+    {
+      "id": "X-milestone-extractTarMemberStream",
+      "kind": "crossref",
+      "pass": true,
+      "hits": 1,
+      "of": 1,
+      "given": "M2"
+    },
+    {
+      "id": "X-req-lzw-width",
+      "kind": "crossref",
+      "pass": true,
+      "hits": 1,
+      "of": 1,
+      "given": "REQ-077"
+    },
+    {
+      "id": "X-fn-REQ-233",
+      "kind": "crossref",
+      "pass": true,
+      "hits": 1,
+      "of": 1,
+      "given": "sweepRateLimiterBuckets"
+    },
+    {
+      "id": "X-detail-D-21",
+      "kind": "detail",
+      "pass": false,
+      "hits": 0,
+      "of": 3,
+      "given": "unknown"
+    },
+    {
+      "id": "X-fn-REQ-402",
+      "kind": "crossref",
+      "pass": false,
+      "hits": 1,
+      "of": 2,
+      "given": "REQ-402, normalizeQuat"
+    }
+  ]
+}

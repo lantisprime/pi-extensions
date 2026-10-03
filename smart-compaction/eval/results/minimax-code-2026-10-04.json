@@ -1,0 +1,120 @@
+{
+  "meta": {
+    "approach": "code",
+    "seed": 20261004,
+    "scoredAt": "2026-10-03T23:32:58.283Z"
+  },
+  "perKind": {
+    "fact": {
+      "pass": 6,
+      "total": 6
+    },
+    "location": {
+      "pass": 6,
+      "total": 6
+    }
+  },
+  "total": {
+    "pass": 12,
+    "of": 12,
+    "rate": 1
+  },
+  "questions": [
+    {
+      "id": "C-codec-lzw",
+      "kind": "fact",
+      "pass": true,
+      "hits": 1,
+      "of": 1,
+      "given": "19"
+    },
+    {
+      "id": "C-auth-jwt",
+      "kind": "fact",
+      "pass": true,
+      "hits": 1,
+      "of": 1,
+      "given": "47"
+    },
+    {
+      "id": "C-net-ratelimit",
+      "kind": "fact",
+      "pass": true,
+      "hits": 1,
+      "of": 1,
+      "given": "91000"
+    },
+    {
+      "id": "C-archive-tar",
+      "kind": "fact",
+      "pass": true,
+      "hits": 1,
+      "of": 1,
+      "given": "7168"
+    },
+    {
+      "id": "C-ds-heap",
+      "kind": "fact",
+      "pass": true,
+      "hits": 1,
+      "of": 1,
+      "given": "0.31"
+    },
+    {
+      "id": "C-text-diff",
+      "kind": "fact",
+      "pass": true,
+      "hits": 1,
+      "of": 1,
+      "given": "23"
+    },
+    {
+      "id": "F-codec-lzw",
+      "kind": "location",
+      "pass": true,
+      "hits": 2,
+      "of": 2,
+      "given": "src/codec-lzw.ts"
+    },
+    {
+      "id": "F-auth-jwt",
+      "kind": "location",
+      "pass": true,
+      "hits": 2,
+      "of": 2,
+      "given": "src/auth-jwt.ts"
+    },
+    {
+      "id": "F-net-ratelimit",
+      "kind": "location",
+      "pass": true,
+      "hits": 2,
+      "of": 2,
+      "given": "src/net-ratelimit.ts"
+    },
+    {
+      "id": "F-archive-tar",
+      "kind": "location",
+      "pass": true,
+      "hits": 2,
+      "of": 2,
+      "given": "src/archive-tar.ts"
+    },
+    {
+      "id": "F-ds-heap",
+      "kind": "location",
+      "pass": true,
+      "hits": 2,
+      "of": 2,
+      "given": "src/ds-heap.ts"
+    },
+    {
+      "id": "F-text-diff",
+      "kind": "location",
+      "pass": true,
+      "hits": 2,
+      "of": 2,
+      "given": "src/text-diff.ts"
+    }
+  ]
+}

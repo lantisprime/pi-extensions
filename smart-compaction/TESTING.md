@@ -126,7 +126,35 @@ are reproducible:
 | A2 unanchored (silence rule), economy | 175,187 (16.7%) | YES — $0.161 | **0/10** | unanchored facts do not survive |
 | B unanchored, active task + unrelated context, gate ON | 169,723 (16.2%) | YES — $0.155 | unrelated 0/10, task-adjacent 1/3 | gate saw NO task board (see §7) |
 | C multi-topic (3 domains × 6 files) + grep search phase, gate ON | 161,028 (15.4%) | YES — $0.146 | facts 0/6; file groups survived (cooking-02/05, automotive-03/06, astronomy-01/04), fact→file mapping lost | compaction kicks in mid search workflow |
+| C code-only: 30 unrelated TS modules (200–400 LOC), silent reads, economy | 161,279 (15.4%) | YES — $0.146 | **12/12** (6 constants + 6 fn→file) | summarizer emitted a "Default budget constants per file" table; code identifiers survive (some locations inferred from naming, disclosed by the agent) |
+| H hybrid: code + requirements/design/plan cross-refs, economy | 162,470 (15.5%) | YES — $0.147 | **5/7 asked** (crossref IDs ✓; D-21 rationale lost; confabulated `normalizeQuat` for `slerpWithNudge`) | doc↔code ID links survive; doc *detail* text does not |
 | refusal ladder (all runs) | 15k–149k | no (correct) | — | `min-interval` then `below window-floor (< 157286)` |
+
+Baselines live in `eval/results/` as scorer-generated scorecards (model
+comparable); minimax 2026-10-04: code 12/12, hybrid 5/7, prose-anchored 10/10,
+prose-unanchored 0/10.
+
+## 5b. The three approaches (and the eval set)
+
+The corpus families are now three named approaches, packaged as a reusable
+question-bank harness in [`eval/`](./eval/README.md):
+
+1. **prose** — unrelated-topic text files, needle facts at mid-file depth.
+   Measures baseline fact retention; must be run in an anchoring variant
+   (anchored vs unanchored) because anchoring dominates the outcome.
+2. **code** — unrelated TypeScript modules, 200–400 LOC, needles = exotic
+   function names + distinctive constants. Measures identifier retention.
+   Finding: the economy summarizer reliably tabulates code constants, so code
+   facts survive silent reads (unlike unanchored prose facts).
+3. **hybrid** — code corpus plus requirements/plan/design docs whose IDs
+   cross-reference code needles. Measures doc↔code link survival — the
+   realistic repo case. Finding: ID mappings survive (REQ-114 ↔
+   verifyJwtKeyStamp), rationale details and exact function names do not
+   (plausible-name confabulation observed).
+
+`eval/generate.mjs` emits the corpus + `eval-set.json` (seeded, deterministic);
+`eval/score.mjs` turns the pane's recall answers into a scorecard. New models
+append one scorecard to `eval/results/`.
 
 Interpretation: retention is an **anchoring** effect, not a compaction-quality
 constant. Anchored facts survive; unanchored tool-result-only facts are lost at
@@ -145,9 +173,9 @@ correctness held in every run: nothing below 157,286, one fire just past it.
 
 ## 7. Findings log (feed back into issues)
 
-- **Gate never sees the task board live.** All three 2026-10-04 live runs with
-  gate ON recorded `{"probability":0.5,"source":"default","detail":"no active
-  tasks"}` — including pane B with an ACTIVE `ROTATE-1` task visible in the
+- **Gate never sees the task board live.** All FIVE 2026-10-04 live runs with
+  gate ON (three prose, code + hybrid tabs) recorded
+  `{"probability":0.5,"source":"default","detail":"no active tasks"}` — including pane B with an ACTIVE `ROTATE-1` task visible in the
   footer. Mechanism: the tasks extension injects `<session-tasks>` via
   `before_agent_start` (per-run prompt only); smart-compaction reads
   `ctx.getSystemPrompt()` at `agent_settled`, which returns the base prompt
@@ -158,6 +186,12 @@ correctness held in every run: nothing below 157,286, one fire just past it.
 - **LiteLLM catalog `cacheRead: 0`** was the $0-savings blocker fixed in
   PR #179 — verified by variant A1 firing after the fix (pre-fix refusal
   `savings $0.0000 <= cost $0.0527` at 167,828 tokens, 2026-10-04).
+- **Summarizer salience is type-dependent.** Code constants/identifiers are
+  tabulated by the economy summarizer and survive (12/12); unanchored prose
+  facts are dropped (0/10); doc rationale sentences are dropped while doc ID
+  mappings survive (hybrid). Retention tuning should target the prose-fact and
+  rationale classes explicitly — e.g. task-board subjects or a
+  salience-oriented summary section.
 - **Stale-process artifact:** the user-visible "compacts at 2%" report came
   from long-lived sessions running pre-#178 code (compactions at 44–98k) plus
   a manual `/compact` failing "Nothing to compact" at 25.5k. Not a HEAD bug.
