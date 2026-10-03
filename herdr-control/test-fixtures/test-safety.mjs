@@ -34,6 +34,26 @@ assert.equal(isPaneRef("surface:1"), false);
 assert.equal(requirePaneRef("w1:p2").ok, true);
 assert.equal(requirePaneRef("bogus").ok, false);
 
+// base-36 ids (regression: herdr 0.9.x — the decimal-only regex rejected every
+// ref whose counter reached 10, breaking read/close/terminal on live panes).
+// These exact strings were read from `herdr agent list` on 2026-10-03.
+assert.equal(isPaneRef("w2:p7"), true, "decimal workspace, decimal pane");
+assert.equal(isPaneRef("w2:pV"), true, "letter-suffixed pane id");
+assert.equal(isPaneRef("wH:p1"), true, "letter workspace id");
+assert.equal(isPaneRef("w9:t1"), false, "tab ids are not pane refs");
+assert.equal(isPaneRef("w2:tM"), false, "letter tab id is still not a pane ref");
+assert.equal(isPaneRef("wH:p1:p2"), false, "compound ref rejected");
+assert.equal(isPaneRef("W2:P1"), false, "case-sensitive: refs are w<id>:p<id>");
+assert.equal(isPaneRef("w2p1"), false, "missing colon rejected");
+assert.equal(isPaneRef("w2:p1;rm -rf /"), false, "shell metachars rejected");
+assert.equal(isPaneRef(`w${"9".repeat(13)}:p1`), false, "over-long id rejected");
+assert.deepEqual(requirePaneRef("w2:pV"), { ok: true, ref: "w2:pV" }, "requirePaneRef accepts base-36 refs");
+assert.match(
+	requirePaneRef("nope").error ?? "",
+	/expected w/,
+	"error message still names the expected shape",
+);
+
 // key tokens
 assert.deepEqual(validateKeyTokens("esc").tokens, ["esc"]);
 assert.deepEqual(validateKeyTokens("ctrl+c enter").tokens, ["ctrl+c", "enter"]);
