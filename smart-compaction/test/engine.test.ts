@@ -196,6 +196,60 @@ test("AC-12: price resolution precedence", () => {
 	assert.equal(p2.input, 5); // profile beats config defaults
 });
 
+test("AC-12: an all-zero catalog is treated as ABSENT, not as a free model", () => {
+	const prof = BUILTIN_PROFILES[0];
+	const cfg = loadConfig();
+	// Regression: a LiteLLM-proxied model reported cost {0,0,0,0}. resolvePrices
+	// honoured those zeros, so the economy gate computed savings 0 and cost 0 and
+	// compared 0 > 0 — permanently false, so compaction never fired and the only
+	// trace was "savings $0.0000 <= cost $0.0000". An all-zero catalog means "no
+	// pricing data", so it must fall through to the generic prices.
+	const zeroed = resolvePrices({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, prof, cfg);
+	const absent = resolvePrices(undefined, prof, cfg);
+	assert.deepEqual(zeroed, absent, "all-zero catalog must resolve identically to an absent one");
+	assert.ok(zeroed.input > 0, "input price must not stay 0 — that is what killed the gate");
+	// null must behave the same way (the live path passed null in one build).
+	assert.deepEqual(resolvePrices(null, prof, cfg), absent);
+	// A PARTIAL catalog is still honoured field-by-field: a real zero alongside a
+	// real price is meaningful data, not a missing catalog.
+	const partial = resolvePrices({ input: 3, output: 9, cacheRead: 0, cacheWrite: 0 }, prof, cfg);
+	assert.equal(partial.input, 3);
+	assert.equal(partial.output, 9);
+	assert.equal(partial.cacheRead, 0, "an explicit 0 cacheRead on a priced model is real and must survive");
+});
+
+test("economy gate fires for a proxied model with an all-zero catalog", () => {
+	// End-to-end shape of the live failure: 55k tokens (well past the 40k floor),
+	// cache hot, growth 400/turn. Before the fix this returned
+	// "savings $0.0000 <= cost $0.0000" forever; it must now decide.
+	const prof = { mode: "balanced", cache: { readRatio: 0.1, writePremium: 1.25, ttlShort: 300, ttlLong: 3600 }, tiers: [], compaction: { minIntervalTurns: 4, tokenFloor: 40_000, qualityLine: 0.5 } } as never;
+	const config = { reserveTokens: 20_000, marginFactor: 1.25, summaryTokens: 2000 } as never;
+	const prices = resolvePrices({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, prof, config);
+	const input = {
+		usage: { tokens: 55_000, contextWindow: 1_000_000 },
+		state: { turnsSinceCompaction: 50, growthPerTurn: 400, tokensStale: false, recentWarm: { continuationProbability: 0.7 } },
+		profile: prof, prices, config, modelKey: "litellm/proxied", cacheHot: true,
+	} as never;
+	const d = evaluateEconomy(input);
+	assert.equal(d.kind, "economy", `expected compaction to be selected, got ${JSON.stringify(d)}`);
+});
+
+test("degenerate all-zero pricing is reported, not silently declined", () => {
+	// If prices ever degenerate again, the gate must SAY so rather than compare
+	// 0 > 0 and look like an ordinary no-warning.
+	const prof = { mode: "balanced", cache: { readRatio: 0.1, writePremium: 0, ttlShort: 300, ttlLong: 3600 }, tiers: [], compaction: { minIntervalTurns: 4, tokenFloor: 40_000, qualityLine: 0.5 } } as never;
+	const config = { reserveTokens: 20_000, marginFactor: 1.25, summaryTokens: 2000 } as never;
+	const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as never;
+	const input = {
+		usage: { tokens: 55_000, contextWindow: 1_000_000 },
+		state: { turnsSinceCompaction: 50, growthPerTurn: 400, tokensStale: false, recentWarm: { continuationProbability: 0.7 } },
+		profile: prof, prices: zero, config, modelKey: "x", cacheHot: true,
+	} as never;
+	const d = evaluateEconomy(input);
+	assert.equal(d.kind, "none");
+	assert.match((d as { why: string }).why, /pricing-unavailable/);
+});
+
 test("AC-6: gate mapping thresholds", () => {
 	const gate = { enabled: true, aggressiveBelow: 0.35, deferAbove: 0.7 };
 	assert.equal(mapAction(0.2, gate), "aggressive");

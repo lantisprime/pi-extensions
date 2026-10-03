@@ -215,13 +215,28 @@ export function loadConfig(projectDir?: string): SmartCompactionConfig {
  * except cacheWrite===undefined falls to profile/default (catalog 0 is real "free").
  */
 export function resolvePrices(
-	catalog: Partial<Prices> | undefined,
+	catalog: Partial<Prices> | null | undefined,
 	profile: Profile,
 	config: SmartCompactionConfig,
 ): Prices {
 	const generic: Prices = { input: 1, output: 3, cacheRead: 0.1, cacheWrite: 0 };
 	const fallback: Partial<Prices> = { ...generic, ...(config.defaultPrices ?? {}), ...(profile.prices ?? {}) };
-	const cat = catalog ?? {};
+	// An all-zero catalog is NOT "this model is free" — it is a provider that has
+	// no pricing data (LiteLLM proxies report {0,0,0,0} for unpriced models).
+	// Honouring those zeros yields an all-zero Prices, which makes the economy gate
+	// mathematically unsatisfiable: savings and cost both evaluate to 0, so
+	// `savings > cost * margin` becomes `0 > 0` and compaction can NEVER fire. That
+	// is a silent permanent no-op, not a policy decision — it was observed on a
+	// live LiteLLM model that sat at 55k tokens for 20+ turns declining with
+	// "savings $0.0000 <= cost $0.0000".
+	//
+	// So: treat an all-zero (or null/undefined) catalog as absent and fall through
+	// to profile/config/generic. A catalog with ANY positive field is still
+	// respected field-by-field, so genuine free or partially-priced models keep
+	// their real zeros.
+	const hasAnyPrice = (c: Partial<Prices> | null | undefined): boolean =>
+		!!c && Object.values(c).some((v) => typeof v === "number" && v > 0);
+	const cat = hasAnyPrice(catalog) ? (catalog as Partial<Prices>) : {};
 	const baseInput = cat.input ?? fallback.input ?? generic.input;
 	return {
 		input: baseInput,
