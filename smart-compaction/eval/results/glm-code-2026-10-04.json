@@ -1,0 +1,120 @@
+{
+  "meta": {
+    "approach": "code",
+    "seed": 20261004,
+    "scoredAt": "2026-10-04T01:10:38.761Z"
+  },
+  "perKind": {
+    "fact": {
+      "pass": 0,
+      "total": 6
+    },
+    "location": {
+      "pass": 6,
+      "total": 6
+    }
+  },
+  "total": {
+    "pass": 6,
+    "of": 12,
+    "rate": 0.5
+  },
+  "questions": [
+    {
+      "id": "C-codec-lzw",
+      "kind": "fact",
+      "pass": false,
+      "hits": 0,
+      "of": 1,
+      "given": "unknown"
+    },
+    {
+      "id": "C-auth-jwt",
+      "kind": "fact",
+      "pass": false,
+      "hits": 0,
+      "of": 1,
+      "given": "unknown"
+    },
+    {
+      "id": "C-net-ratelimit",
+      "kind": "fact",
+      "pass": false,
+      "hits": 0,
+      "of": 1,
+      "given": "unknown"
+    },
+    {
+      "id": "C-archive-tar",
+      "kind": "fact",
+      "pass": false,
+      "hits": 0,
+      "of": 1,
+      "given": "unknown"
+    },
+    {
+      "id": "C-ds-heap",
+      "kind": "fact",
+      "pass": false,
+      "hits": 0,
+      "of": 1,
+      "given": "unknown"
+    },
+    {
+      "id": "C-text-diff",
+      "kind": "fact",
+      "pass": false,
+      "hits": 0,
+      "of": 1,
+      "given": "unknown"
+    },
+    {
+      "id": "F-codec-lzw",
+      "kind": "location",
+      "pass": true,
+      "hits": 2,
+      "of": 2,
+      "given": "src/codec-lzw.ts"
+    },
+    {
+      "id": "F-auth-jwt",
+      "kind": "location",
+      "pass": true,
+      "hits": 2,
+      "of": 2,
+      "given": "src/auth-jwt.ts"
+    },
+    {
+      "id": "F-net-ratelimit",
+      "kind": "location",
+      "pass": true,
+      "hits": 2,
+      "of": 2,
+      "given": "src/net-ratelimit.ts"
+    },
+    {
+      "id": "F-archive-tar",
+      "kind": "location",
+      "pass": true,
+      "hits": 2,
+      "of": 2,
+      "given": "src/archive-tar.ts"
+    },
+    {
+      "id": "F-ds-heap",
+      "kind": "location",
+      "pass": true,
+      "hits": 2,
+      "of": 2,
+      "given": "src/ds-heap.ts"
+    },
+    {
+      "id": "F-text-diff",
+      "kind": "location",
+      "pass": true,
+      "hits": 2,
+      "of": 2,
+      "given": "src/text-diff.ts"
+    }
+  ]
+}
