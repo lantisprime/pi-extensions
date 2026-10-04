@@ -154,18 +154,23 @@ ls -t ~/.pi/agent/cache/smart-compaction/telemetry-*.jsonl | head -1   # newest 
 tail -n 5 <that file>
 ```
 
-Expected ladder, then fire:
+Expected ladder (v3 fire line, 2026-10-04 amendment — compaction waits for
+the context-quality line at 0.5 × window, e.g. 524,288 on a 1M window):
 
 ```
 agent_settled why:"min-interval (3/4)"
 agent_settled why:"below window-floor (132154 < 157286)"
-agent_settled decision:"economy" savings>cost×1.25
+agent_settled why:"below fire-line (158732 < 524288 = (qualityLine ?? 0.5)×1048576; …)"
+agent_settled decision:"economy" savings>cost×1.25        ← only past the fire line
 gate {"probability":..,"action":"focused"}
-session_before_compact:manual → session_compact → compact_complete tokensBefore:…
+session_before_compact:manual → session_compact → compact_complete tokensBefore:… tokensAfter:… compactionCall*…
 ```
 
 Note `tokensBefore`, savings/cost, and the gate record — the scorecard writeup
-wants them. Footer shows `sc cost compacting` + ctx drop to ~2% after.
+wants them. `compact_complete` now also records the compaction call's real
+usage (`compactionCallInput/Output/CacheRead/Total`) — audit those against the
+claimed savings (live 2026-10-03: 14 compactions burned 54% of what they
+compacted). Footer shows `sc cost compacting` + ctx drop after.
 
 ### Step 7 — recall turn
 
@@ -240,7 +245,8 @@ See `~/.pi/agent/eval/README.md` for the store's layout.
 
 | Symptom | Cause → fix |
 |---|---|
-| never fires, all `below window-floor` | corpus too small for the window — add files (Step 5 sizing) |
+| never fires, all `below window-floor` / `below fire-line` | corpus too small — v3 fires at 0.5 × window; grow past ~50% ctx (Step 5 sizing) |
+| `pricing-unknown` declines | model catalog has no positive prices — set explicit `prices` in the profile (v3: economy runs only on published/opted-in pricing) |
 | all `min-interval (n/4)` | too few turns — more, smaller growth turns |
 | `pricing-unavailable` / `savings $0.0000` | catalog missing prices — needs the cacheRead-0 fix (PR #179) or explicit `prices` in profile |
 | gate always `default "no active tasks"` | known bug: tasks board injected per-run only, invisible at `agent_settled` (TESTING.md §7) — record it, don't debug your config |

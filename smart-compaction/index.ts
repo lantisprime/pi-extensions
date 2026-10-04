@@ -29,6 +29,7 @@ import { relevanceGate, type GateResult } from "./lib/gate.ts";
 import { parseTaskBoard, type TaskBoard } from "./lib/task-subjects.ts";
 import {
 	loadConfig,
+	pricingKnown,
 	resolvePrices,
 	resolveProfile,
 	type Prices,
@@ -47,6 +48,16 @@ interface SessionRuntime {
 	profile?: Profile;
 	prices?: Prices;
 	profileSource?: string;
+	/** False when the model catalog carries no positive price field (economy declines). */
+	pricingKnown?: boolean;
+	/**
+	 * System prompt as of the last before_agent_start — the per-run render that
+	 * actually contains injected sections like <session-tasks>. ctx
+	 * .getSystemPrompt() at agent_settled returns a render WITHOUT them (known
+	 * gate-blind bug: the relevance gate always saw "no active tasks"), so the
+	 * board is parsed from this capture instead.
+	 */
+	lastSystemPrompt?: string;
 	lastDecision?: { decision: Decision; at: number };
 	compacting: boolean;
 	/**
@@ -95,6 +106,7 @@ export default function (pi: ExtensionAPI) {
 		rt.profileSource = match.source;
 		const catalog = ctx.model?.cost as Partial<Prices> | undefined;
 		rt.prices = resolvePrices(catalog, match.profile, rt.config);
+		rt.pricingKnown = pricingKnown(catalog);
 	}
 
 	function statusLine(ctx: ExtensionContext, extra?: string): void {
@@ -127,7 +139,10 @@ export default function (pi: ExtensionAPI) {
 	 */
 	function taskBoard(ctx: ExtensionContext): TaskBoard {
 		try {
-			return parseTaskBoard(ctx.getSystemPrompt());
+			// The per-run capture is authoritative: ctx.getSystemPrompt() at
+			// agent_settled omits per-run injected sections (gate-blind bug).
+			const prompt = rt?.lastSystemPrompt ?? ctx.getSystemPrompt();
+			return parseTaskBoard(prompt);
 		} catch {
 			return { state: "none", activeSubjects: [], settledCount: 0 };
 		}
@@ -170,6 +185,7 @@ export default function (pi: ExtensionAPI) {
 			state: rt.state,
 			usage: ctx.getContextUsage(),
 			now: Date.now(),
+			pricingKnown: rt.pricingKnown,
 		};
 	}
 
@@ -251,6 +267,15 @@ export default function (pi: ExtensionAPI) {
 		};
 	});
 
+	pi.on("before_agent_start", async (event) => {
+		if (!rt) return;
+		// Capture the per-run system prompt (with injected sections like
+		// <session-tasks>) for the relevance gate at agent_settled — the gate
+		// runs between agent runs, when ctx.getSystemPrompt() no longer
+		// carries them.
+		rt.lastSystemPrompt = event.systemPrompt;
+	});
+
 	pi.on("turn_end", async (_event, ctx) => {
 		if (!rt) return;
 		rt.state.turnCounter += 1;
@@ -309,7 +334,21 @@ export default function (pi: ExtensionAPI) {
 						ts: new Date().toISOString(),
 						event: "compact_complete",
 						decision: "compacted",
-						estimates: { tokensBefore: result.tokensBefore },
+						estimates: {
+							tokensBefore: result.tokensBefore,
+							...(result.estimatedTokensAfter != null ? { tokensAfter: result.estimatedTokensAfter } : {}),
+							// Real cost of the compaction call(s) themselves — auditable
+							// against the savings the trigger claimed (live 2026-10-03:
+							// 14 compactions burned 54% of the context they compacted).
+							...(result.usage
+								? {
+										compactionCallInput: result.usage.input ?? 0,
+										compactionCallOutput: result.usage.output ?? 0,
+										compactionCallCacheRead: result.usage.cacheRead ?? 0,
+										compactionCallTotal: result.usage.totalTokens ?? 0,
+									}
+								: {}),
+						},
 					});
 				},
 				onError: () => {
@@ -398,7 +437,7 @@ export default function (pi: ExtensionAPI) {
 			const lines = [
 				`model: ${key ? `${key.provider}/${key.id}` : "unknown"} (profile: ${rt.profileSource})`,
 				`mode: ${rt.profile?.mode} · tiers: ${JSON.stringify(rt.profile?.tiers ?? [])}`,
-				`prices: ${JSON.stringify(rt.prices)}`,
+				`prices: ${JSON.stringify(rt.prices)}${rt.pricingKnown === false ? " (ASSUMED — economy disabled; set defaultPrices to opt in)" : ""}`,
 				`cache: ${JSON.stringify(rt.profile?.cache)} · lastLLMCall: ${rt.state.lastLLMCallAt ? `${Math.round((Date.now() - rt.state.lastLLMCallAt) / 1000)}s ago` : "never"}`,
 				`growth/turn: ${rt.state.growthPerTurn?.toFixed(0) ?? "?"} tok · turnsSinceCompaction: ${rt.state.turnsSinceCompaction}`,
 				`last decision: ${rt.lastDecision ? `${rt.lastDecision.decision.kind} (${JSON.stringify(rt.lastDecision.decision.kind === "none" ? rt.lastDecision.decision.why : rt.lastDecision.decision)})` : "none yet"}`,

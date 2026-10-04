@@ -6,8 +6,10 @@ import test from "node:test";
 import {
 	evaluateEconomy,
 	evaluateWarnings,
+	estimateSummaryTokens,
 	focusInstructions,
 	initState,
+	nextTriggerLine,
 	inputCost,
 	isCacheHot,
 	savingsEstimate,
@@ -15,7 +17,7 @@ import {
 	type EvalInput,
 } from "../lib/engine.ts";
 import { heuristicRelevance, mapAction } from "../lib/gate.ts";
-import { BUILTIN_PROFILES, globMatch, loadConfig, resolvePrices, resolveProfile } from "../lib/profiles.ts";
+import { BUILTIN_PROFILES, globMatch, loadConfig, pricingKnown, resolvePrices, resolveProfile } from "../lib/profiles.ts";
 
 const GEMINI_TIERS = [
 	{ upTo: 200_000, inputMult: 1, outputMult: 1 },
@@ -194,9 +196,11 @@ test("the shipped generic profile actually stops the observed compaction treadmi
 		input.state.growthPerTurn = 5_000;
 		const d = evaluateEconomy(input);
 		assert.equal(d.kind, "none", `${tokens} tokens on a 200k window should not compact`);
+		// v3 fire line: 0.5 × 200k = 100k. The observed treadmill sizes sit below
+		// the line and are refused there — BEFORE any savings math runs.
 		assert.ok(
-			(d as { why: string }).why.includes("savings"),
-			`${tokens} on a 200k window should refuse on savings, got: ${(d as { why: string }).why}`,
+			(d as { why: string }).why.includes("below fire-line"),
+			`${tokens} on a 200k window should refuse at the fire line, got: ${(d as { why: string }).why}`,
 		);
 	}
 
@@ -247,15 +251,23 @@ test("floorFraction 0.15 binds above ~267k and blocks the treadmill on a 1M wind
 		);
 	}
 
-	// Well past the floor the floor stops being the objection, so a genuinely
-	// large session is not blocked by it.
-	const big = baseInput({ usage: { tokens: 250_000, contextWindow: 1_048_576 } });
+	// Past the floor but below the v3 fire line (0.5 × 1M = 524,288) the refusal
+	// moves from the floor to the fire line: the window floor is only a
+	// permission, the quality line is the decision (2026-10-04 amendment).
+	const mid = baseInput({ usage: { tokens: 250_000, contextWindow: 1_048_576 } });
+	mid.profile = profile;
+	mid.state.turnsSinceCompaction = 50;
+	mid.state.growthPerTurn = 5_000;
+	const dMid = evaluateEconomy(mid);
+	assert.equal(dMid.kind, "none", "250k on a 1M window is below the 524,288 fire line");
+	assert.match((dMid as { why: string }).why, /below fire-line/);
+
+	// A context that crosses the fire line still compacts.
+	const big = baseInput({ usage: { tokens: 550_000, contextWindow: 1_048_576 } });
 	big.profile = profile;
 	big.state.turnsSinceCompaction = 50;
 	big.state.growthPerTurn = 5_000;
-	const d = evaluateEconomy(big);
-	assert.notEqual(d.kind, "none");
-	assert.ok(!(d as { why?: string }).why?.includes("window-floor"));
+	assert.equal(evaluateEconomy(big).kind, "economy");
 });
 
 test("AC-5: cache hot/cold detection", () => {
@@ -373,6 +385,16 @@ test("AC-12: price resolution precedence", () => {
 	cfg2.defaultPrices = { input: 1, output: 3 };
 	const p2 = resolvePrices(undefined, { ...prof, prices: { input: 5 } }, cfg2);
 	assert.equal(p2.input, 5); // profile beats config defaults
+	// v3: an explicit config cacheWrite must reach the resolved prices (the hot
+	// rebuild is priced from prices.cacheWrite now — a silent default of 0 made
+	// compaction look free).
+	const cfg3 = loadConfig();
+	cfg3.defaultPrices = { input: 1, cacheWrite: 2 };
+	const p3 = resolvePrices(undefined, prof, cfg3);
+	assert.equal(p3.cacheWrite, 2, "explicit config cacheWrite must be honored");
+	// profile prices beat config defaults for cacheWrite too
+	const p4 = resolvePrices(undefined, { ...prof, prices: { cacheWrite: 4 } }, cfg3);
+	assert.equal(p4.cacheWrite, 4);
 });
 
 test("AC-12: an all-zero catalog is treated as ABSENT, not as a free model", () => {
@@ -425,7 +447,16 @@ test("AC-10: priced catalog with cacheRead 0 falls to readRatio — economy fire
 		profile: prof, prices, config, modelKey: "litellm/minimax", cacheHot: true,
 	} as never;
 	const d = evaluateEconomy(input);
-	assert.equal(d.kind, "economy", `expected economy at the exact live blocker size, got ${JSON.stringify(d)}`);
+	// v3 (2026-10-04 amendment): 167,828 is past the 157,286 permission floor
+	// but below the 524,288 fire line, so the refusal is now the fire line. The
+	// regression's original point — derived readRatio pricing must not
+	// dead-stop the economy path — is proven by the fire case past the line.
+	assert.equal(d.kind, "none", `167,828 is below the fire line, got ${JSON.stringify(d)}`);
+	assert.match((d as { why: string }).why, /below fire-line/);
+	// Same derived-cacheRead prices, past the fire line: the economy path is
+	// reachable (no dead stop).
+	const past = { ...input, usage: { tokens: 550_000, contextWindow: 1_048_576 } } as never;
+	assert.equal(evaluateEconomy(past).kind, "economy", "derived cacheRead must not dead-stop past the fire line");
 	// Guards that protect the user's original complaint (compaction at ~2%) hold:
 	const small = { ...input, usage: { tokens: 15_000, contextWindow: 1_048_576 } } as never;
 	assert.match((evaluateEconomy(small) as { why: string }).why, /below window-floor \(15000 < 157286\)/);
@@ -441,12 +472,17 @@ test("economy gate fires for a proxied model with an all-zero catalog", () => {
 	const config = { reserveTokens: 20_000, marginFactor: 1.25, summaryTokens: 2000 } as never;
 	const prices = resolvePrices({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, prof, config);
 	const input = {
-		usage: { tokens: 55_000, contextWindow: 1_000_000 },
+		usage: { tokens: 550_000, contextWindow: 1_000_000 },
 		state: { turnsSinceCompaction: 50, growthPerTurn: 400, tokensStale: false, recentWarm: { continuationProbability: 0.7 } },
 		profile: prof, prices, config, modelKey: "litellm/proxied", cacheHot: true,
 	} as never;
 	const d = evaluateEconomy(input);
-	assert.equal(d.kind, "economy", `expected compaction to be selected, got ${JSON.stringify(d)}`);
+	assert.equal(d.kind, "economy", `expected compaction to be selected past the fire line, got ${JSON.stringify(d)}`);
+	// v3: at the wiring level an all-zero/absent catalog sets pricingKnown=false
+	// and the economy path declines BEFORE running fabricated-price math.
+	const unknown = { ...input, pricingKnown: false } as never;
+	assert.equal(evaluateEconomy(unknown).kind, "none");
+	assert.match((evaluateEconomy(unknown) as { why: string }).why, /pricing-unknown/);
 });
 
 test("degenerate all-zero pricing is reported, not silently declined", () => {
@@ -456,7 +492,7 @@ test("degenerate all-zero pricing is reported, not silently declined", () => {
 	const config = { reserveTokens: 20_000, marginFactor: 1.25, summaryTokens: 2000 } as never;
 	const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as never;
 	const input = {
-		usage: { tokens: 55_000, contextWindow: 1_000_000 },
+		usage: { tokens: 550_000, contextWindow: 1_000_000 },
 		state: { turnsSinceCompaction: 50, growthPerTurn: 400, tokensStale: false, recentWarm: { continuationProbability: 0.7 } },
 		profile: prof, prices: zero, config, modelKey: "x", cacheHot: true,
 	} as never;
@@ -591,4 +627,87 @@ test("floor guard names the constraint that is actually binding", () => {
 	frac.profile.compaction.tokenFloor = 40_000;
 	frac.profile.compaction.floorFraction = 0.5;
 	assert.match((evaluateEconomy(frac) as { why: string }).why, /^below window-floor /);
+});
+
+// ---------- v3: fire line, pricing provenance, honest estimates ----------
+
+/** baseInput with NO tiers — the fire line (not regime-activity) is the gate. */
+function flatInput(over: Partial<EvalInput> = {}): EvalInput {
+	const input = baseInput(over);
+	input.profile = { ...input.profile, tiers: [] };
+	return input;
+}
+
+test("v3 fire line: balanced default 0.5 gates the economy path", () => {
+	const input = flatInput({ usage: { tokens: 490_000, contextWindow: 1_048_576 } });
+	input.state.turnsSinceCompaction = 50;
+	input.state.growthPerTurn = 5_000;
+	const d = evaluateEconomy(input);
+	assert.equal(d.kind, "none", "49% of the window is below the default fire line");
+	assert.match((d as { why: string }).why, /below fire-line \(490000 < 524288/);
+
+	const past = flatInput({ usage: { tokens: 540_000, contextWindow: 1_048_576 } });
+	past.state.turnsSinceCompaction = 50;
+	past.state.growthPerTurn = 5_000;
+	assert.equal(evaluateEconomy(past).kind, "economy", "past the quality line the economy path is reachable");
+});
+
+test("v3 fire line: profile qualityLine override moves the line", () => {
+	const input = flatInput({ usage: { tokens: 340_000, contextWindow: 1_048_576 } });
+	input.profile = { ...input.profile, compaction: { ...input.profile.compaction, qualityLine: 0.3 } };
+	input.state.turnsSinceCompaction = 50;
+	input.state.growthPerTurn = 5_000;
+	assert.equal(evaluateEconomy(input).kind, "economy", "0.3 × 1M = 314,579 < 340k → line crossed");
+});
+
+test("v3 fire line: tier-regime-active fires even below the line (design D4)", () => {
+	const input = baseInput({ usage: { tokens: 250_000, contextWindow: 1_048_576 } });
+	input.profile = {
+		...input.profile,
+		tiers: [{ upTo: 200_000, inputMult: 1, outputMult: 1 }, { upTo: Number.POSITIVE_INFINITY, inputMult: 2, outputMult: 1.5 }],
+	};
+	input.state.turnsSinceCompaction = 50;
+	input.state.growthPerTurn = 5_000;
+	const d = evaluateEconomy(input);
+	assert.equal(d.kind, "economy", "already in the tier-2 regime: fire without waiting for the line");
+});
+
+test("v3 pricingKnown: false declines before any fabricated-price math", () => {
+	const input = flatInput({ usage: { tokens: 600_000, contextWindow: 1_048_576 } });
+	input.state.turnsSinceCompaction = 50;
+	input.state.growthPerTurn = 5_000;
+	const d = evaluateEconomy({ ...input, pricingKnown: false });
+	assert.equal(d.kind, "none");
+	assert.match((d as { why: string }).why, /pricing-unknown/);
+});
+
+test("v3 pricingKnown() export mirrors the all-zero/absent rule", () => {
+	assert.equal(pricingKnown(undefined), false);
+	assert.equal(pricingKnown(null), false);
+	assert.equal(pricingKnown({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }), false);
+	assert.equal(pricingKnown({ input: 0.3 }), true);
+	assert.equal(pricingKnown({ cacheWrite: 0.5 }), true);
+});
+
+test("v3 estimateSummaryTokens scales with context, clamped to live-observed range", () => {
+	assert.equal(estimateSummaryTokens(100_000), 5_000); // 5%
+	assert.equal(estimateSummaryTokens(600_000), 10_000); // cap
+	assert.equal(estimateSummaryTokens(20_000), 2_000); // floor
+	assert.equal(estimateSummaryTokens(100_000, 2_500), 2_500); // explicit config wins
+});
+
+test("v3 nextTriggerLine: finite tier boundary when ahead, overflow when past", () => {
+	const profile = { tiers: [{ upTo: 200_000, inputMult: 1, outputMult: 1 }, { upTo: Number.POSITIVE_INFINITY, inputMult: 2, outputMult: 1.5 }] } as never;
+	assert.equal(nextTriggerLine(profile, 100_000, 1_048_576, 16_384), 200_000);
+	assert.equal(nextTriggerLine(profile, 250_000, 1_048_576, 16_384), 1_048_576 - 16_384);
+	const flat = { tiers: [] } as never;
+	assert.equal(nextTriggerLine(flat, 100_000, 1_048_576, 16_384), 1_048_576 - 16_384);
+});
+
+test("v3 focused instructions demand structured, verbatim retention", () => {
+	const text = focusInstructions("focused", ["Fix the parser"]);
+	assert.match(text, /structured lists/);
+	assert.match(text, /verbatim/);
+	assert.match(text, /rationale/);
+	assert.match(text, /Fix the parser/);
 });
