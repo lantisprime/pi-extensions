@@ -89,12 +89,24 @@ loaded ONCE at session start — changing it requires a fresh pane.
 test "${HERDR_ENV:-}" = 1   # must be 1, else you are not inside herdr
 herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd /tmp/sc-eval-code --label eval-code --no-focus
 # note .result.root_pane.pane_id from the JSON, then:
-herdr agent start <name> --kind pi --pane <pane-id> --timeout 60000
+herdr agent start <name> --kind pi --pane <pane-id> --timeout 60000 -- --model litellm/<model-key>
 ```
 
 - `<name>`: `[a-z][a-z0-9_-]{0,31}`, e.g. `eval-code`.
+- **Model gotcha (learned 2026-10-04):** spawned pi panes default to the
+  user's default model. The model is set by the `-- --model litellm/<key>`
+  flag after `herdr agent start`'s own args — the tab's `--env PI_MODEL` does
+  NOT take. Verify the pane footer shows the intended model key (it must
+  match the profile's `match`, Step 2) before running Step 4.
 - **cwd gotcha (macOS):** use the RESOLVED path (`/private/tmp/...`). A `/tmp`
   cwd makes pi treat reads as outside-project → permission wedge.
+- **Permission dialogs:** herdr cannot classify permission dialogs on agent
+  panes (`screen_detection_skipped`) — poll the pane's text output instead of
+  waiting for a classification. A first-read permission wedge usually means
+  the cwd gotcha above.
+- **Watching telemetry / progress:** `monitor_threads` loops die silently —
+  run any Step-6 watch script as a plain `herdr_terminal` pane in its own tab
+  (house style: agent panes in a separate tab of the same workspace) instead.
 - **Fresh process is mandatory** — running panes never reload extension code.
   Stale long-lived sessions running old code produced the original
   "compacts at 2%" false report.
@@ -239,5 +251,6 @@ See `~/.pi/agent/eval/README.md` for the store's layout.
 | `pricing-unavailable` / `savings $0.0000` | catalog missing prices — needs the cacheRead-0 fix (PR #179) or explicit `prices` in profile |
 | gate always `default "no active tasks"` | known bug: tasks board injected per-run only, invisible at `agent_settled` (TESTING.md §7) — record it, don't debug your config |
 | permission wedge on first read | pane cwd used `/tmp` instead of `/private/tmp` (Step 3 gotcha) |
+| pane footer shows the wrong/default model | `--env PI_MODEL` on the tab doesn't take — pass `-- --model litellm/<key>` to `herdr agent start` (Step 3) |
 | recall suspiciously perfect | anchoring leak: agent summarized files, or needles sat in the keepRecent tail (Step 5) |
 | results not reproducible | different seed, stale extension code, or config changed mid-session — all three reset comparability |
