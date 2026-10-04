@@ -322,19 +322,21 @@ test("post-compaction gap is armed by our compaction but not by pi's overflow", 
 	fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("live regression 2026-10-04: cacheRead-0 catalog must not dead-stop economy — ctx.compact fires past the window floor", async () => {
+test("live regression 2026-10-04: cacheRead-0 catalog must not dead-stop economy — fires at the quality line, holds below it", async () => {
 	// The live failure was wiring-visible only as a telemetry refusal: fresh
-	// session, NO config (generic profile, floor 0.15 × 1M = 157,286), minimax
-	// catalog {input .3, cacheRead 0} (exactly mockCtx's model), 167,828 tokens,
-	// hot, growing — and the settle refused "savings $0.0000" forever. The fix
-	// derives cacheRead from input × readRatio; this test proves the wire-level
-	// outcome: the settle past the floor CALLS ctx.compact with focused
-	// instructions, and the floor still holds below it (no 2% regressions).
+	// session, NO config (generic profile), minimax catalog {input .3,
+	// cacheRead 0} (exactly mockCtx's model), 167,828 tokens, hot, growing —
+	// and the settle refused "savings $0.0000" forever. The fix derives
+	// cacheRead from input × readRatio. v3 (2026-10-04 amendment) moved the
+	// DECISION to the fire line (0.5 × window = 524,288 here): 170k holds at
+	// the fire line (the 15.1%-of-window treadmill is the bug this session is
+	// about), and a genuinely past-the-line context calls ctx.compact with
+	// focused instructions — proving derived pricing never dead-stops.
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sc-cread-")); // no config → defaults
 	const { pi, handlers } = mockPi();
 	createExtension(pi);
 
-	// --- past the floor: economy must fire ----------------------------------
+	// --- below the fire line: no compaction, refusal names the line ---------
 	{
 		const sessionId = `cread-fire-${Date.now()}`;
 		const { ctx, compactCalls } = mockCtx({ sessionId, cwd: dir, tokens: 170_000 });
@@ -345,8 +347,26 @@ test("live regression 2026-10-04: cacheRead-0 catalog must not dead-stop economy
 		await drive(handlers, "turn_end", {}, ctx);
 		await drive(handlers, "turn_end", {}, ctx); // turnsSinceCompaction = 4
 		await drive(handlers, "agent_settled", {}, ctx);
+		assert.equal(compactCalls.length, 0, "170k on a 1M window (16%) is below the 524,288 fire line — no compaction");
+		assert.ok(
+			telemetryLines(sessionId).some((l) => String(l.why ?? "").includes("below fire-line")),
+			"the fire-line refusal must be the recorded reason",
+		);
+	}
+
+	// --- past the fire line: derived pricing must not dead-stop -------------
+	{
+		const sessionId = `cread-past-line-${Date.now()}`;
+		const { ctx, compactCalls } = mockCtx({ sessionId, cwd: dir, tokens: 560_000 });
+		await drive(handlers, "session_start", {}, ctx);
+		await drive(handlers, "message_end", { message: { role: "assistant", usage: { totalTokens: 550_000 } } }, ctx);
+		await drive(handlers, "turn_end", {}, { ...ctx, getContextUsage: () => ({ tokens: 550_000, contextWindow: 1_048_576, percent: 52.5 }) });
+		await drive(handlers, "turn_end", {}, ctx); // delta 10k → growthPerTurn armed
+		await drive(handlers, "turn_end", {}, ctx);
+		await drive(handlers, "turn_end", {}, ctx); // turnsSinceCompaction = 4
+		await drive(handlers, "agent_settled", {}, ctx);
 		const decisions = telemetryLines(sessionId).map((l) => [l.event, l.decision, l.why]);
-		assert.equal(compactCalls.length, 1, `ctx.compact must fire past the floor with a cacheRead-0 catalog, telemetry: ${JSON.stringify(decisions)}`);
+		assert.equal(compactCalls.length, 1, `ctx.compact must fire past the fire line with a cacheRead-0 catalog, telemetry: ${JSON.stringify(decisions)}`);
 		assert.match(String(compactCalls[0]?.customInstructions ?? ""), /Preserve ALL information/);
 	}
 
