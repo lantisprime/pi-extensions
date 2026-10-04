@@ -253,3 +253,47 @@ No output term in savings. `continuationProbability` mirrors pi's own
 Unit-test CostModel + TriggerEngine with synthetic usage snapshots; then run
 `pi --extension … --mode json` scripted session with a tiny fake window
 (config override) to exercise triggers end-to-end.
+
+- **2026-10-04 v3 (ADDED after live telemetry audit + third glm-design-reviewer
+  pass; supersedes parts of v2.2):** Post-#178 live sessions still fired economy
+  compaction at 158k-212k tokens = 15-20% of 1M windows (fire at floor+1,446 on
+  the first settled tick), because the savings arithmetic structurally cannot
+  gate: for a flat-priced hot model savings/cost ≈ cont × H × (shrink/tokens) ×
+  (cacheRead/input) ≈ 3 at ANY size past the floor. Live compaction-call usage
+  (pi session records, 15 compactions) showed the summarizer call itself burned
+  17-54% of the context it compacted (403k full-price input, cacheRead ≈
+  370/call — the summarizer never hits the conversation cache) while summaries
+  grew 2,010→10,464 tokens; and the needle evals (unanchored prose 0/10, hybrid
+  confabulation) show summarization is lossy. Policy changes:
+  (1) FIRE LINE — the economy path now fires only at the context-quality line
+  `(qualityLine ?? 0.5) × window` (or once a finite tier boundary is crossed —
+  regime-active, D4). qualityLine was quality-mode-only; it is now the shared
+  compaction point for every mode: compaction runs while the summarizer still
+  sees coherent work, the session returns to the fast low-context regime
+  (performance), and retention-focused instructions ride along (quality). pi's
+  uninstructed ~98% compaction remains the backstop (A4/v2.1: observed, never
+  modified). floorFraction reverts to a pure permission floor. This SUPERSEDES
+  v2.2's intent that "hot firing via the derived readRatio is the economy
+  case" — derived readRatio pricing alone no longer triggers anywhere below
+  the line.
+  (2) PRICING PROVENANCE — a catalog with no positive price field disables the
+  economy path entirely ("pricing-unknown"), matching the original "Model
+  profiles" table (economy trigger disabled, AC-10) that the implementation
+  had drifted from; explicit config defaultPrices / profile prices opt back
+  in. Replaces the reviewer-rejected "×2 margin under assumed pricing".
+  (3) HONEST COSTS — hot rebuild priced at resolved prices.cacheWrite
+  (resolvePrices now honors explicit config/profile cacheWrite; GENERIC
+  writePremium 0→1.25; gpt-5.6 profile pins 0 — OpenAI prompt caching has no
+  write premium); summarizer input stays full-price (live: always cold);
+  summaryTokens estimate scales ~5% of context clamped to the live-observed
+  2k-10k instead of a flat 2,000.
+  (4) GATE-BLIND WIRING FIX — the relevance gate now parses the task board
+  from a before_agent_start capture of the per-run system prompt (which
+  carries injected <session-tasks>) instead of ctx.getSystemPrompt() at
+  agent_settled (which never did — the gate always recorded default-0.5 "no
+  active tasks"). Task subjects now actually reach the focused/aggressive
+  focus instructions.
+  (5) TELEMETRY — compact_complete logs the compaction call's real usage
+  (input/output/cacheRead/total from CompactionResult.usage) and
+  estimatedTokensAfter, so future audits can compare claimed savings against
+  real summarizer spend.

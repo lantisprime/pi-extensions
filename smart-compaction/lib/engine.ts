@@ -79,6 +79,40 @@ export function initState(): EngineState {
 
 // ---------- evaluation ----------
 
+/**
+ * Horizon cap shared by the fire condition and the savings integral. Extracted
+ * so the two cannot drift: the pressure gate fires when the context reaches
+ * the next trigger line within this many turns, and savings are integrated
+ * over the same horizon.
+ */
+export const HORIZON_CAP = 50;
+
+/** pi keepRecent default (engine-level assumption; the profile does not know the session setting). */
+const KEEP_RECENT_TOKENS = 20_000;
+
+/**
+ * Next line the context would regret crossing: the first tier-2 pricing
+ * boundary when it still lies ahead, else pi's overflow line.
+ */
+export function nextTriggerLine(profile: Profile, tokens: number, window: number, reserveTokens: number): number {
+	const boundary =
+		profile.tiers[0] && Number.isFinite(profile.tiers[0].upTo) && tokens < profile.tiers[0].upTo
+			? profile.tiers[0].upTo
+			: undefined;
+	return boundary ?? window - reserveTokens;
+}
+
+/**
+ * Summarizer output estimate: fixed override when configured, else ~5% of the
+ * context, clamped to the live-observed range (2,010-10,464 tokens across 15
+ * real compactions, 2026-10-03/04 telemetry; the flat 2,000 assumption
+ * under-counted large sessions ~5x).
+ */
+export function estimateSummaryTokens(tokens: number, fixed?: number): number {
+	if (fixed != null) return fixed;
+	return Math.min(10_000, Math.max(2_000, Math.round(tokens * 0.05)));
+}
+
 export interface EvalInput {
 	profile: Profile;
 	prices: Prices;
@@ -99,6 +133,13 @@ export interface EvalInput {
 	modelKey?: string;
 	/** Cache state override for tests; defaults to ttlShort vs lastLLMCallAt. */
 	cacheHot?: boolean;
+	/**
+	 * False when the model catalog carried no positive price field — the
+	 * economy math would then run on fabricated fallback prices. Economy
+	 * declines (design "Model profiles": economy trigger disabled, AC-10);
+	 * explicit config defaultPrices / profile prices opt back in.
+	 */
+	pricingKnown?: boolean;
 }
 
 export type Decision =
@@ -161,6 +202,12 @@ export function evaluateEconomy(input: EvalInput): Decision {
 	const { usage, state, profile, config } = input;
 	if (!usage || usage.tokens === null) return { kind: "none", why: "no-usage" };
 	if (state.tokensStale) return { kind: "none", why: "tokens-stale-after-model-switch" };
+	if (input.pricingKnown === false) {
+		return {
+			kind: "none",
+			why: "pricing-unknown (catalog has no positive price fields; set config.defaultPrices or a profile prices block to opt in)",
+		};
+	}
 	const tokens = usage.tokens;
 	const window = usage.contextWindow;
 
@@ -213,10 +260,36 @@ export function evaluateEconomy(input: EvalInput): Decision {
 		return { kind: "none", why: `below qualityLine (${tokens} <= ${ql})` };
 	}
 
+	// Fire line (2026-10-04 amendment): compaction is rational when the context
+	// is large enough that retention, latency, and cache-read costs outweigh its
+	// lossiness — the SAME qualityLine concept quality mode already used, now
+	// shared by every mode (default 0.5×window). Compacting there means the
+	// summarizer still sees coherent recent work (better retention than a rotten
+	// near-overflow context), the session returns to the fast low-context
+	// regime, and the compaction runs WITH task-aware focus instructions
+	// (session_before_compact enriches pi's uninstructed ~98% catch-up, design
+	// A4 — that remains the backstop). The savings arithmetic cannot gate: for a
+	// flat-priced hot model savings/cost ≈ cont × H × (shrink/tokens) ×
+	// (cacheRead/input) ≈ 3 at ANY size past the floor (live: fired at 158,732
+	// tokens = 15.1% of a 1M window, floor+1,446), so the line is the policy and
+	// the margin test below is only a sanity check. Tiered models may also fire
+	// once the expensive tier regime is already active (design D4) even below
+	// the line. Sits AFTER the quality branch: quality mode fires on the same
+	// line via its own path and must not be double-gated.
+	const fireLine = (profile.compaction.qualityLine ?? 0.5) * window;
+	const regimeActive =
+		profile.tiers[0] !== undefined && Number.isFinite(profile.tiers[0].upTo) && tokens >= profile.tiers[0].upTo;
+	if (tokens < fireLine && !regimeActive) {
+		return {
+			kind: "none",
+			why: `below fire-line (${tokens} < ${Math.round(fireLine)} = (qualityLine ?? 0.5)×${window}; compaction waits for the context-quality line)`,
+		};
+	}
+
 	const hot = input.cacheHot ?? isCacheHot(input);
 	const continuation = state.recentWarm ? state.recentWarm.continuationProbability : config.continuationProbability;
 	const margin = config.marginFactor ?? 1.25;
-	const summaryTokens = config.summaryTokens ?? 2000;
+	const summaryTokens = estimateSummaryTokens(tokens, config.summaryTokens);
 	const { savings, cost, horizonTurns } = savingsEstimate(input, tokens, window, hot, continuation, summaryTokens);
 
 	// Defense in depth. resolvePrices already refuses an all-zero catalog, so this
@@ -255,15 +328,18 @@ export function savingsEstimate(
 ): { savings: number; cost: number; horizonTurns: number } {
 	const { profile, prices, config, state } = input;
 	const tiers = profile.tiers;
-	const keepTokens = Math.min(20_000, tokens); // pi keepRecentTokens default
+	const keepTokens = Math.min(KEEP_RECENT_TOKENS, tokens); // pi keepRecentTokens default
 	const afterTokens = keepTokens + summaryTokens;
 
 	// Compaction cost: summarize tokensBefore + write the summary, then the
 	// next call rebuilds (kept + summary) — write premium applies when hot.
+	// The summary call is priced at FULL input even when the conversation cache
+	// is hot: pi's summarizer request shape does not hit the conversation cache
+	// (live usage on 14 compactions 2026-10-03: cacheRead ≈ 370 of 403k input).
 	const summaryInputCost = inputCost(prices, tiers, tokens);
 	const summaryOutputCost = (summaryTokens / 1_000_000) * prices.output;
 	const rebuildCost = hot
-		? (afterTokens / 1_000_000) * prices.input * profile.cache.writePremium
+		? (afterTokens / 1_000_000) * prices.cacheWrite // re-write (kept+summary) into the provider cache
 		: (afterTokens / 1_000_000) * prices.input; // cold: full-price rebuild happens anyway
 	const cost = summaryInputCost + summaryOutputCost + rebuildCost;
 
@@ -274,11 +350,8 @@ export function savingsEstimate(
 	if (growth == null) return { savings: 0, cost, horizonTurns: 0 };
 	const g = Math.max(growth, 250); // dampen sub-250 turn growth to a floor
 	// (quality mode never reaches here: evaluateEconomy returns before the formula.)
-	const nextLine =
-		tiers[0] && Number.isFinite(tiers[0].upTo) && tokens < tiers[0].upTo
-			? tiers[0].upTo
-			: window - config.reserveTokens;
-	const horizonTurns = Math.min(50, Math.max(1, Math.ceil(Math.max(nextLine - afterTokens, 0) / g)));
+	const nextLine = nextTriggerLine(profile, tokens, window, config.reserveTokens);
+	const horizonTurns = Math.min(HORIZON_CAP, Math.max(1, Math.ceil(Math.max(nextLine - afterTokens, 0) / g)));
 
 	// Marginal savings of carrying (tokens − afterTokens) fewer tokens over the
 	// horizon (review part-2 fix):
@@ -321,7 +394,11 @@ export function focusInstructions(gateAction: "aggressive" | "focused", subjects
 	return (
 		"Preserve ALL information related to the current tasks" +
 		(subjects.length ? `: ${subjects.join("; ")}` : "") +
-		". Include open questions, decisions, file paths, and exact commands tied to those tasks. " +
+		". " +
+		"Record task-related facts as structured lists, NOT prose — summaries retain tabulated facts and " +
+		"lose prose (needle-eval evidence, 2026-10-04). The summary must keep, verbatim where possible: " +
+		"exact identifiers, constants and their values, file paths, branch/PR names, exact commands, " +
+		"decisions WITH their rationale, and open questions. " +
 		"Summarize unrelated content more briefly."
 	);
 }

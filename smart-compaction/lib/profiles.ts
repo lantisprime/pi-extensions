@@ -43,7 +43,7 @@ export interface Profile {
 	cache: {
 		/** cacheRead ÷ input, when catalog lacks cacheRead. */
 		readRatio: number;
-		/** 1.25 on Anthropic; 0 when writes are free. */
+		/** 1.25 on Anthropic; 0 when writes are known free (e.g. OpenAI prompt caching). */
 		writePremium: number;
 		/** seconds; hot = now − lastLLMCall < ttlShort */
 		ttlShort: number;
@@ -53,18 +53,12 @@ export interface Profile {
 		/** Never compact below this context size. */
 		tokenFloor: number;
 		/**
-		 * Floor as a fraction of the live context window. The effective floor is
-		 * the largest of tokenFloor, window × floorFraction, and the keepRecent
-		 * safety minimum. Without it a flat tokenFloor fires on a 200k window long
-		 * before the context is large enough to be worth compacting.
+		 * Floor as a fraction of the live context window: a permission floor that
+		 * keeps compaction away from tiny contexts. The DECISION to compact is made
+		 * at qualityLine (see below), not here.
 		 *
 		 * 0.15 engages only when window > tokenFloor / 0.15 (~267k); below that the
-		 * flat tokenFloor governs. Chosen over 0.4 because 0.4 demanded ~419k on
-		 * a 1M window — far above the 44k-98k contexts actually seen here, so it
-		 * disabled the economy path outright. Compaction is measurably lossy
-		 * (specific facts from tool results do not survive the summary), so the
-		 * floor stays conservative while still letting genuinely large sessions
-		 * reclaim context deliberately rather than via pi overflow.
+		 * flat tokenFloor governs.
 		 */
 		floorFraction?: number;
 		/**
@@ -75,7 +69,14 @@ export interface Profile {
 		minGapTokens?: number;
 		/** Min turns between compactions (any origin). */
 		minIntervalTurns: number;
-		/** quality mode: compact at settled when tokens > window × line. */
+		/**
+		 * The context-quality line as a fraction of the window. Compaction becomes
+		 * rational at this point for EVERY mode (2026-10-04 amendment): quality
+		 * mode fires directly on it; balanced/cost modes gate the economy path on
+		 * it. Default 0.5 — compacting later means the model works through a
+		 * rotten, slow, near-overflow context; compacting earlier discards context
+		 * the window could still hold while summarization is measurably lossy.
+		 */
 		qualityLine?: number;
 	};
 	gate: {
@@ -108,7 +109,13 @@ export const GENERIC_PROFILE: Profile = {
 	match: "*",
 	mode: "balanced",
 	tiers: [],
-	cache: { readRatio: 0.1, writePremium: 0, ttlShort: 300, ttlLong: 3600 },
+	// Unknown write premium must not model the hot rebuild as free — that made
+	// the cost side of the economy test collapse (live: rebuild priced at $0
+	// fired compaction at 15% of a 1M window). Profiles with KNOWN free writes
+	// pin writePremium: 0 explicitly (gemini, gpt-5.6-sol, local), and
+	// resolvePrices honors catalog/config cacheWrite when the provider
+	// publishes real numbers.
+	cache: { readRatio: 0.1, writePremium: 1.25, ttlShort: 300, ttlLong: 3600 },
 	compaction: {
 		tokenFloor: 40_000,
 		minIntervalTurns: 4,
@@ -136,6 +143,9 @@ export const BUILTIN_PROFILES: Profile[] = [
 		match: "gpt-5.6-sol*",
 		mode: "cost",
 		tiers: [{ upTo: 272_000, inputMult: 1, outputMult: 1 }, { upTo: Number.POSITIVE_INFINITY, inputMult: 2, outputMult: 1.5 }],
+		// OpenAI prompt caching carries no write premium — do not inherit GENERIC's
+		// conservative 1.25 (which would overprice the hot rebuild).
+		cache: { readRatio: 0.1, writePremium: 0, ttlShort: 300, ttlLong: 3600 },
 	},
 	{
 		...clone(GENERIC_PROFILE),
@@ -234,6 +244,20 @@ export function loadConfig(projectDir?: string): SmartCompactionConfig {
 	return cfg;
 }
 
+const hasAnyPrice = (c: Partial<Prices> | null | undefined): boolean =>
+	!!c && Object.values(c).some((v) => typeof v === "number" && v > 0);
+
+/**
+ * True when the model catalog carried at least one positive price field — i.e.
+ * the economy math would run on PUBLISHED prices rather than fabricated
+ * fallbacks. False (null/undefined/all-zero catalog) disables the economy path
+ * (design "Model profiles": economy trigger disabled, AC-10); users opt back
+ * in via explicit config defaultPrices or profile prices.
+ */
+export function pricingKnown(catalog: Partial<Prices> | null | undefined): boolean {
+	return hasAnyPrice(catalog);
+}
+
 /**
  * Resolve effective prices for a model (AC-12 precedence):
  * catalog cost fields → profile.prices → config.defaultPrices → conservative generic.
@@ -260,8 +284,6 @@ export function resolvePrices(
 	// to profile/config/generic. A catalog with ANY positive field is still
 	// respected field-by-field, so genuine free or partially-priced models keep
 	// their real zeros.
-	const hasAnyPrice = (c: Partial<Prices> | null | undefined): boolean =>
-		!!c && Object.values(c).some((v) => typeof v === "number" && v > 0);
 	const cat = hasAnyPrice(catalog) ? (catalog as Partial<Prices>) : {};
 	const baseInput = cat.input ?? fallback.input ?? generic.input;
 	// A catalog cacheRead of exactly 0 alongside a positive input price is the
@@ -276,6 +298,7 @@ export function resolvePrices(
 	// cacheRead: 0 explicitly via config (defaultPrices or profile prices),
 	// which outranks the catalog-zero fallback below.
 	const explicitCacheRead = profile.prices?.cacheRead ?? config.defaultPrices?.cacheRead;
+	const explicitCacheWrite = profile.prices?.cacheWrite ?? config.defaultPrices?.cacheWrite;
 	const catalogCacheRead = cat.cacheRead !== undefined && cat.cacheRead !== 0 ? cat.cacheRead : undefined;
 	return {
 		input: baseInput,
@@ -288,6 +311,6 @@ export function resolvePrices(
 					: cat.input !== undefined
 						? baseInput * profile.cache.readRatio
 						: (fallback.cacheRead ?? generic.cacheRead),
-		cacheWrite: cat.cacheWrite ?? baseInput * profile.cache.writePremium,
+		cacheWrite: cat.cacheWrite ?? explicitCacheWrite ?? baseInput * profile.cache.writePremium,
 	};
 }
