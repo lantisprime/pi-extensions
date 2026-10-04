@@ -31,6 +31,24 @@ spec: see spec.md · research: see research.md
   resets min-interval counters (allows prompt retry); the compacting guard
   flag is set only at the point of ctx.compact() so a gate defer cannot wedge
   the trigger (blocker found in review of index.ts).
+- **2026-10-04 v2.2 (ADDED after live needle-in-haystack verification on
+  litellm/minimax, 1M window):** resolvePrices treats a catalog
+  `cacheRead: 0` alongside a positive input price as "no cache pricing data"
+  — the same signal an all-zero catalog gives — and falls through to
+  `input × profile.cache.readRatio`; an explicit `cacheRead: 0` in
+  `defaultPrices`/profile `prices` still pins genuinely free cache reads.
+  Rationale: LiteLLM reports priced models with cache fields 0 when it has no
+  cache-tier data; honouring that 0 made the hot-cache marginal
+  (horizon × shrink × cacheRead) identically $0, so the economy path was
+  unreachable in EVERY cache state — live telemetry: `savings $0.0000 <=
+  cost $0.0527 × 1.25 (tokens=167828, hot=true, H=50)` at 16% context, past
+  the 157,286 floor. The v2-era reading "catalog 0 is real free" is
+  superseded for cacheRead specifically; cacheWrite 0 still means "no write
+  premium" (cheapens compaction, never a blocker). Cold-path refusals for
+  such models remain structural (savings = cont × shrink × input < cost ≥
+  tokens × input whenever margin ≥ 1); hot firing via the derived readRatio
+  is the intended economy case. Regression tests: engine.test.ts AC-10
+  live-minimax regression; wiring.test.ts cread-fire/cread-hold.
 
 ## Goal
 

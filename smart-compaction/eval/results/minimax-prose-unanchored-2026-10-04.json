@@ -1,0 +1,100 @@
+{
+  "meta": {
+    "approach": "prose",
+    "seed": 20261004,
+    "scoredAt": "2026-10-03T23:33:39.859Z"
+  },
+  "perKind": {
+    "fact": {
+      "pass": 0,
+      "total": 10
+    }
+  },
+  "total": {
+    "pass": 0,
+    "of": 10,
+    "rate": 0
+  },
+  "questions": [
+    {
+      "id": "N1",
+      "kind": "fact",
+      "pass": false,
+      "hits": 0,
+      "of": 1,
+      "given": "1 unknown 2 unknown 3 unknown 4 unknown 5 unknown 6 unknown 7 unknown 8 unknown "
+    },
+    {
+      "id": "N2",
+      "kind": "fact",
+      "pass": false,
+      "hits": 0,
+      "of": 1,
+      "given": "1 unknown 2 unknown 3 unknown 4 unknown 5 unknown 6 unknown 7 unknown 8 unknown "
+    },
+    {
+      "id": "N3",
+      "kind": "fact",
+      "pass": false,
+      "hits": 0,
+      "of": 1,
+      "given": "1 unknown 2 unknown 3 unknown 4 unknown 5 unknown 6 unknown 7 unknown 8 unknown "
+    },
+    {
+      "id": "N4",
+      "kind": "fact",
+      "pass": false,
+      "hits": 0,
+      "of": 1,
+      "given": "1 unknown 2 unknown 3 unknown 4 unknown 5 unknown 6 unknown 7 unknown 8 unknown "
+    },
+    {
+      "id": "N5",
+      "kind": "fact",
+      "pass": false,
+      "hits": 0,
+      "of": 1,
+      "given": "1 unknown 2 unknown 3 unknown 4 unknown 5 unknown 6 unknown 7 unknown 8 unknown "
+    },
+    {
+      "id": "N6",
+      "kind": "fact",
+      "pass": false,
+      "hits": 0,
+      "of": 1,
+      "given": "1 unknown 2 unknown 3 unknown 4 unknown 5 unknown 6 unknown 7 unknown 8 unknown "
+    },
+    {
+      "id": "N7",
+      "kind": "fact",
+      "pass": false,
+      "hits": 0,
+      "of": 1,
+      "given": "1 unknown 2 unknown 3 unknown 4 unknown 5 unknown 6 unknown 7 unknown 8 unknown "
+    },
+    {
+      "id": "N8",
+      "kind": "fact",
+      "pass": false,
+      "hits": 0,
+      "of": 1,
+      "given": "1 unknown 2 unknown 3 unknown 4 unknown 5 unknown 6 unknown 7 unknown 8 unknown "
+    },
+    {
+      "id": "N9",
+      "kind": "fact",
+      "pass": false,
+      "hits": 0,
+      "of": 1,
+      "given": "1 unknown 2 unknown 3 unknown 4 unknown 5 unknown 6 unknown 7 unknown 8 unknown "
+    },
+    {
+      "id": "N10",
+      "kind": "fact",
+      "pass": false,
+      "hits": 0,
+      "of": 1,
+      "given": "1 unknown 2 unknown 3 unknown 4 unknown 5 unknown 6 unknown 7 unknown 8 unknown "
+    }
+  ]
+}

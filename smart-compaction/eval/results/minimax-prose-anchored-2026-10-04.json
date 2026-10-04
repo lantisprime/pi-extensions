@@ -1,0 +1,100 @@
+{
+  "meta": {
+    "approach": "prose",
+    "seed": 20261004,
+    "scoredAt": "2026-10-03T23:33:39.734Z"
+  },
+  "perKind": {
+    "fact": {
+      "pass": 10,
+      "total": 10
+    }
+  },
+  "total": {
+    "pass": 10,
+    "of": 10,
+    "rate": 1
+  },
+  "questions": [
+    {
+      "id": "N1",
+      "kind": "fact",
+      "pass": true,
+      "hits": 1,
+      "of": 1,
+      "given": "port 5434; INC-2271 on 2026-08-14; THROTTLEMAN; 4417; 10.42.7.19; 250 sessions; "
+    },
+    {
+      "id": "N2",
+      "kind": "fact",
+      "pass": true,
+      "hits": 1,
+      "of": 1,
+      "given": "port 5434; INC-2271 on 2026-08-14; THROTTLEMAN; 4417; 10.42.7.19; 250 sessions; "
+    },
+    {
+      "id": "N3",
+      "kind": "fact",
+      "pass": true,
+      "hits": 1,
+      "of": 1,
+      "given": "port 5434; INC-2271 on 2026-08-14; THROTTLEMAN; 4417; 10.42.7.19; 250 sessions; "
+    },
+    {
+      "id": "N4",
+      "kind": "fact",
+      "pass": true,
+      "hits": 1,
+      "of": 1,
+      "given": "port 5434; INC-2271 on 2026-08-14; THROTTLEMAN; 4417; 10.42.7.19; 250 sessions; "
+    },
+    {
+      "id": "N5",
+      "kind": "fact",
+      "pass": true,
+      "hits": 1,
+      "of": 1,
+      "given": "port 5434; INC-2271 on 2026-08-14; THROTTLEMAN; 4417; 10.42.7.19; 250 sessions; "
+    },
+    {
+      "id": "N6",
+      "kind": "fact",
+      "pass": true,
+      "hits": 1,
+      "of": 1,
+      "given": "port 5434; INC-2271 on 2026-08-14; THROTTLEMAN; 4417; 10.42.7.19; 250 sessions; "
+    },
+    {
+      "id": "N7",
+      "kind": "fact",
+      "pass": true,
+      "hits": 1,
+      "of": 1,
+      "given": "port 5434; INC-2271 on 2026-08-14; THROTTLEMAN; 4417; 10.42.7.19; 250 sessions; "
+    },
+    {
+      "id": "N8",
+      "kind": "fact",
+      "pass": true,
+      "hits": 1,
+      "of": 1,
+      "given": "port 5434; INC-2271 on 2026-08-14; THROTTLEMAN; 4417; 10.42.7.19; 250 sessions; "
+    },
+    {
+      "id": "N9",
+      "kind": "fact",
+      "pass": true,
+      "hits": 1,
+      "of": 1,
+      "given": "port 5434; INC-2271 on 2026-08-14; THROTTLEMAN; 4417; 10.42.7.19; 250 sessions; "
+    },
+    {
+      "id": "N10",
+      "kind": "fact",
+      "pass": true,
+      "hits": 1,
+      "of": 1,
+      "given": "port 5434; INC-2271 on 2026-08-14; THROTTLEMAN; 4417; 10.42.7.19; 250 sessions; "
+    }
+  ]
+}
