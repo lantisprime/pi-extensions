@@ -76,14 +76,25 @@ function jsonl(cwd: string): any[] {
 	return fs.readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
 }
 
-test("AC-1: subscribes only to observe events — no context/warmer handlers", async () => {
+test("AC-1 (amended 2026-10-04): observe-only subscriptions incl. compact lifecycle — no warmer hooks", async () => {
 	const { pi, handlers } = mockPi();
 	createExtension(pi);
-	for (const forbidden of ["cache_warming_decision", "session_before_compact"]) {
+	for (const forbidden of ["cache_warming_decision"]) {
 		assert.equal(handlers.has(forbidden), false, `must not subscribe to ${forbidden}`);
 	}
-	for (const required of ["tool_execution_end", "message_end", "turn_end", "context"]) { // Phase 3: context subscription is REQUIRED (spec-phase3.md E1/E2)
-		assert.ok(handlers.has(required));
+	// The 2026-10-04 compact-request contract INVERTED the old rule (CM must not
+	// observe session_before_compact): CM now observes the full compaction
+	// lifecycle — any-origin resets — and never calls ctx.compact itself.
+	for (const required of [
+		"tool_execution_end",
+		"message_end",
+		"turn_end",
+		"context", // Phase 3: context subscription is REQUIRED (spec-phase3.md E1/E2)
+		"session_before_compact",
+		"session_compact",
+		"session_compact_failed",
+	]) {
+		assert.ok(handlers.has(required), `must subscribe to ${required}`);
 	}
 });
 
@@ -249,5 +260,40 @@ test("/ctx:health shows the status-segment legend plus the health report", async
 	assert.ok(out.includes("CH<n> = cache health"), "legend explains CH");
 	assert.ok(out.includes("sc … = smart-compaction"), "legend explains the sc bus part");
 	assert.ok(/fresh 100%/.test(out), "report still carries the shares");
+	fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// 2026-10-04 live-E2E regression: pi's real tool event shapes (docs/json.md).
+// tool_execution_end carries result as {content, details} and NO args; args
+// arrive on tool_execution_start correlated by toolCallId. The old textOf
+// dropped every built-in tool result (live: 71k-token session, 3.4k ledger).
+test("live regression 2026-10-04: object-shaped tool results enter the ledger with correlated args", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cm-shape-"));
+	const file = path.join(dir, "f.txt");
+	fs.writeFileSync(file, "hello world content");
+	const { pi, handlers } = mockPi();
+	createExtension(pi);
+	const { ctx } = mockCtx({ cwd: dir, tokens: 100 });
+	await drive(handlers, "session_start", {}, ctx);
+	const resultText = "y".repeat(2000); // 500 tok — above conclusionTokens, below dumpTokens
+	// exact shapes from pi docs/json.md Tool execution events
+	await drive(handlers, "tool_execution_start", { toolCallId: "call_1", toolName: "read", args: { path: file } }, ctx);
+	await drive(
+		handlers,
+		"tool_execution_end",
+		{ toolCallId: "call_1", toolName: "read", result: { content: [{ type: "text", text: resultText }], details: {} }, isError: false },
+		ctx,
+	);
+	await drive(handlers, "turn_end", {}, ctx);
+	const spans = jsonl(dir)[0].spans.filter((s: any) => s.path === file);
+	assert.equal(spans.length, 1, "object-shaped result must be fingerprinted");
+	assert.equal(spans[0].tok, 500);
+	assert.equal(spans[0].class, "fresh");
+	// legacy string/array results keep working (string path)
+	await drive(handlers, "tool_execution_start", { toolCallId: "call_2", toolName: "bash", args: { command: "cat f.txt" } }, ctx);
+	await drive(handlers, "tool_execution_end", { toolCallId: "call_2", toolName: "bash", result: { content: "plain string result" }, details: {} }, ctx);
+	await drive(handlers, "turn_end", {}, ctx);
+	const bashSpans = jsonl(dir)[1].spans.filter((s: any) => !s.path);
+	assert.ok(bashSpans.some((s: any) => s.tok === 5), "string .content unwraps too");
 	fs.rmSync(dir, { recursive: true, force: true });
 });

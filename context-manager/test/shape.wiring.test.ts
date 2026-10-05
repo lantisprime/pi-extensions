@@ -301,7 +301,7 @@ test("P3-AC-33: side-car holds the full text before any stub applies", async () 
 	fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("P3-AC-30: forced-prompt bypass while compacting; lifted at next user turn (bypassed counter)", async () => {
+test("P3-AC-30: forced-prompt bypass while compacting (session_before_compact-armed); lifted at next user turn (bypassed counter)", async () => {
 	const dir = tmpDir();
 	fs.mkdirSync(path.join(dir, ".pi"));
 	fs.writeFileSync(path.join(dir, ".pi", "context-manager.json"), JSON.stringify({ purityBudget: { budget: 0.01, hardMultiplier: 1 } }));
@@ -309,9 +309,13 @@ test("P3-AC-30: forced-prompt bypass while compacting; lifted at next user turn 
 	createExtension(pi);
 	const { ctx, compactCalls } = mockCtx({ cwd: dir });
 	await drive(handlers, "session_start", {}, ctx);
-	// read dups drive purity high but B1 keeps the dirty queue empty ⇒ no XOR conflict ⇒ hard compact
+	// read dups drive purity high but B1 keeps the dirty queue empty ⇒ no XOR conflict
 	await runTurn(handlers, ctx, { user: "warm", results: [{ id: "t1", text: DUMP, toolName: "read" }, { id: "t2", text: DUMP, toolName: "read" }] });
-	assert.equal(compactCalls.length, 1, "hard compact fired (M3)");
+	assert.equal(compactCalls.length, 0, "M3 amended 2026-10-04: CM requests on the bus, never compacts");
+	// Executor accepts (any origin): the lifecycle events arm/clear the bypass —
+	// this is also the path for smart-compaction-fired compactions now.
+	await drive(handlers, "session_before_compact", {}, ctx);
+	await drive(handlers, "session_compact", {}, ctx);
 	// still compacting (cleared only at message_end(user)): context ⇒ bypass
 	const msgs = () => [userMsg(BIGPAD), asstMsg("t9"), toolMsg("t9", DUMP), userMsg("n")];
 	const out1 = await drive(handlers, "context", { type: "context", messages: msgs() }, ctx);

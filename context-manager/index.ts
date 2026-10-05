@@ -42,6 +42,7 @@ interface CMConfig {
 	taskSwitch: { enabled: boolean; driftThreshold: number; rescoreBatch: number };
 	elision: { enabled: boolean; sideCarPath: string; readToolNames: string[] };
 	purityBudget: { budget: number; hardMultiplier: number; compactCooldownMin: number };
+	compactRequest: { enabled: boolean; pressureFraction: number; minReclaimableTokens: number; retryTurns: number };
 	compactInstructions: string;
 	shaping: { enabled: boolean; qualityFloor: number; cacheTtlMin: number; maxEvictShare: number; argsCap: number };
 	dirtyQueue: { maxEntries: number; maxTok: number };
@@ -75,6 +76,7 @@ const DEFAULTS: CMConfig = {
 	taskSwitch: { enabled: true, driftThreshold: 0.65, rescoreBatch: 30 },
 	elision: { enabled: true, sideCarPath: ".pi/context-elisions.jsonl", readToolNames: ["read"] },
 	purityBudget: { budget: 0.15, hardMultiplier: 2, compactCooldownMin: 10 },
+	compactRequest: { enabled: true, pressureFraction: 0.5, minReclaimableTokens: 8_000, retryTurns: 4 },
 	compactInstructions: "drop unrelated/dup/stale content",
 	shaping: { enabled: true, qualityFloor: 0.85, cacheTtlMin: 5, maxEvictShare: 0.4, argsCap: 2048 },
 	dirtyQueue: { maxEntries: 64, maxTok: 32768 },
@@ -207,7 +209,10 @@ interface CMState {
 	elisionStats: { elided: number; skipped: number; tokens: number };
 	flushQueued: boolean;
 	lastCompactAt: number | null;
-	compactInFlight: boolean;
+	/** Turn index of the last emitted compact-request (-1 = never). */
+	requestTurn: number;
+	/** Executor's latest decision ack for our last request (compact-decision). */
+	lastRequestOutcome: { decision: string; why: string; ts: string } | null;
 	b6SuppressNext: boolean;
 	// Phase 3
 	burst: Burst | null;
@@ -238,6 +243,7 @@ function loadConfig(cwd: string): CMConfig {
 		taskSwitch: { ...DEFAULTS.taskSwitch },
 		elision: { ...DEFAULTS.elision, readToolNames: [...DEFAULTS.elision.readToolNames] },
 		purityBudget: { ...DEFAULTS.purityBudget },
+		compactRequest: { ...DEFAULTS.compactRequest },
 		shaping: { ...DEFAULTS.shaping },
 		dirtyQueue: { ...DEFAULTS.dirtyQueue },
 		poison: { ...DEFAULTS.poison, redactionPatterns: [...DEFAULTS.poison.redactionPatterns] },
@@ -261,6 +267,7 @@ function loadConfig(cwd: string): CMConfig {
 				readToolNames: [...(raw.elision?.readToolNames ?? base.elision.readToolNames)],
 			},
 			purityBudget: { ...base.purityBudget, ...(raw.purityBudget ?? {}) },
+			compactRequest: { ...base.compactRequest, ...(raw.compactRequest ?? {}) },
 			shaping: sanitizeShaping({ ...base.shaping, ...(raw.shaping ?? {}) }),
 			dirtyQueue: sanitizeDirtyQueue({ ...base.dirtyQueue, ...(raw.dirtyQueue ?? {}) }),
 			poison: sanitizePoison({ ...base.poison, ...(raw.poison ?? {}) }),
@@ -325,12 +332,20 @@ function sanitizePoison(p: CMConfig["poison"]): CMConfig["poison"] {
 	return out;
 }
 
+// 2026-10-04 live-E2E fix: pi's tool_execution_end result is an OBJECT
+// {content: string | Array<{type,"text">, details} (docs/json.md), not a bare
+// string/array — the old textOf returned "" for every built-in tool result and
+// the span ledger silently missed them all (live: 71k-token session, 3.4k-token
+// ledger). Unwrap .content like a first-class shape.
 function textOf(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (Array.isArray(content)) {
 		return (content as Array<{ type?: string; text?: string }>)
 			.map((c) => (c?.type === "text" && c.text ? c.text : ""))
 			.join("\n");
+	}
+	if (content && typeof content === "object" && "content" in content) {
+		return textOf((content as { content?: unknown }).content);
 	}
 	return "";
 }
@@ -592,6 +607,16 @@ async function jevDriftCall(userMsg: string, model: TaskModel): Promise<number |
 export const __eval = { ingestRelevance, jevDriftCall, overlapScore };
 
 const STATUS_CHANNEL = "pi-extensions:status-line";
+/**
+ * Compact-request contract (../shared/compact-request-protocol.md). CM is the
+ * sole PROPOSER: it emits requests carrying span evidence (reclaimable tokens,
+ * breakdown, suggested instructions). smart-compaction is the sole EXECUTOR:
+ * it prices each request through its economy guards and either fires
+ * ctx.compact() or replies with a decline reason. CM never calls ctx.compact()
+ * itself — 2026-10-04 incident: an 86:1 cost-against fire at 7% window over
+ * ~870 dup tokens that CM's share-only trigger could not price.
+ */
+const COMPACT_CHANNEL = "pi-extensions:compact-request";
 const SUITE_KEY = "ctx-suite";
 const LEGACY_STATUS_KEY = "ctx-health";
 
@@ -634,6 +659,44 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
+	// Any-origin compaction awareness (2026-10-04 coordination fix): the
+	// ledger/shaping reset used to live only inside CM's own triggerCompact —
+	// after smart-compaction / manual / overflow compacts the stale ledger kept
+	// purity high and re-requested past cooldown. Now: before_compact arms the
+	// shaping bypass (the compaction summarizer's forced-prompt calls pass
+	// through unshaped), session_compact resets the ground truth, and the
+	// executor's decision ack is recorded for telemetry.
+	pi.on("session_before_compact", () => {
+		if (st) st.compacting = true;
+	});
+	pi.on("session_compact", () => {
+		if (!st) return;
+		st.lastCompactAt = Date.now(); // cooldown anchored to ANY compaction
+		st.b6SuppressNext = true; // B6: next assistant message_end skips cache-loss attribution
+		st.spans = [];
+		st.hashCount.clear();
+		st.verdictMemo.clear();
+		st.toolNames.clear();
+		// GLM CTX2-3 review #2: the compacted transcript is NEW ground — shaping
+		// state referencing the dead prefix must reset too. Task model (M1)
+		// intentionally survives compaction.
+		st.dirty = [];
+		st.appliedShas.clear();
+		st.appliedTurns.clear();
+		st.argsKeyBySha.clear();
+		st.sentPrefix.clear();
+		st.lastPurity = 0;
+		st.flushQueued = false;
+	});
+	pi.on("session_compact_failed", () => {
+		if (st) st.compacting = false; // no ground change; retryTurns spaces retries
+	});
+	pi.events.on(COMPACT_CHANNEL, (data: unknown) => {
+		const msg = data as { type?: string; decision?: string; why?: string } | undefined;
+		if (!st || msg?.type !== "compact-decision") return;
+		st.lastRequestOutcome = { decision: msg.decision ?? "declined", why: msg.why ?? "", ts: new Date().toISOString() };
+	});
+
 	function refreshConfig(ctx: ExtensionContext) {
 		st = {
 			config: loadConfig(ctx.cwd),
@@ -657,7 +720,8 @@ export default function (pi: ExtensionAPI) {
 			elisionStats: { elided: 0, skipped: 0, tokens: 0 },
 			flushQueued: false,
 			lastCompactAt: null,
-			compactInFlight: false,
+			requestTurn: -1,
+			lastRequestOutcome: null,
 			b6SuppressNext: false,
 		burst: null,
 		burstSeq: 0,
@@ -823,53 +887,45 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	// M3: compact trigger with cooldown + in-flight guards (spec-phase2 M3; B4 instructions locked)
-	function triggerCompact(ctx: ExtensionContext): boolean {
-		if (!st || st.compactInFlight) return false;
+	// M3 amended 2026-10-04: compact-REQUEST emitter (../shared/compact-request-protocol.md).
+	// CM PROPOSES with span evidence; smart-compaction DISPOSES through its economy
+	// gate (pricing provenance, savings > cost × margin, hot-cache, window floor).
+	// Guards: cooldown anchored to the last observed compaction (any origin),
+	// retry-turn spacing, reclaimable floor for content requests — below
+	// minReclaimableTokens the excess is a SHAPING job, not a compaction job
+	// (2026-10-04: ~870 dup tok at 7% window — 86:1 cost against).
+	function emitCompactRequest(
+		ctx: ExtensionContext,
+		kind: "content" | "pressure",
+		evidence: { purity: number; reclaimableTokens: number; breakdown: Record<string, number> },
+	): boolean {
+		if (!st || !st.config.compactRequest.enabled) return false;
 		const now = Date.now();
 		if (st.lastCompactAt !== null && now - st.lastCompactAt < st.config.purityBudget.compactCooldownMin * 60_000) return false;
-		// Token floor: pi rejects compact with "session too small" below keepRecent +
-		// margin (smart-compaction engine.ts:167 precedent). Skip on a positive
-		// below-floor measurement; fail-open when tokens are unknown (AC-21).
+		// Token floor: a positive below-floor measurement skips (the executor
+		// re-checks live usage anyway); unknown stays fail-open (AC-21) — the
+		// request is advisory, and the executor's own guards are fail-safe.
 		if (st.lastPromptTokens !== null && st.lastPromptTokens < COMPACT_MIN_TOKENS) return false;
-		st.compactInFlight = true;
-		st.compacting = true; // Phase 3 M6: forced-prompt calls bypass shaping until the next user turn
+		if (st.requestTurn >= 0 && st.turn - st.requestTurn < st.config.compactRequest.retryTurns) return false;
+		if (kind === "content" && evidence.reclaimableTokens < st.config.compactRequest.minReclaimableTokens) return false;
+		st.requestTurn = st.turn;
 		try {
-			const res = (ctx as { compact?: (o: { customInstructions: string }) => unknown }).compact?.({
-				customInstructions: st.config.compactInstructions,
+			pi.events.emit(COMPACT_CHANNEL, {
+				type: "compact-request",
+				kind,
+				sessionId: ctx.sessionManager.getSessionId?.() ?? null,
+				purity: evidence.purity,
+				reclaimableTokens: evidence.reclaimableTokens,
+				breakdown: evidence.breakdown,
+				view: { shapedTokens: st.lastViewTokens, baselineTokens: st.baselineViewTokens },
+				cache: { chPct: st.lastChPct ?? null, missCause: st.missStats.cause },
+				taskSwitch: { staged: st.stagedModel != null, driftSource: st.lastDriftSource },
+				suggestedInstructions: st.config.compactInstructions,
+				ts: new Date().toISOString(),
 			});
-			if (res && typeof (res as Promise<void>).finally === "function") {
-				// attach catch so a rejected compact promise never becomes unhandledRejection (GLM M3 review)
-				(res as Promise<void>).finally(() => {
-					if (st) st.compactInFlight = false;
-				}).catch(() => {
-					if (st) st.compactInFlight = false;
-				});
-			} else {
-				st.compactInFlight = false;
-			}
-			st.lastCompactAt = now;
-			st.b6SuppressNext = true; // B6: next assistant message_end skips cache-loss attribution
-			// Post-compact ledger reset (GLM CTX2-3 review #2): the compacted context is
-			// new ground — stale spans kept purity ≥ budget forever, re-triggering
-			// cooldown-gated flushes. Task model (M1) intentionally survives compaction.
-			// Fail-safe: armed even if the compact promise later rejects (throttles retries).
-			st.spans = [];
-			st.hashCount.clear();
-			st.verdictMemo.clear();
-			st.toolNames.clear();
-			// GLM review F3: the compacted transcript is a NEW baseline — shaping state
-			// referencing the dead prefix must reset too, or turn_end can graduate dead
-			// shas from the dirty queue (burning the M5/M3 XOR on a no-op flush)
-			st.dirty = [];
-			st.appliedShas.clear();
-			st.appliedTurns.clear();
-			st.argsKeyBySha.clear();
-			st.sentPrefix.clear();
 			return true;
 		} catch {
-			st.compactInFlight = false;
-			return false;
+			return false; // listener dispatch is in-process; never break the turn
 		}
 	}
 
@@ -1655,10 +1711,26 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
+	// tool_execution_end carries NO args (docs/json.md) — args arrive on
+	// tool_execution_start; correlate by toolCallId (bounded, live-E2E fix).
+	const argsByCallId = new Map<string, Record<string, unknown>>();
+	pi.on("tool_execution_start", async (event) => {
+		const e = event as { toolCallId?: string; args?: Record<string, unknown> };
+		if (!e.toolCallId || !e.args) return;
+		argsByCallId.set(e.toolCallId, e.args);
+		if (argsByCallId.size > 128) {
+			const oldest = argsByCallId.keys().next().value;
+			if (oldest !== undefined) argsByCallId.delete(oldest);
+		}
+	});
+
 	pi.on("tool_execution_end", async (event, ctx) => {
 		if (!st?.config.enabled) return;
 		try {
-		const args = (event as { args?: Record<string, unknown> }).args ?? {};
+		const e = event as { toolCallId?: string };
+		const correlated = e.toolCallId !== undefined ? argsByCallId.get(e.toolCallId) : undefined;
+		if (e.toolCallId !== undefined) argsByCallId.delete(e.toolCallId);
+		const args = correlated ?? (event as { args?: Record<string, unknown> }).args ?? {};
 		const p = typeof args.path === "string" ? args.path : undefined;
 		const text = textOf((event as { result?: unknown }).result);
 		if (!text) return; // all tool results fingerprinted (error loops/dumps from any tool are poison candidates); path captured when present (spec §2.1/§2.2)
@@ -1824,24 +1896,47 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 		const budget = rt.config.purityBudget.budget;
-		let flush: "hard" | "soft-exec" | null = null;
+		// Compact-request evidence: reclaimable is the purity numerator in TOKENS.
+		// The 2026-10-04 incident fired a compact for a 0.25 share over 3.4k tracked
+		// tokens — a share without absolute mass is not a compaction reason.
+		const reclaimable = Math.round(unrelatedTok + dupTok + staleTok);
+		const evidence = {
+			purity: rt.lastPurity ?? 0,
+			reclaimableTokens: reclaimable,
+			breakdown: { unrelatedTok, dupTok, staleTok, totalTokens: total },
+		};
+		const usage = ctx.getContextUsage();
+		let flush: "req-content" | "req-pressure" | null = null;
 		if (!shapeFlushed && rt.lastPurity >= budget) {
 			if (rt.lastPurity >= budget * rt.config.purityBudget.hardMultiplier) {
-				if (triggerCompact(ctx)) {
-					flush = "hard";
-					rt.flushQueued = false; // hard flush addresses the excess
+				if (emitCompactRequest(ctx, "content", evidence)) {
+					flush = "req-content";
+					rt.flushQueued = false; // hard excess addressed (executor arbitrates)
 				}
 			} else if (rt.flushQueued) {
-				// queued from previous turn: flush NOW iff purity still ≥ budget (AC-10)
-				if (triggerCompact(ctx)) {
-					flush = "soft-exec";
+				// queued from previous turn: request NOW iff purity still ≥ budget (AC-10)
+				if (emitCompactRequest(ctx, "content", evidence)) {
+					flush = "req-content";
 					rt.flushQueued = false;
 				}
 			} else {
-				rt.flushQueued = true; // queue; NO compact this turn (AC-10)
+				rt.flushQueued = true; // queue; NO request this turn (AC-10)
 			}
 		} else {
 			rt.flushQueued = false; // back under budget ⇒ clear pending queue
+		}
+		// Option A pressure watch: window pressure is CM's WHEN signal for
+		// big-and-clean contexts (invisible to purity). The executor still
+		// prices it — fire line, savings, hot-cache — so a bad fraction here
+		// cannot repeat the 2026-10-04 incident. Only when no content request
+		// went out this turn.
+		if (
+			flush === null &&
+			usage?.tokens != null &&
+			usage.contextWindow > 0 &&
+			usage.tokens >= usage.contextWindow * rt.config.compactRequest.pressureFraction
+		) {
+			if (emitCompactRequest(ctx, "pressure", evidence)) flush = "req-pressure";
 		}
 		const anyVerdict = rt.spans.some((s) => s.verdict != null);
 		const metrics = {
@@ -1853,13 +1948,6 @@ export default function (pi: ExtensionAPI) {
 			unrelatedShare: anyVerdict ? unrelatedTok / total : null,
 			totalTokens: total,
 		};
-		const usage = ctx.getContextUsage();
-		const chPct =
-			usage?.tokens != null
-				? undefined // CH% comes from assistant usage, captured at message_end (per-call)
-				: undefined;
-		void chPct;
-
 		try {
 			if (rt.config.statusLine.enabled && ctx.hasUI) {
 			const f = Math.round(metrics.freshShare * 100);
@@ -1912,6 +2000,7 @@ export default function (pi: ExtensionAPI) {
 				elision: { ...rt.elisionStats },
 				purity: rt.lastPurity,
 				flush,
+				request: rt.lastRequestOutcome ?? undefined,
 				shape: rt.config.shaping.enabled
 					? {
 						plans: rt.shapeStats.plans,
