@@ -75,3 +75,35 @@ keepRecent ≈ 20k + margin). Fail-open when tokens are unknown (AC-21 spirit).
 On skip: no ledger mutation, no cooldown start; purity excess re-evaluates next
 turn and self-resolves as the session grows. Regression wiring test:
 `context-manager/test/compact-floor.wiring.test.ts`.
+
+### 2026-10-04 (compact-request): M3 inverted — CM proposes, smart-compaction disposes
+
+Field incident: at 71,869 prompt tokens (7% of a 1M window) CM's purity trigger
+compacted to reclaim ~870 dup tokens — ~86:1 cost-against, into a 96.9%-hot
+cache, moments after smart-compaction declined the same moment for
+`pricing-unknown`. M3's share-only trigger could not price its own action.
+
+Amendment (see ../../shared/compact-request-protocol.md for the full contract):
+
+- `triggerCompact` is DELETED. CM never calls `ctx.compact()`. M3 now emits
+  `compact-request` on `pi.events` (`pi-extensions:compact-request`) with span
+  evidence: `reclaimableTokens` (purity numerator in tokens), breakdown, view
+  delta, cache attribution, and `suggestedInstructions` (B4 text rides here).
+- New config `compactRequest { enabled, pressureFraction=0.5,
+  minReclaimableTokens=8000, retryTurns=4 }`. Sub-economy reclaimable never
+  requests (the incident class); `purityBudget` retains elision-tier semantics
+  only. Window pressure (big-and-clean contexts, invisible to purity) requests
+  with `kind: "pressure"` — the executor's economy still decides.
+- Any-origin compaction awareness: CM subscribes `session_before_compact`
+  (arms the shaping bypass for the summarizer's forced-prompt calls),
+  `session_compact` (ledger/shaping reset, cooldown anchor, B6 arm), and
+  `session_compact_failed` (bypass clear). AC-1's old prohibition of
+  `session_before_compact` is superseded — CM observes, the executor acts.
+- Telemetry: `flush` values are now `req-content` / `req-pressure` (was
+  `hard` / `soft-exec`); new `request` field carries the executor's latest
+  `compact-decision` ack.
+
+Wiring tests: `context-manager/test/wiring-phase2-m3.test.ts` (rewritten;
+incident regression + pressure watch + decision-ack added),
+`compact-floor.wiring.test.ts`, `wiring.test.ts` (AC-1), `shape.wiring.test.ts`
+(P3-AC-30). 75/75 green.

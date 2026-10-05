@@ -76,14 +76,25 @@ function jsonl(cwd: string): any[] {
 	return fs.readFileSync(f, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
 }
 
-test("AC-1: subscribes only to observe events — no context/warmer handlers", async () => {
+test("AC-1 (amended 2026-10-04): observe-only subscriptions incl. compact lifecycle — no warmer hooks", async () => {
 	const { pi, handlers } = mockPi();
 	createExtension(pi);
-	for (const forbidden of ["cache_warming_decision", "session_before_compact"]) {
+	for (const forbidden of ["cache_warming_decision"]) {
 		assert.equal(handlers.has(forbidden), false, `must not subscribe to ${forbidden}`);
 	}
-	for (const required of ["tool_execution_end", "message_end", "turn_end", "context"]) { // Phase 3: context subscription is REQUIRED (spec-phase3.md E1/E2)
-		assert.ok(handlers.has(required));
+	// The 2026-10-04 compact-request contract INVERTED the old rule (CM must not
+	// observe session_before_compact): CM now observes the full compaction
+	// lifecycle — any-origin resets — and never calls ctx.compact itself.
+	for (const required of [
+		"tool_execution_end",
+		"message_end",
+		"turn_end",
+		"context", // Phase 3: context subscription is REQUIRED (spec-phase3.md E1/E2)
+		"session_before_compact",
+		"session_compact",
+		"session_compact_failed",
+	]) {
+		assert.ok(handlers.has(required), `must subscribe to ${required}`);
 	}
 });
 
