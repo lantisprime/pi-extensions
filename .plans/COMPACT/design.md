@@ -297,3 +297,33 @@ Unit-test CostModel + TriggerEngine with synthetic usage snapshots; then run
   (input/output/cacheRead/total from CompactionResult.usage) and
   estimatedTokensAfter, so future audits can compare claimed savings against
   real summarizer spend.
+
+### 2026-10-04 (Option A): SC becomes the sole executor of compact-requests
+
+Field trigger (see ../../shared/compact-request-protocol.md): at 71,869 tokens
+(7% of a 1M window) context-manager's purity trigger compacted to reclaim ~870
+dup tokens — ~86:1 cost-against, into a 96.9%-hot cache, milliseconds after SC
+declined the same moment for `pricing-unknown`. Decision (operator, Option A):
+CM is the sole PROPOSER (content purity + window-share pressure); SC is the
+sole EXECUTOR and **no longer self-triggers**.
+
+- `agent_settled` evaluates ONLY a pending `compact-request` (bus
+  `pi-extensions:compact-request`); with no request it records
+  `no-request (proposer contract: execute, never self-trigger)`. pi's overflow
+  backstop and manual `/compact:smart` are the remaining non-request sources.
+- `EvalInput.request { kind, reclaimableTokens }`: `kind: "content"` yields the
+  fire/quality line to the content signal BUT keeps the floor, post-compaction
+  gap, min-interval, pricing-provenance and margin guards, and bounds the
+  savings `shrink` (and the tier `aboveShrink`) to the proposer's measured
+  reclaimable mass — savings are only claimed for tokens the span ledger marks
+  unrelated/dup/stale. `kind: "pressure"` runs the standard size-driven path.
+- The fire is answered on the bus with
+  `{type:"compact-decision", decision, why}`; accepted fires append the
+  proposer's guidance to the focus instructions; `session_compact` clears any
+  pending request (the compacted context answered it).
+- Telemetry: request evaluations record under event `compact-request` with
+  `request.kind` / `request.reclaimableTokens` / `request.purity`.
+
+Tests: engine 42/42 (+4 contract), wiring 60/60 total (+2 Option A regressions:
+no-request never fires; the 870-token incident declines on savings with a
+`declined` ack).

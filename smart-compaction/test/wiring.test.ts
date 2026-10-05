@@ -98,6 +98,21 @@ async function drive(handlers: Map<string, Handler[]>, event: string, eventObj: 
 	for (const h of handlers.get(event) ?? []) await h(eventObj, ctx);
 }
 
+// ----- compact-request contract helpers (shared/compact-request-protocol.md) -----
+const COMPACT_CHANNEL = "pi-extensions:compact-request";
+/** Emit a proposer request on the bus (CM's role in these tests). */
+function propose(pi: any, opts: { kind?: "content" | "pressure"; reclaimableTokens?: number; suggestedInstructions?: string } = {}) {
+	pi.events.emit(COMPACT_CHANNEL, {
+		type: "compact-request",
+		kind: opts.kind ?? "content",
+		reclaimableTokens: opts.reclaimableTokens ?? 500_000,
+		suggestedInstructions: opts.suggestedInstructions,
+	});
+}
+/** Executor decision acks recorded on the bus. */
+const decisionAcks = (emissions: Array<{ channel: string; data: any }>) =>
+	emissions.filter((e) => e.channel === COMPACT_CHANNEL && e.data?.type === "compact-decision").map((e) => e.data);
+
 test("LESSON-1 regression 1: gate defer does not wedge the economy trigger", async () => {
 	// sandbox config: low floor, no min-interval, tier at 30k → economy fires at 40k
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sc-wiring-"));
@@ -127,7 +142,7 @@ test("LESSON-1 regression 1: gate defer does not wedge the economy trigger", asy
 		}),
 	);
 
-	const { pi, handlers } = mockPi();
+	const { pi, handlers, busEmissions } = mockPi();
 	createExtension(pi);
 	const sessionId = `wedge-${Date.now()}`;
 	// task subject words fully present in old-context excerpt → heuristic p=1.0 → defer
@@ -144,13 +159,19 @@ test("LESSON-1 regression 1: gate defer does not wedge the economy trigger", asy
 	await drive(handlers, "turn_end", {}, { ...ctx, getContextUsage: () => ({ tokens: 39_000, contextWindow: 1_048_576, percent: 4 }) });
 	await drive(handlers, "turn_end", {}, ctx); // growth > 0 → economy math armed
 
-	// first settle: economy → gate defers
+	// first settle: economy → gate defers (a content request drives evaluation)
+	propose(pi);
 	await drive(handlers, "agent_settled", {}, ctx);
 	assert.equal(compactCalls.length, 0, "defer must not compact");
 	assert.ok(statusSets.some((s) => s.includes("deferred")), "first settle should report defer");
+	assert.ok(
+		decisionAcks(busEmissions).some((d) => d.decision === "declined" && String(d.why).includes("deferred")),
+		"the defer must be answered on the request bus",
+	);
 
 	// second settle: MUST evaluate again (the reviewed blocker wedged here)
 	const before = telemetryLines(sessionId).length;
+	propose(pi);
 	await drive(handlers, "agent_settled", {}, ctx);
 	const lines = telemetryLines(sessionId).slice(before);
 	assert.equal(compactCalls.length, 0, "defer again: still no compaction");
@@ -175,9 +196,10 @@ test("LESSON-1 regression 2: session_compact_failed resets min-interval counters
 	// turnsSinceCompaction is now 2 (< default 4): without reset the next settle
 	// reports min-interval; design A5 requires session_compact_failed to clear it.
 	await drive(handlers, "session_compact_failed", { aborted: false, errorMessage: "x" }, ctx);
+	propose(pi);
 	await drive(handlers, "agent_settled", {}, ctx);
 	const lines = telemetryLines(sessionId);
-	const lastSettle = [...lines].reverse().find((r) => r.event === "agent_settled");
+	const lastSettle = [...lines].reverse().find((r) => r.event === "compact-request");
 	assert.ok(lastSettle, "settle recorded");
 	assert.ok(
 		(lastSettle.why ?? "").includes("min-interval (0/4)"),
@@ -279,6 +301,7 @@ test("post-compaction gap is armed by our compaction but not by pi's overflow", 
 		// Context regrows only 5k past the watermark, well inside minGapTokens.
 		const near = mockCtx({ sessionId, cwd: dir, tokens: 255_000 });
 		await drive(handlers, "turn_end", {}, near.ctx);
+		propose(pi);
 		await drive(handlers, "agent_settled", {}, near.ctx);
 		const whys = whyOf(sessionId);
 		assert.ok(
@@ -301,6 +324,7 @@ test("post-compaction gap is armed by our compaction but not by pi's overflow", 
 		// Same 5k regrowth: now the gap must hold economy back.
 		const near = mockCtx({ sessionId, cwd: dir, tokens: 255_000 });
 		await drive(handlers, "turn_end", {}, near.ctx);
+		propose(pi);
 		await drive(handlers, "agent_settled", {}, near.ctx);
 		assert.ok(
 			whyOf(sessionId).some((w) => w.includes("post-compaction gap")),
@@ -311,6 +335,7 @@ test("post-compaction gap is armed by our compaction but not by pi's overflow", 
 		// guard is a delay and never a permanent wedge.
 		const far = mockCtx({ sessionId, cwd: dir, tokens: 275_000 });
 		await drive(handlers, "turn_end", {}, far.ctx);
+		propose(pi);
 		await drive(handlers, "agent_settled", {}, far.ctx);
 		const settled = whyOf(sessionId).slice(-1)[0] ?? "";
 		assert.ok(
@@ -346,6 +371,7 @@ test("live regression 2026-10-04: cacheRead-0 catalog must not dead-stop economy
 		await drive(handlers, "turn_end", {}, ctx); // delta 10k → growthPerTurn armed
 		await drive(handlers, "turn_end", {}, ctx);
 		await drive(handlers, "turn_end", {}, ctx); // turnsSinceCompaction = 4
+		propose(pi, { kind: "pressure" }); // pressure = standard size-driven path
 		await drive(handlers, "agent_settled", {}, ctx);
 		assert.equal(compactCalls.length, 0, "170k on a 1M window (16%) is below the 524,288 fire line — no compaction");
 		assert.ok(
@@ -364,6 +390,7 @@ test("live regression 2026-10-04: cacheRead-0 catalog must not dead-stop economy
 		await drive(handlers, "turn_end", {}, ctx); // delta 10k → growthPerTurn armed
 		await drive(handlers, "turn_end", {}, ctx);
 		await drive(handlers, "turn_end", {}, ctx); // turnsSinceCompaction = 4
+		propose(pi, { kind: "pressure", reclaimableTokens: 500_000 });
 		await drive(handlers, "agent_settled", {}, ctx);
 		const decisions = telemetryLines(sessionId).map((l) => [l.event, l.decision, l.why]);
 		assert.equal(compactCalls.length, 1, `ctx.compact must fire past the fire line with a cacheRead-0 catalog, telemetry: ${JSON.stringify(decisions)}`);
@@ -380,6 +407,7 @@ test("live regression 2026-10-04: cacheRead-0 catalog must not dead-stop economy
 		await drive(handlers, "turn_end", {}, ctx);
 		await drive(handlers, "turn_end", {}, ctx);
 		await drive(handlers, "turn_end", {}, ctx);
+		propose(pi, { kind: "pressure" });
 		await drive(handlers, "agent_settled", {}, ctx);
 		assert.equal(compactCalls.length, 0, "below the window floor nothing may compact, cacheRead fix notwithstanding");
 		assert.ok(
@@ -388,5 +416,113 @@ test("live regression 2026-10-04: cacheRead-0 catalog must not dead-stop economy
 		);
 	}
 
+	fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ----- 2026-10-04 Option A: SC executes compact-requests, never self-triggers -----
+
+test("Option A: settle without a request never compacts; a request fires with guidance + accepted ack", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sc-opta-"));
+	fs.mkdirSync(path.join(dir, ".pi"));
+	fs.writeFileSync(
+		path.join(dir, ".pi", "smart-compaction.json"),
+		JSON.stringify({
+			enabled: true,
+			profiles: [
+				{
+					match: "litellm/minimax",
+					mode: "cost",
+					prices: { input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0 },
+					tiers: [
+						{ upTo: 30_000, inputMult: 1, outputMult: 1 },
+						{ upTo: 1e9, inputMult: 2, outputMult: 1.5 },
+					],
+					cache: { readRatio: 0.1, writePremium: 0, ttlShort: 300, ttlLong: 3600 },
+					compaction: { tokenFloor: 20_000, minIntervalTurns: 0, floorFraction: 0 },
+					gate: { enabled: false, aggressiveBelow: 0.35, deferAbove: 0.7 },
+				},
+			],
+		}),
+	);
+	const { pi, handlers, busEmissions } = mockPi();
+	createExtension(pi);
+	const sessionId = `opta-${Date.now()}`;
+	const { ctx, compactCalls, statusSets } = mockCtx({ sessionId, cwd: dir, tokens: 40_000 });
+
+	await drive(handlers, "session_start", {}, ctx);
+	await drive(handlers, "message_end", { message: { role: "assistant", usage: { totalTokens: 40_000 } } }, ctx);
+	await drive(handlers, "turn_end", {}, { ...ctx, getContextUsage: () => ({ tokens: 39_000, contextWindow: 1_048_576, percent: 4 }) });
+	await drive(handlers, "turn_end", {}, ctx); // growth armed
+
+	// The OLD behavior fired here on its own. Option A: no request ⇒ no fire.
+	await drive(handlers, "agent_settled", {}, ctx);
+	assert.equal(compactCalls.length, 0, "self-trigger removed: a settle with no pending request never compacts");
+	assert.ok(
+		telemetryLines(sessionId).some((l) => String(l.why ?? "").includes("no-request")),
+		"the no-request refusal is the recorded reason",
+	);
+	assert.equal(decisionAcks(busEmissions).length, 0, "nothing to ack without a request");
+
+	// A proposer request fires through the same gate, guidance rides along.
+	propose(pi, { kind: "content", reclaimableTokens: 35_000, suggestedInstructions: "drop unrelated/dup/stale content" });
+	await drive(handlers, "agent_settled", {}, ctx);
+	assert.equal(compactCalls.length, 1, "request fires through the economy gate");
+	assert.match(String(compactCalls[0]?.customInstructions ?? ""), /Preserve ALL information/, "SC focus instructions kept");
+	assert.match(
+		String(compactCalls[0]?.customInstructions ?? ""),
+		/Proposer guidance \(context-manager span ledger\): drop unrelated\/dup\/stale content/,
+		"proposer guidance appended",
+	);
+	const acks = decisionAcks(busEmissions);
+	assert.equal(acks.length, 1);
+	assert.equal(acks[0].decision, "accepted");
+	// fired-request rows keep BOTH the economics and the request provenance (merge, not replace)
+	const firedRow = telemetryLines(sessionId)
+		.filter((l) => l.event === "compact-request")
+		.find((l) => l.decision === "economy");
+	assert.ok(firedRow, "fired request recorded under compact-request");
+	assert.ok(firedRow.estimates?.savings > 0, "savings/cost survive the provenance merge");
+	assert.equal(firedRow.estimates?.["request.kind"], "content");
+	assert.equal(firedRow.estimates?.["request.reclaimableTokens"], 35_000);
+	// consumed exactly once — a second settle without a new request idles
+	await drive(handlers, "agent_settled", {}, ctx);
+	assert.equal(compactCalls.length, 1, "request consumed exactly once");
+	fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("Option A incident 2026-10-04 (executor side): ~870-token reclaimable at 16% window declines on savings", async () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sc-opta2-")); // no config → defaults
+	const { pi, handlers, busEmissions } = mockPi();
+	createExtension(pi);
+	const sessionId = `opta2-${Date.now()}`;
+	const { ctx, compactCalls, statusSets } = mockCtx({ sessionId, cwd: dir, tokens: 170_000 });
+
+	await drive(handlers, "session_start", {}, ctx);
+	await drive(handlers, "message_end", { message: { role: "assistant", usage: { totalTokens: 165_000 } } }, ctx);
+	await drive(handlers, "turn_end", {}, { ...ctx, getContextUsage: () => ({ tokens: 165_000, contextWindow: 1_048_576, percent: 15.7 }) });
+	await drive(handlers, "turn_end", {}, ctx);
+	await drive(handlers, "turn_end", {}, ctx);
+	await drive(handlers, "turn_end", {}, ctx); // turnsSinceCompaction = 4
+
+	// The live incident shape: content request, reclaimable ~870 tokens.
+	propose(pi, { kind: "content", reclaimableTokens: 870, suggestedInstructions: "drop unrelated/dup/stale content" });
+	await drive(handlers, "agent_settled", {}, ctx);
+	assert.equal(compactCalls.length, 0, "~870 reclaimable tokens can never price a compaction");
+	assert.ok(
+		telemetryLines(sessionId).some((l) => String(l.why ?? "").includes("savings $0.")),
+		"the savings bound is the recorded refusal reason",
+	);
+	// declines persist the request provenance too (estimates on none-kind rows)
+	const declinedRow = telemetryLines(sessionId)
+		.filter((l) => l.event === "compact-request")
+		.find((l) => l.decision === "none");
+	assert.ok(declinedRow, "declined request recorded under compact-request");
+	assert.equal(declinedRow.estimates?.["request.kind"], "content");
+	assert.equal(declinedRow.estimates?.["request.reclaimableTokens"], 870);
+	const acks = decisionAcks(busEmissions);
+	assert.equal(acks.length, 1);
+	assert.equal(acks[0].decision, "declined");
+	assert.match(String(acks[0].why), /savings/);
+	assert.ok(statusSets.some((s) => s.includes("req declined")), "status line reports the declined request");
 	fs.rmSync(dir, { recursive: true, force: true });
 });

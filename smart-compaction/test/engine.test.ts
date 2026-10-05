@@ -711,3 +711,65 @@ test("v3 focused instructions demand structured, verbatim retention", () => {
 	assert.match(text, /rationale/);
 	assert.match(text, /Fix the parser/);
 });
+
+// ----- compact-request contract (shared/compact-request-protocol.md, 2026-10-04) -----
+
+test("compact-request content: fire line yields, savings bounded by reclaimable", () => {
+	// 300k on a 1M window with FLAT tiers (no regime escape): below the 524k
+	// fire line — the standard path holds; a content request with a large
+	// measured reclaimable mass fires.
+	const flat = { ...baseInput().profile, tiers: [] };
+	const armed = (over: Partial<EvalInput> = {}) => {
+		const i = baseInput({ profile: flat, usage: { tokens: 300_000, contextWindow: 1_048_576 }, ...over });
+		i.state.turnsSinceCompaction = 10; // past min-interval
+		i.state.growthPerTurn = 10_000; // horizon math live
+		return i;
+	};
+	assert.match((evaluateEconomy(armed()) as { why: string }).why, /below fire-line/);
+	const fired = evaluateEconomy(armed({ request: { kind: "content", reclaimableTokens: 280_000 } }));
+	assert.equal(fired.kind, "economy", "content request with 280k reclaimable fires below the line");
+	// The 2026-10-04 incident bound: ~870-token reclaimable can never price a
+	// ~75k-token compaction — savings are claimed only for measured mass.
+	const incident = evaluateEconomy(armed({ request: { kind: "content", reclaimableTokens: 870 } }));
+	assert.equal(incident.kind, "none");
+	assert.match((incident as { why: string }).why, /savings \$0\.0/);
+});
+
+test("compact-request pressure: standard size-driven path — the fire line still gates", () => {
+	const i = baseInput({ usage: { tokens: 170_000, contextWindow: 1_048_576 } });
+	i.state.turnsSinceCompaction = 10;
+	i.state.growthPerTurn = 10_000;
+	const d = evaluateEconomy({ ...i, request: { kind: "pressure", reclaimableTokens: 120_000 } });
+	assert.equal(d.kind, "none");
+	assert.match((d as { why: string }).why, /below fire-line/);
+});
+
+test("compact-request content: quality mode fires below qualityLine on the content signal", () => {
+	const i = baseInput({
+		profile: {
+			...baseInput().profile,
+			mode: "quality",
+		},
+		usage: { tokens: 170_000, contextWindow: 1_048_576 },
+	});
+	i.state.turnsSinceCompaction = 10;
+	assert.match((evaluateEconomy(i) as { why: string }).why, /below qualityLine/);
+	const d = evaluateEconomy({ ...i, request: { kind: "content", reclaimableTokens: 120_000 } });
+	assert.equal(d.kind, "quality", "content request replaces the size signal in quality mode");
+});
+
+test("compact-request content: floor / interval / pricing guards never yield to the request", () => {
+	const floor = baseInput({
+		profile: { ...baseInput().profile, compaction: { ...baseInput().profile.compaction, tokenFloor: 10_000 } },
+		usage: { tokens: 23_000, contextWindow: 1_048_576 },
+		request: { kind: "content", reclaimableTokens: 20_000 },
+	});
+	floor.state.turnsSinceCompaction = 10;
+	assert.match((evaluateEconomy(floor) as { why: string }).why, /below keepRecent floor/);
+	const interval = baseInput({ usage: { tokens: 170_000, contextWindow: 1_048_576 }, request: { kind: "content", reclaimableTokens: 120_000 } });
+	interval.state.turnsSinceCompaction = 2;
+	assert.match((evaluateEconomy(interval) as { why: string }).why, /min-interval/);
+	const pricing = baseInput({ usage: { tokens: 250_000, contextWindow: 1_048_576 }, pricingKnown: false, request: { kind: "content", reclaimableTokens: 120_000 } });
+	pricing.state.turnsSinceCompaction = 10;
+	assert.match((evaluateEconomy(pricing) as { why: string }).why, /pricing-unknown/);
+});
