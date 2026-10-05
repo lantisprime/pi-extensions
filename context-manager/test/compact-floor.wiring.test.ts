@@ -1,9 +1,9 @@
-// context-manager/test/compact-floor.wiring.test.ts — CTX-FIX regression.
-// triggerCompact must skip ctx.compact() when st.lastPromptTokens is a positive
-// measurement below COMPACT_MIN_TOKENS (24k): pi rejects with
-// "Compaction failed: Nothing to compact (session too small)" below its
-// keepRecent budget + margin. See .plans/CONTEXT/spec-phase2.md Amendments.
-// Helper pattern: test/wiring-phase2-m3.test.ts (mockPi / drive / seedHard).
+// context-manager/test/compact-floor.wiring.test.ts — CTX-FIX regression,
+// AMENDED 2026-10-04: triggerCompact became emitCompactRequest — CM no longer
+// calls ctx.compact() at all (../shared/compact-request-protocol.md). The token
+// floor now gates REQUEST emission: a positive below-floor measurement skips
+// (the executor re-checks live usage anyway); unknown stays fail-open (AC-21).
+// See .plans/CONTEXT/spec-phase2.md Amendments.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -15,9 +15,12 @@ process.env.JEV_API_KEY = "test-key";
 
 const { default: createExtension } = await import("../index.ts");
 
+const COMPACT_CHANNEL = "pi-extensions:compact-request";
+
 type Handler = (event: any, ctx: any) => Promise<any>;
 function mockPi() {
 	const handlers = new Map<string, Handler[]>();
+	const emissions: Array<{ channel: string; data: any }> = [];
 	return {
 		pi: {
 			on: (e: string, h: Handler) => {
@@ -27,9 +30,15 @@ function mockPi() {
 				return () => {};
 			},
 			registerCommand: (_n: string, _o: any) => {},
-			events: { emit: () => {}, on: () => () => {} },
+			events: {
+				emit: (ch: string, data: any) => {
+					emissions.push({ channel: ch, data });
+				},
+				on: () => () => {},
+			},
 		} as any,
 		handlers,
+		emissions,
 	};
 }
 function mockCtx(opts: { cwd: string }) {
@@ -88,6 +97,12 @@ function ingestAware() {
 		return { answers: { drift: { noul: 0.0 } } };
 	});
 }
+const requests = (emissions: Array<{ channel: string; data: any }>) =>
+	emissions.filter((e) => e.channel === COMPACT_CHANNEL && e.data?.type === "compact-request").map((e) => e.data);
+function cfgFile(dir: string, obj: unknown) {
+	fs.mkdirSync(path.join(dir, ".pi"), { recursive: true });
+	fs.writeFileSync(path.join(dir, ".pi", "context-manager.json"), JSON.stringify(obj));
+}
 
 const A_TXT = "ALPHA ".repeat(1400); // 2100 tok — unrelated verdict, dump-class
 const FILLER_HARD = "FILLER ".repeat(1144); // 2002 tok, relevant — p ≈ 0.51 (hard tier)
@@ -97,9 +112,10 @@ async function seedHardTools(h: Map<string, Handler[]>, ctx: any) {
 	await runTools(h, ctx, [{ text: FILLER_HARD }, ...smalls(22), { text: A_TXT }]);
 }
 
-test("CTX-FIX: hard purity excess below token floor does NOT call ctx.compact", async () => {
+test("CTX-FIX: hard purity excess below token floor does NOT emit compact-request", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cm-floor-"));
-	const { pi, handlers } = mockPi();
+	cfgFile(dir, { compactRequest: { minReclaimableTokens: 1000 } });
+	const { pi, handlers, emissions } = mockPi();
 	createExtension(pi);
 	const { ctx, compactCalls } = mockCtx({ cwd: dir });
 	const { restore } = ingestAware();
@@ -108,22 +124,24 @@ test("CTX-FIX: hard purity excess below token floor does NOT call ctx.compact", 
 		await seedHardTools(handlers, ctx);
 		await assistantUsage(handlers, ctx, 1_000); // lastPromptTokens = 1000 < 24k floor
 		await drive(handlers, "turn_end", {}, ctx);
-		assert.equal(compactCalls.length, 0, "compact skipped: session below COMPACT_MIN_TOKENS");
+		assert.equal(requests(emissions).length, 0, "request skipped: session below COMPACT_MIN_TOKENS");
+		assert.equal(compactCalls.length, 0, "CM never calls ctx.compact");
 		// Skip must not start cooldown or mutate the ledger: the same excess
 		// re-evaluates cleanly once the session grows past the floor.
 		await assistantUsage(handlers, ctx, 30_000); // now above floor
 		await drive(handlers, "turn_end", {}, ctx);
-		assert.equal(compactCalls.length, 1, "floor is not a permanent block — compacts once above floor");
-		assert.equal(compactCalls[0]?.customInstructions, "drop unrelated/dup/stale content", "B4 locked instructions");
+		assert.equal(requests(emissions).length, 1, "floor is not a permanent block — requests once above floor");
+		assert.equal(requests(emissions)[0].suggestedInstructions, "drop unrelated/dup/stale content", "B4 instructions ride along");
 	} finally {
 		restore();
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
 });
 
-test("CTX-FIX: hard purity excess above token floor still compacts (fail-open when usage unknown)", async () => {
+test("CTX-FIX: hard purity excess above token floor still requests (fail-open when usage unknown)", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cm-floor-"));
-	const { pi, handlers } = mockPi();
+	cfgFile(dir, { compactRequest: { minReclaimableTokens: 1000 } });
+	const { pi, handlers, emissions } = mockPi();
 	createExtension(pi);
 	const { ctx, compactCalls } = mockCtx({ cwd: dir });
 	const { restore } = ingestAware();
@@ -131,9 +149,11 @@ test("CTX-FIX: hard purity excess above token floor still compacts (fail-open wh
 		await drive(handlers, "session_start", {}, ctx);
 		await seedHardTools(handlers, ctx);
 		// NO assistantUsage: st.lastPromptTokens stays null ⇒ guard fails open,
-		// preserving pre-CTX-FIX behavior (usage-less providers still compact).
+		// preserving AC-21 behavior (usage-less providers still request; the
+		// executor's own fail-safe usage guards arbitrate).
 		await drive(handlers, "turn_end", {}, ctx);
-		assert.equal(compactCalls.length, 1, "fail-open: unknown tokens never block the compact");
+		assert.equal(requests(emissions).length, 1, "fail-open: unknown tokens never block the request");
+		assert.equal(compactCalls.length, 0, "CM never calls ctx.compact");
 	} finally {
 		restore();
 		fs.rmSync(dir, { recursive: true, force: true });
