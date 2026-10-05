@@ -332,12 +332,20 @@ function sanitizePoison(p: CMConfig["poison"]): CMConfig["poison"] {
 	return out;
 }
 
+// 2026-10-04 live-E2E fix: pi's tool_execution_end result is an OBJECT
+// {content: string | Array<{type,"text">, details} (docs/json.md), not a bare
+// string/array — the old textOf returned "" for every built-in tool result and
+// the span ledger silently missed them all (live: 71k-token session, 3.4k-token
+// ledger). Unwrap .content like a first-class shape.
 function textOf(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (Array.isArray(content)) {
 		return (content as Array<{ type?: string; text?: string }>)
 			.map((c) => (c?.type === "text" && c.text ? c.text : ""))
 			.join("\n");
+	}
+	if (content && typeof content === "object" && "content" in content) {
+		return textOf((content as { content?: unknown }).content);
 	}
 	return "";
 }
@@ -1703,10 +1711,26 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
+	// tool_execution_end carries NO args (docs/json.md) — args arrive on
+	// tool_execution_start; correlate by toolCallId (bounded, live-E2E fix).
+	const argsByCallId = new Map<string, Record<string, unknown>>();
+	pi.on("tool_execution_start", async (event) => {
+		const e = event as { toolCallId?: string; args?: Record<string, unknown> };
+		if (!e.toolCallId || !e.args) return;
+		argsByCallId.set(e.toolCallId, e.args);
+		if (argsByCallId.size > 128) {
+			const oldest = argsByCallId.keys().next().value;
+			if (oldest !== undefined) argsByCallId.delete(oldest);
+		}
+	});
+
 	pi.on("tool_execution_end", async (event, ctx) => {
 		if (!st?.config.enabled) return;
 		try {
-		const args = (event as { args?: Record<string, unknown> }).args ?? {};
+		const e = event as { toolCallId?: string };
+		const correlated = e.toolCallId !== undefined ? argsByCallId.get(e.toolCallId) : undefined;
+		if (e.toolCallId !== undefined) argsByCallId.delete(e.toolCallId);
+		const args = correlated ?? (event as { args?: Record<string, unknown> }).args ?? {};
 		const p = typeof args.path === "string" ? args.path : undefined;
 		const text = textOf((event as { result?: unknown }).result);
 		if (!text) return; // all tool results fingerprinted (error loops/dumps from any tool are poison candidates); path captured when present (spec §2.1/§2.2)
