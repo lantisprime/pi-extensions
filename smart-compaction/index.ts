@@ -40,6 +40,14 @@ import { Telemetry } from "./lib/telemetry.ts";
 
 const STATUS_KEY = "smart-compact";
 const STATUS_CHANNEL = "pi-extensions:status-line";
+/**
+ * Compact-request contract (../shared/compact-request-protocol.md): the
+ * proposer (context-manager) emits compact-request; THIS extension is the
+ * sole executor — every fire passes the economy gate and is answered with a
+ * compact-decision. SC no longer self-triggers (2026-10-04, Option A): pi's
+ * overflow backstop and manual /compact:smart are the only other sources.
+ */
+const COMPACT_CHANNEL = "pi-extensions:compact-request";
 
 interface SessionRuntime {
 	config: SmartCompactionConfig;
@@ -60,6 +68,14 @@ interface SessionRuntime {
 	lastSystemPrompt?: string;
 	lastDecision?: { decision: Decision; at: number };
 	compacting: boolean;
+	/** Pending compact-request from the proposer (CM); consumed at agent_settled. */
+	pendingRequest: {
+		kind: "content" | "pressure";
+		reclaimableTokens: number;
+		suggestedInstructions?: string;
+		purity?: number;
+		receivedAt: number;
+	} | null;
 	/**
 	 * Reason from the most recent session_before_compact. Defaults to "overflow"
 	 * so an unrecognised origin never arms the post-compaction gap. pi uses
@@ -75,7 +91,42 @@ export default function (pi: ExtensionAPI) {
 	// renderer has announced itself on the bus; reset per session and
 	// re-established by the hello handshake.
 	let rendererSeen = false;
+	/** Executor-side reply on the compact-request bus (telemetry-grade). */
+	function reply(decision: "accepted" | "declined", why: string): void {
+		try {
+			// eslint-disable-next-line @typescript-eslint/no-unsafe-call -- bus is in-process
+			void (pi.events as { emit: (channel: string, data: unknown) => void }).emit(COMPACT_CHANNEL, {
+				type: "compact-decision",
+				decision,
+				why,
+			});
+		} catch {
+			/* feedback only — never break the turn */
+		}
+	}
+
 	let lastStatusCtx: ExtensionContext | undefined;
+
+	pi.events.on(COMPACT_CHANNEL, (data: unknown) => {
+		if (!rt) return;
+		const msg = data as
+			| {
+					type?: string;
+					kind?: "content" | "pressure";
+					reclaimableTokens?: number;
+					suggestedInstructions?: string;
+					purity?: number;
+				}
+			| undefined;
+		if (msg?.type !== "compact-request") return;
+		rt.pendingRequest = {
+				kind: msg.kind === "pressure" ? "pressure" : "content",
+				reclaimableTokens: typeof msg.reclaimableTokens === "number" && Number.isFinite(msg.reclaimableTokens) ? msg.reclaimableTokens : 0,
+				suggestedInstructions: typeof msg.suggestedInstructions === "string" ? msg.suggestedInstructions : undefined,
+				purity: typeof msg.purity === "number" ? msg.purity : undefined,
+				receivedAt: Date.now(),
+			};
+	});
 
 	pi.events.on(STATUS_CHANNEL, (data: unknown) => {
 		const msg = data as { type?: string } | undefined;
@@ -172,7 +223,7 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	function evalInput(ctx: ExtensionContext) {
+	function evalInput(ctx: ExtensionContext, request?: { kind: "content" | "pressure"; reclaimableTokens: number }) {
 		if (!rt?.profile || !rt.prices) return undefined;
 		return {
 			profile: rt.profile,
@@ -186,6 +237,7 @@ export default function (pi: ExtensionAPI) {
 			usage: ctx.getContextUsage(),
 			now: Date.now(),
 			pricingKnown: rt.pricingKnown,
+			...(request ? { request } : {}),
 		};
 	}
 
@@ -222,6 +274,7 @@ export default function (pi: ExtensionAPI) {
 			state: initState(),
 			telemetry: new Telemetry(ctx.sessionManager.getSessionId?.()),
 			compacting: false,
+			pendingRequest: null,
 			compactionReason: "overflow",
 		};
 		rendererSeen = false;
@@ -302,12 +355,33 @@ export default function (pi: ExtensionAPI) {
 		if (!rt || !rt.config.enabled || rt.compacting) return;
 		// AC-3: settled + idle + no pending messages.
 		if (!ctx.isIdle() || ctx.hasPendingMessages()) return;
-		const input = evalInput(ctx);
-		if (!input) return;
-		const d = evaluateEconomy(input);
-		record(ctx, "agent_settled", d);
-		if (d.kind !== "economy" && d.kind !== "quality") {
+		// 2026-10-04 Option A: SC is the sole EXECUTOR and no longer self-triggers.
+		// Every fire originates as a compact-request from the proposer
+		// (context-manager; ../shared/compact-request-protocol.md) and passes
+		// this economy gate. pi's overflow backstop and manual /compact:smart
+		// remain the other compaction sources.
+		const req = rt.pendingRequest;
+		if (!req) {
+			record(ctx, "agent_settled", { kind: "none", why: "no-request (proposer contract: execute, never self-trigger)" });
 			statusLine(ctx);
+			return;
+		}
+		rt.pendingRequest = null; // consumed exactly once
+		const input = evalInput(ctx, { kind: req.kind, reclaimableTokens: req.reclaimableTokens });
+		if (!input) {
+			reply("declined", "no-usage-or-profile");
+			record(ctx, "compact-request", { kind: "none", why: "no-usage-or-profile" });
+			return;
+		}
+		const d = evaluateEconomy(input);
+		record(ctx, "compact-request", d, undefined, {
+			"request.kind": req.kind,
+			"request.reclaimableTokens": req.reclaimableTokens,
+			...(req.purity != null ? { "request.purity": req.purity } : {}),
+		});
+		if (d.kind !== "economy" && d.kind !== "quality") {
+			reply("declined", d.kind === "none" ? d.why : d.kind);
+			statusLine(ctx, "req declined");
 			return;
 		}
 
@@ -317,11 +391,15 @@ export default function (pi: ExtensionAPI) {
 			record(ctx, "gate", d, gate);
 
 			if (gate.action === "defer") {
-				statusLine(ctx, "deferred (task-relevant)");
+				reply("declined", "deferred (task-relevant)");
+				statusLine(ctx, "req deferred (task-relevant)");
 				return;
 			}
-			const instructions = focusInstructions(gate.action === "aggressive" ? "aggressive" : "focused", board.activeSubjects);
-			statusLine(ctx, "compacting");
+			const instructions =
+				focusInstructions(gate.action === "aggressive" ? "aggressive" : "focused", board.activeSubjects) +
+				(req.suggestedInstructions ? `\nProposer guidance (context-manager span ledger): ${req.suggestedInstructions}` : "");
+			reply("accepted", `${d.kind}, gate=${gate.action}`);
+			statusLine(ctx, "compacting (request)");
 			// Guard flag set only at the point of no return: a defer or gate error
 			// above must leave the trigger live (review blocker fix).
 			rt.compacting = true;
@@ -385,6 +463,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		rt.compactionReason = "overflow"; // back to the safe default
 		rt.state.lastTurnTokens = null; // token basis changed
+		rt.pendingRequest = null; // the compacted context answered any pending request
 		rt.compacting = false;
 		record(ctx, "session_compact", { kind: "none", why: "compacted" });
 		statusLine(ctx);

@@ -140,6 +140,19 @@ export interface EvalInput {
 	 * explicit config defaultPrices / profile prices opt back in.
 	 */
 	pricingKnown?: boolean;
+	/**
+	 * Compact-request context (../shared/compact-request-protocol.md — the
+	 * proposer (context-manager) requests; this engine disposes). `kind:
+	 * "content"` carries the proposer's measured reclaimable mass: the fire/
+	 * quality line yields to the request (the content signal replaces the size
+	 * signal — the floor, gap, interval, pricing and margin guards stay), and
+	 * the savings shrink is bounded by the reclaimable tokens (a 0.25 purity
+	 * share over a small ledger is not a full-context shrink justification;
+	 * 2026-10-04 incident priced ~870 reclaimable tok at ~75k cost). `kind:
+	 * "pressure"` runs the standard size-driven path unchanged. Absent =
+	 * manual evaluation (/compact:smart) — behavior identical to before.
+	 */
+	request?: { kind: "content" | "pressure"; reclaimableTokens: number };
 }
 
 export type Decision =
@@ -254,9 +267,11 @@ export function evaluateEconomy(input: EvalInput): Decision {
 	}
 
 	// quality mode: fixed line at settled time, cache math skipped (AC-5 vacuous).
+	// A content compact-request replaces the size signal (proposer contract), so
+	// the line yields to it — the floor/gap/interval guards above still applied.
 	if (profile.mode === "quality") {
 		const ql = (profile.compaction.qualityLine ?? 0.5) * window;
-		if (tokens > ql) return { kind: "quality", tokens, line: ql };
+		if (tokens > ql || input.request?.kind === "content") return { kind: "quality", tokens, line: ql };
 		return { kind: "none", why: `below qualityLine (${tokens} <= ${ql})` };
 	}
 
@@ -279,7 +294,10 @@ export function evaluateEconomy(input: EvalInput): Decision {
 	const fireLine = (profile.compaction.qualityLine ?? 0.5) * window;
 	const regimeActive =
 		profile.tiers[0] !== undefined && Number.isFinite(profile.tiers[0].upTo) && tokens >= profile.tiers[0].upTo;
-	if (tokens < fireLine && !regimeActive) {
+	// A content compact-request IS the content-side trigger (proposer contract):
+	// the line yields. Everything economic above (floor, gap, interval, pricing)
+	// and the margin test below still gate the fire.
+	if (tokens < fireLine && !regimeActive && input.request?.kind !== "content") {
 		return {
 			kind: "none",
 			why: `below fire-line (${tokens} < ${Math.round(fireLine)} = (qualityLine ?? 0.5)×${window}; compaction waits for the context-quality line)`,
@@ -359,7 +377,11 @@ export function savingsEstimate(
 	//   cold: the NEXT call pays full price on the shrink once, then it caches.
 	// Tier effects apply only through full-price calls — covered by the tier
 	// term below, not by multiplying the whole shrink at tier-2 rates.
-	const shrink = tokens - afterTokens;
+	// Content compact-requests bound the shrink by the proposer's measured
+	// reclaimable mass (see EvalInput.request): savings are claimed only for
+	// tokens the span ledger actually marks unrelated/dup/stale.
+	const reclaimable = input.request?.kind === "content" ? Math.max(input.request.reclaimableTokens, 0) : Number.POSITIVE_INFINITY;
+	const shrink = Math.min(tokens - afterTokens, reclaimable);
 	let marginalSavings: number;
 	if (hot) {
 		marginalSavings = horizonTurns * (shrink / 1_000_000) * prices.cacheRead;
@@ -374,7 +396,7 @@ export function savingsEstimate(
 	if (boundary !== undefined && tokens > boundary && afterTokens < boundary) {
 		const aboveTier = tierFor(tiers, boundary + 1);
 		const delta = prices.input * ((aboveTier?.inputMult ?? tiers[0].inputMult) - tiers[0].inputMult);
-		const aboveShrink = tokens - boundary; // shrink ∩ above-boundary span
+		const aboveShrink = Math.min(tokens - boundary, reclaimable); // shrink ∩ above-boundary span
 		savings += continuation * horizonTurns * (aboveShrink / 1_000_000) * delta;
 	}
 
