@@ -255,15 +255,23 @@ export default function (pi: ExtensionAPI) {
 			why: decision.kind === "none" ? decision.why : undefined,
 			...(decision.kind === "economy"
 				? {
-						estimates: estimates ?? {
+						estimates: {
 							savings: decision.savings,
 							cost: decision.cost,
 							cacheHot: decision.cacheHot,
 							continuationProbability: decision.continuationProbability,
 							horizonTurns: decision.horizonTurns,
+							// caller-supplied fields (compact-request provenance) must MERGE,
+							// not replace — replacing dropped savings/cost from fired-request
+							// rows (live E2E 2026-10-05)
+							...(estimates ?? {}),
 						},
 					}
-				: {}),
+				: // declines carry caller-supplied fields too — compact-request rows
+					// persist request.kind/reclaimableTokens even when declined
+					estimates != null
+					? { estimates }
+					: {}),
 			...(gate ? { gate: { ...gate, probability: gate.probability } } : {}),
 		});
 	}

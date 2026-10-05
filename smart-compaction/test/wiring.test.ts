@@ -476,6 +476,14 @@ test("Option A: settle without a request never compacts; a request fires with gu
 	const acks = decisionAcks(busEmissions);
 	assert.equal(acks.length, 1);
 	assert.equal(acks[0].decision, "accepted");
+	// fired-request rows keep BOTH the economics and the request provenance (merge, not replace)
+	const firedRow = telemetryLines(sessionId)
+		.filter((l) => l.event === "compact-request")
+		.find((l) => l.decision === "economy");
+	assert.ok(firedRow, "fired request recorded under compact-request");
+	assert.ok(firedRow.estimates?.savings > 0, "savings/cost survive the provenance merge");
+	assert.equal(firedRow.estimates?.["request.kind"], "content");
+	assert.equal(firedRow.estimates?.["request.reclaimableTokens"], 35_000);
 	// consumed exactly once — a second settle without a new request idles
 	await drive(handlers, "agent_settled", {}, ctx);
 	assert.equal(compactCalls.length, 1, "request consumed exactly once");
@@ -504,6 +512,13 @@ test("Option A incident 2026-10-04 (executor side): ~870-token reclaimable at 16
 		telemetryLines(sessionId).some((l) => String(l.why ?? "").includes("savings $0.")),
 		"the savings bound is the recorded refusal reason",
 	);
+	// declines persist the request provenance too (estimates on none-kind rows)
+	const declinedRow = telemetryLines(sessionId)
+		.filter((l) => l.event === "compact-request")
+		.find((l) => l.decision === "none");
+	assert.ok(declinedRow, "declined request recorded under compact-request");
+	assert.equal(declinedRow.estimates?.["request.kind"], "content");
+	assert.equal(declinedRow.estimates?.["request.reclaimableTokens"], 870);
 	const acks = decisionAcks(busEmissions);
 	assert.equal(acks.length, 1);
 	assert.equal(acks[0].decision, "declined");
