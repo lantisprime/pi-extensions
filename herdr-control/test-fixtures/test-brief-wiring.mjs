@@ -4,6 +4,16 @@ import { createFakeHerdr, okResult, errResult, okEnvelope } from "./fake-herdr.t
 import { withCleanupGuidance, shouldDisposeOnSettle, CLEANUP_GUIDANCE_HEADER, CLEANUP_GUIDANCE } from "../lib/brief.ts";
 import { AGENT_LIST_JSON, AGENT_START_JSON, PANE_SPLIT_JSON, PANE_LAYOUT_JSON, AGENT_PROMPT_OK_JSON } from "./fixtures.ts";
 
+// runSpawn goes through the entry gate, which requires HERDR_ENV=1 — CI
+// runners have no herdr pane, so the test sets it explicitly (and restores
+// the original value at the end, mirroring test-gate.mjs).
+const HERDR_ENV_ORIGINAL = process.env.HERDR_ENV;
+process.env.HERDR_ENV = "1";
+process.on("exit", () => {
+	if (HERDR_ENV_ORIGINAL === undefined) delete process.env.HERDR_ENV;
+	else process.env.HERDR_ENV = HERDR_ENV_ORIGINAL;
+});
+
 // brief: footer appended, idempotent, opt-out respected
 {
 	const briefed = withCleanupGuidance("Review the diff.");
