@@ -1,5 +1,5 @@
 import { complete, type UserMessage } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { EventBus, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -41,6 +41,12 @@ const WEB_TOOL_NAMES = new Set(["web_search", "search_web", "web", "browser", "f
 // access just because the underlying tool name ends in _search).
 const MCP_TOOL_PREFIX = "mcp_";
 const SESSION_PERMISSIONS = new Map<string, Partial<Record<PermissionKey, Decision>>>();
+// Set once inside the default export. ensurePermission/confirmYoloMode are
+// top-level functions with several call sites, so threading pi (or a callback)
+// through every handler would touch five call sites; a module-level bus set at
+// registration time reaches both dialogs without changing their signatures.
+// Undefined outside an extension load, and emitDialogBlocked no-ops then.
+let extensionEvents: EventBus | undefined;
 const YOLO_WARNING = [
 	"YOLO permission mode is dangerous.",
 	"It auto-allows permission requests without prompting and should only be used in disposable/trusted workspaces.",
@@ -65,6 +71,8 @@ const PERMISSION_LABELS: Record<PermissionKey, string> = {
 };
 
 export default function (pi: ExtensionAPI) {
+	extensionEvents = pi.events;
+
 	pi.registerFlag("permission-mode", {
 		description: "Set permission mode: ask, read-only, auto, or yolo",
 		type: "string",
@@ -455,6 +463,20 @@ async function evaluateCommandWithLlm(
 	return undefined;
 }
 
+// herdr's pi integration (herdr-agent-state.ts) listens on "herdr:blocked" and
+// marks the pane "blocked" while active, so supervisors waiting on
+// `herdr agent wait` / `prompt --wait` can see the agent is stuck on a modal
+// dialog instead of appearing to work. Emitting to a bus with no listener (plain
+// pi, herdr integration absent) is a no-op that cannot throw.
+function emitPermissionDialogBlocked(active: boolean, label?: string) {
+	if (!extensionEvents) return;
+	try {
+		extensionEvents.emit("herdr:blocked", active ? { active: true, label } : { active: false });
+	} catch {
+		// Never let blocked-state reporting break the permission flow.
+	}
+}
+
 async function ensurePermission(ctx: ExtensionContext, projectPath: string, request: PermissionRequest): Promise<boolean> {
 	const policy = await loadPolicy(projectPath);
 	if (policy.mode === "yolo") {
@@ -494,25 +516,33 @@ async function ensurePermission(ctx: ExtensionContext, projectPath: string, requ
 		return false;
 	}
 
-	const choice = await ctx.ui.select(
-		[
-			`Permission required: ${request.title}`,
-			"",
-			`Project: ${projectPath}`,
-			request.detail,
-			...(sensitiveUnderShield ? ["", "Prompt Shield has active unapproved risk, so automatic/project grants are bypassed for this sensitive action."] : []),
-			"",
-			"How should Pi handle this permission?",
-		].join("\n"),
-		[
-			"Allow once",
-			"Allow for current session",
-			"Allow permanently for this project",
-			"Deny once",
-			"Deny for current session",
-			"Deny permanently for this project",
-		],
-	);
+	// Report the open modal to herdr and ALWAYS clear it, even if the dialog
+	// throws or is cancelled.
+	emitPermissionDialogBlocked(true, `Permission required: ${request.title}`);
+	let choice: string | undefined;
+	try {
+		choice = await ctx.ui.select(
+			[
+				`Permission required: ${request.title}`,
+				"",
+				`Project: ${projectPath}`,
+				request.detail,
+				...(sensitiveUnderShield ? ["", "Prompt Shield has active unapproved risk, so automatic/project grants are bypassed for this sensitive action."] : []),
+				"",
+				"How should Pi handle this permission?",
+			].join("\n"),
+			[
+				"Allow once",
+				"Allow for current session",
+				"Allow permanently for this project",
+				"Deny once",
+				"Deny for current session",
+				"Deny permanently for this project",
+			],
+		);
+	} finally {
+		emitPermissionDialogBlocked(false);
+	}
 
 	if (choice === "Allow once") return true;
 	if (choice === "Deny once" || !choice) return false;
@@ -561,7 +591,12 @@ async function updatePermissionStatus(ctx: ExtensionContext) {
 
 async function confirmYoloMode(ctx: ExtensionContext): Promise<boolean> {
 	if (!ctx.hasUI) return false;
-	return ctx.ui.confirm("Enable YOLO permission mode?", `${YOLO_WARNING}\n\nContinue?`);
+	emitPermissionDialogBlocked(true, "Permission required: Enable YOLO permission mode?");
+	try {
+		return await ctx.ui.confirm("Enable YOLO permission mode?", `${YOLO_WARNING}\n\nContinue?`);
+	} finally {
+		emitPermissionDialogBlocked(false);
+	}
 }
 
 function modeShortLabel(mode: PermissionMode): string {
