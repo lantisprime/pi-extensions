@@ -12,6 +12,7 @@ type TypeBoxType = {
 	String(options?: Record<string, unknown>): unknown;
 	Integer(options?: Record<string, unknown>): unknown;
 	Boolean(options?: Record<string, unknown>): unknown;
+	Array(items: unknown, options?: Record<string, unknown>): unknown;
 	Optional(schema: unknown): unknown;
 	Unsafe<T>(options: Record<string, unknown>): T;
 };
@@ -22,6 +23,7 @@ const { Type } = await import("typebox").catch(() => ({
 		String: (options: Record<string, unknown> = {}) => ({ type: "string", ...options }),
 		Integer: (options: Record<string, unknown> = {}) => ({ type: "integer", ...options }),
 		Boolean: (options: Record<string, unknown> = {}) => ({ type: "boolean", ...options }),
+		Array: (items: unknown, options: Record<string, unknown> = {}) => ({ type: "array", items, ...options }),
 		Optional: (schema: unknown) => schema,
 		Unsafe: <T,>(options: Record<string, unknown>) => options as T,
 	} satisfies TypeBoxType,

@@ -42,14 +42,22 @@ export const SERVER_STATUS_CACHE_MS = 30_000;
 // Failed checks are retried sooner (avoid hammering a dead socket).
 export const SERVER_STATUS_FAIL_CACHE_MS = 5_000;
 
+// Mechanical session-start GC: registry panes from crashed prior sessions
+// whose agent settled (idle/done) and that are older than this get closed.
+export const SESSION_GC_MIN_AGE_MS = 600_000;
+
 // Session-entry custom type for spawn-registry event sourcing.
 export const SPAWN_REGISTRY_ENTRY_TYPE = "herdr-control/spawn-registry";
 
-// Supported agent kinds (herdr 0.8.0 `herdr agent start --kind`).
+// Supported agent kinds (`herdr agent start --kind`), refreshed against the
+// live herdr 0.9.3 CLI (0.9.x added qwen, letta, muse over the 0.8.0 list).
+// The live binary remains the authority — `herdr agent start --help` prints
+// the installed kind list; lib/version.ts gates older servers.
 export const HERDR_KINDS = [
 	"pi", "claude", "codex", "gemini", "cursor", "devin", "agy", "cline",
 	"omp", "mastracode", "opencode", "copilot", "kimi", "kiro", "droid",
-	"amp", "grok", "hermes", "kilo", "qodercli", "maki",
+	"amp", "grok", "hermes", "kilo", "qodercli", "qwen", "letta", "muse",
+	"maki",
 ] as const;
 
 export type HerdrKind = (typeof HERDR_KINDS)[number];

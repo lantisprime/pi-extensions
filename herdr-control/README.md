@@ -8,19 +8,22 @@ into a pi-native delegation primitive: the LLM (or you) spawns a subagent in a
 sibling pane, submits a task, waits for the agent to *actually settle* (not
 "fires keystrokes and hopes"), and reads the transcript back.
 
-Requires pi to run **inside a herdr pane** (`HERDR_ENV=1`) and herdr ≥ 0.8.
+Requires pi to run **inside a herdr pane** (`HERDR_ENV=1`) and herdr ≥ 0.9
+(the live binary is version-probed via `herdr status --json`; older servers
+fail the entry gate with an update hint).
 
 ## Tools (LLM-callable)
 
 | Tool | Purpose |
 |------|---------|
 | `herdr_agents` | List live agents, or get one agent's detail (name, status, pane, cwd). |
-| `herdr_spawn` | Full pipeline: sibling pane split → `agent start` → `agent prompt --wait` → read transcript. |
-| `herdr_prompt` | Submit a follow-up prompt to a live agent (wait or fire-and-forget). |
+| `herdr_spawn` | Full pipeline: sibling pane split → `agent start` → `agent prompt --wait` → read transcript. Optional `agent_args` passthrough (0.9 `--`), `close_when_done` disposal. |
+| `herdr_prompt` | Submit a follow-up prompt to a live agent (wait or fire-and-forget). Optional `close_when_done` disposal (registry-recorded agents only). |
 | `herdr_read` | Read an agent's terminal output (`visible`, `recent`, `recent-unwrapped`). Pane ids and `herdr_terminal` panes route through `pane read`. |
 | `herdr_send_keys` | Send logical keys (`esc`, `enter`, `ctrl+c`) to rescue a **blocked** agent. Always user-confirmed. |
 | `herdr_close` | Close a pane **this session spawned** (registry-gated). |
 | `herdr_terminal` | Open a separate plain terminal (shell pane — no agent): sibling split by default, tab/workspace on request, optional command + sidebar label. Registry-tracked → closeable via `herdr_close`, readable via `herdr_read`. |
+| `herdr_watch` | Manage the proactive pane watchdog: polls pane states through the classifier and surfaces transitions — blocked dialogs (wake the session), finished tasks (close candidates), unknown/gone agents. Auto-arms on first `herdr_spawn`. |
 
 ## Commands
 
@@ -35,16 +38,34 @@ handled by a conservative input hook; everything else passes through.
 ## Safety model
 
 - **Entry gate** — refuses to act when pi isn't inside a herdr pane or the
-  herdr server is unreachable (cached probe, 30s).
+  herdr server is unreachable; version-probed (`herdr status --json`),
+  servers older than 0.9.0 fail closed with an update hint.
 - **Sibling-pane default** — `pane split --current --no-focus` with the
   caller's cwd; direction auto (wide pane → right, tall → down). New
   workspaces only on explicit request.
 - **Lifecycle over keystrokes** — `agent prompt --wait --timeout` waits for
   settled `idle|done|blocked`; `agent_prompt_stalled` and timeouts are
   surfaced with state + transcript, never blind-retried.
+- **Own pane classifier** — herdr cannot reliably classify pi panes
+  (`screen_detection_skipped: true`, reports `working` even at dialogs —
+  live-verified). The classifier fuses herdr's integration lifecycle with
+  pattern analysis of the 0.9 `detection` buffer, grounded in pi's real UI
+  strings; dialog evidence outranks herdr in both directions, and for
+  dialog-blind pi rows herdr's lifecycle status stays trusted.
+- **Event-based watchdog** — `herdr_watch` subscribes to herdr's socket
+  events (`pane.agent_status_changed` / `pane.exited` / `pane.closed`) and
+  re-classifies immediately on transitions; a slow reconcile tick is the
+  safety net. Blocked dialogs wake the session (steer); finished tasks
+  surface as close candidates. Auto-arms on the first `herdr_spawn`.
+- **Mechanical pane lifecycle** — code, not instructions:
+  `session_shutdown` closes every pane this session spawned;
+  `session_start` reaps stale settled panes from crashed sessions; the
+  watchdog reaps panes settled beyond their 10-minute lease. Working and
+  blocked panes are never reaped. `keep_on_exit` opts out per spawn.
 - **Blocked dialogs** — herdr refuses to deliver prompts to blocked agents;
   the extension surfaces the dialog and requires deliberate, user-confirmed
   `herdr_send_keys`.
+- **Cleanup discipline** — every submitted brief carries a mandatory footer: dispose git worktrees (`git worktree remove`), delete temp files, stop started processes, report what was cleaned. Opt out per-call with `cleanup_guidance: false`. With `close_when_done: true`, herdr_spawn/herdr_prompt close the pane once the task settles (blocked/timeout/stalled keep it open for inspection).
 - **Registry-gated cleanup** — `herdr_close` only closes panes recorded by
   `herdr_spawn`. The registry is event-sourced into the session
   (`pi.appendEntry`) so it survives `/new`, `/resume`, `/fork`, `/reload`;

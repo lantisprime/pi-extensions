@@ -2,9 +2,11 @@
 //
 // NOTE: unlike control commands, `agent read` prints PLAIN TEXT on stdout
 // (ANSI stripped by default) — not a JSON envelope. `recent-unwrapped` joins
-// soft wraps and is the preferred source for transcripts. Alternate-screen
-// agents only expose history reads while idle; herdr returns agent_not_idle
-// otherwise, which we classify so callers can wait and retry.
+// soft wraps and is the preferred source for transcripts. herdr 0.9.x adds
+// the `detection` source (the plain-text bottom-buffer snapshot used for
+// agent detection). Alternate-screen agents only expose history reads while
+// idle; herdr returns agent_not_idle otherwise, which we classify so callers
+// can wait and retry.
 import type { HerdrExecutor } from "./exec.ts";
 import {
 	DEFAULT_READ_LINES,
@@ -15,7 +17,7 @@ import {
 } from "./constants.ts";
 import { errorCodeIs, extractError } from "./json.ts";
 
-export const READ_SOURCES = ["visible", "recent", "recent-unwrapped"] as const;
+export const READ_SOURCES = ["visible", "recent", "recent-unwrapped", "detection"] as const;
 export type ReadSource = (typeof READ_SOURCES)[number];
 
 export interface ReadOptions {

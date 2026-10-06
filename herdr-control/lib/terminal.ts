@@ -16,6 +16,12 @@ import { HERDR_SHORT_TIMEOUT_MS } from "./constants.ts";
 import type { Direction } from "./launch.ts";
 import { resolveDirection } from "./launch.ts";
 import { extractError, parseEnvelope } from "./json.ts";
+import {
+	schemaParse,
+	PaneSplitResultSchema,
+	WorkspaceCreateResultSchema,
+	TabCreateResultSchema,
+} from "./schema.ts";
 import { requirePaneRef } from "./safety.ts";
 import { keepTail } from "./read.ts";
 
@@ -36,24 +42,8 @@ export type TerminalOutcome =
 	| { ok: true; paneId: string; workspaceId?: string; tabId?: string }
 	| { ok: false; stage: "layout" | "rename" | "run"; error: string; paneId?: string };
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-	return typeof value === "object" && value !== null && !Array.isArray(value)
-		? (value as Record<string, unknown>)
-		: null;
-}
-
-function pickString(record: unknown, path: string[]): string | undefined {
-	let current: unknown = record;
-	for (const key of path) {
-		const rec = asRecord(current);
-		if (!rec) return undefined;
-		current = rec[key];
-	}
-	return typeof current === "string" ? current : undefined;
-}
-
 // Layout: sibling split (default), tab create, or workspace create. IDs are
-// parsed from the JSON responses, never predicted.
+// schema-validated from the JSON responses (lib/schema.ts), never predicted.
 export async function createTerminal(executor: HerdrExecutor, req: TerminalRequest): Promise<TerminalOutcome> {
 	const direction = req.direction === "auto" ? await resolveDirection(executor) : req.direction;
 
@@ -77,19 +67,37 @@ export async function createTerminal(executor: HerdrExecutor, req: TerminalReque
 	const parsed = parseEnvelope(result.stdout);
 	if (!parsed.ok) return { ok: false, stage: "layout", error: parsed.error };
 
-	const paneId = req.newWorkspace || req.newTab
-		? pickString(parsed.envelope.result, ["root_pane", "pane_id"])
-		: pickString(parsed.envelope.result, ["pane", "pane_id"]);
-	if (!paneId) return { ok: false, stage: "layout", error: "herdr layout response did not include a pane_id" };
+	if (req.newWorkspace || req.newTab) {
+		const created = schemaParse<{
+			root_pane?: { pane_id?: string; workspace_id?: string; tab_id?: string };
+			workspace?: { id?: string };
+			tab?: { id?: string };
+		}>(req.newWorkspace ? WorkspaceCreateResultSchema : TabCreateResultSchema, parsed.envelope.result);
+		if (!created.ok) return { ok: false, stage: "layout", error: created.error };
+		const paneId = created.value.root_pane?.pane_id;
+		if (!paneId) return { ok: false, stage: "layout", error: "herdr layout response did not include a pane_id" };
+		return {
+			ok: true,
+			paneId,
+			workspaceId: req.newWorkspace
+				? created.value.workspace?.id
+				: created.value.root_pane?.workspace_id ?? process.env.HERDR_WORKSPACE_ID,
+			tabId: created.value.tab?.id ?? created.value.root_pane?.tab_id,
+		};
+	}
 
-	const workspaceId = req.newWorkspace
-		? pickString(parsed.envelope.result, ["workspace", "id"])
-		: pickString(parsed.envelope.result, ["pane", "workspace_id"]) ?? process.env.HERDR_WORKSPACE_ID;
-	const tabId = req.newWorkspace || req.newTab
-		? pickString(parsed.envelope.result, ["tab", "id"])
-		: pickString(parsed.envelope.result, ["pane", "tab_id"]) ?? process.env.HERDR_TAB_ID;
-
-	return { ok: true, paneId, workspaceId, tabId };
+	const created = schemaParse<{
+		pane?: { pane_id?: string; workspace_id?: string; tab_id?: string };
+	}>(PaneSplitResultSchema, parsed.envelope.result);
+	if (!created.ok) return { ok: false, stage: "layout", error: created.error };
+	const paneId = created.value.pane?.pane_id;
+	if (!paneId) return { ok: false, stage: "layout", error: "herdr pane split response did not include a pane_id" };
+	return {
+		ok: true,
+		paneId,
+		workspaceId: created.value.pane?.workspace_id ?? process.env.HERDR_WORKSPACE_ID,
+		tabId: created.value.pane?.tab_id ?? process.env.HERDR_TAB_ID,
+	};
 }
 
 // Rename the pane so the herdr sidebar shows a meaningful title.

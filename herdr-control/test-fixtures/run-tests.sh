@@ -10,6 +10,8 @@ echo "Running herdr-control safety tests..."
 node --experimental-strip-types test-fixtures/test-safety.mjs
 echo "Running herdr-control json tests..."
 node --experimental-strip-types test-fixtures/test-json.mjs
+echo "Running herdr-control schema/version tests..."
+node --experimental-strip-types test-fixtures/test-schema-version.mjs
 echo "Running herdr-control gate tests..."
 node --experimental-strip-types test-fixtures/test-gate.mjs
 echo "Running herdr-control registry tests..."
@@ -26,4 +28,10 @@ echo "Running herdr-control terminal tests..."
 node --experimental-strip-types test-fixtures/test-terminal.mjs
 echo "Running herdr-control extension entry tests..."
 node --experimental-strip-types test-fixtures/test-extension.mjs
+echo "Running herdr-control brief/dispose wiring tests..."
+node --experimental-strip-types test-fixtures/test-brief-wiring.mjs
+echo "Running herdr-control classifier/watchdog tests..."
+node --experimental-strip-types test-fixtures/test-watch-classify.mjs
+echo "Running herdr-control socket event tests..."
+node --experimental-strip-types test-fixtures/test-events.mjs
 echo "herdr-control tests passed"

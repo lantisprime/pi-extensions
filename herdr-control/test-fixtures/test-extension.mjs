@@ -29,10 +29,29 @@ const fakePi = {
 
 extension(fakePi);
 
+// parseSpawnArgs: --agent-arg flag wiring (repeatable, dropped when empty).
+// parseSpawnArgs is exported purely for this test; tool-level execute() closes
+// over the real executor, so the tool-param layer is covered by the
+// schema/shape assertions on parameters plus the lib-level agentArgs test in
+// test-launch.mjs.
+{
+	const { parseSpawnArgs } = await import("../index.ts");
+	const parsed = parseSpawnArgs("pi-herdr-x --kind claude --agent-arg --model --agent-arg gpt5 fix the bug");
+	assert.equal("error" in parsed, false);
+	if (!("error" in parsed)) {
+		assert.equal(parsed.kind, "claude");
+		assert.equal(parsed.task, "fix the bug");
+		assert.deepEqual(parsed.agentArgs, ["--model", "gpt5"]);
+	}
+	const noArgs = parseSpawnArgs("pi-herdr-x say hi");
+	assert.equal("error" in noArgs, false);
+	if (!("error" in noArgs)) assert.equal(noArgs.agentArgs, undefined, "empty agentArgs dropped");
+}
+
 // tool surface
 assert.deepEqual(
 	[...tools.keys()].sort(),
-	["herdr_agents", "herdr_close", "herdr_prompt", "herdr_read", "herdr_send_keys", "herdr_spawn", "herdr_terminal"].sort(),
+	["herdr_agents", "herdr_close", "herdr_prompt", "herdr_read", "herdr_send_keys", "herdr_spawn", "herdr_terminal", "herdr_watch"].sort(),
 );
 for (const def of tools.values()) {
 	assert.equal(typeof def.execute, "function", `${def.name} has execute`);

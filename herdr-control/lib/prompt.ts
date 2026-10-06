@@ -13,6 +13,7 @@
 import type { HerdrExecutor } from "./exec.ts";
 import { PROMPT_MAX_TIMEOUT_MS, PROMPT_MIN_TIMEOUT_MS } from "./constants.ts";
 import { errorCodeIs, extractError, parseEnvelope } from "./json.ts";
+import { schemaParse, AgentLifecycleResultSchema } from "./schema.ts";
 
 export type PromptOutcome =
 	| { ok: true; status: string }
@@ -40,8 +41,8 @@ export async function promptAgent(
 		try {
 			const parsed = parseEnvelope(result.stdout);
 			if (parsed.ok) {
-				const record = parsed.envelope.result as { agent?: { agent_status?: string } } | null;
-				if (record?.agent?.agent_status) status = record.agent.agent_status;
+				const lifecycle = schemaParse<{ agent?: { agent_status?: string } }>(AgentLifecycleResultSchema, parsed.envelope.result);
+				if (lifecycle.ok && lifecycle.value.agent?.agent_status) status = lifecycle.value.agent.agent_status;
 			}
 		} catch {
 			// envelope parse failure on success is non-fatal

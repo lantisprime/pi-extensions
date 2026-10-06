@@ -17,6 +17,10 @@ export interface SpawnRecord {
 	cwd: string;
 	/** true when the agent failed to start but the shell pane was left behind */
 	orphan?: boolean;
+	/** opt-out of mechanical lifecycle (shutdown close + idle reaper) */
+	keep?: boolean;
+	/** lease for the idle reaper — bumped on every prompt/submission */
+	lastActivityAt?: number;
 	createdAt: number;
 }
 
@@ -122,5 +126,22 @@ export class SpawnRegistry {
 		}
 		for (const record of pruned) this.records.delete(record.name);
 		return pruned;
+	}
+
+	// Mechanical lifecycle: bump the idle-reaper lease.
+	touch(name: string, at = Date.now()): void {
+		const record = this.records.get(name);
+		if (record) record.lastActivityAt = at;
+	}
+
+	// Records eligible for mechanical disposal: not kept, not orphans, not
+	// terminals (terminals close via the same path — orphan shell panes are
+	// included so nothing this extension created leaks).
+	reapable(now = Date.now(), idleMs: number): SpawnRecord[] {
+		return this.list().filter((r) => {
+			if (r.keep) return false;
+			const lease = r.lastActivityAt ?? r.createdAt;
+			return now - lease >= idleMs;
+		});
 	}
 }

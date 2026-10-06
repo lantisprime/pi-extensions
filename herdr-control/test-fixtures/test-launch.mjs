@@ -1,6 +1,6 @@
 // herdr-control: spawn pipeline tests (collision, layout, start, orphans).
 import assert from "node:assert/strict";
-import { createFakeHerdr, okResult, errResult } from "./fake-herdr.ts";
+import { createFakeHerdr, okResult, errResult, okEnvelope } from "./fake-herdr.ts";
 import {
 	AGENT_LIST_JSON,
 	AGENT_START_JSON,
@@ -80,6 +80,21 @@ const REQ = { name: "pi-herdr-reviewer", kind: "pi", cwd: "/tmp/x", direction: "
 		assert.match(out.error, /already live/);
 	}
 	assert.equal(fake.callsTo("pane").length, 0, "no pane created on collision");
+}
+
+// spawn: agentArgs (herdr 0.9+) are passed after `--`, verbatim
+{
+	const fake = createFakeHerdr();
+	fake.onSubcommand("agent", (args) => {
+		if (args[1] === "list") return okResult(okEnvelope({ agents: [] }));
+		if (args[1] === "start") return okResult(AGENT_START_JSON);
+		return errResult("unexpected", 1);
+	});
+	fake.onSubcommand("pane", (args) => args[1] === "split" ? okResult(PANE_SPLIT_JSON) : okResult(PANE_LAYOUT_JSON));
+	const out = await spawnAgent(fake.executor, { ...REQ, agentArgs: ["--model", "gpt5", "--yolo"] });
+	assert.equal(out.ok, true);
+	const start = fake.callsTo("agent").find((a) => a[1] === "start");
+	assert.deepEqual(start.slice(start.indexOf("--")), ["--", "--model", "gpt5", "--yolo"]);
 }
 
 // spawn: agent_not_ready -> single wait --until idle recovery

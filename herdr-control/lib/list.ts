@@ -1,10 +1,15 @@
-// herdr-control: agent list/get over the herdr CLI.
+// herdr-control: agent list/get over the herdr CLI. Rows are validated
+// against HerdrAgentSchema (lib/schema.ts) — the single source of truth for
+// herdr's agent data structure.
 import type { HerdrExecutor } from "./exec.ts";
 import { HERDR_SHORT_TIMEOUT_MS } from "./constants.ts";
 import { extractError, parseEnvelope } from "./json.ts";
+import { schemaParse, AgentListResultSchema, AgentGetResultSchema, HerdrAgentSchema } from "./schema.ts";
 
 export interface HerdrAgentInfo {
 	agent?: string;
+	/** Pane-assigned name (pi rows carry `name` instead of `agent`). */
+	name?: string;
 	agent_status?: string;
 	pane_id?: string;
 	tab_id?: string;
@@ -13,35 +18,29 @@ export interface HerdrAgentInfo {
 	foreground_cwd?: string;
 	terminal_title_stripped?: string;
 	focused?: boolean;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-	return typeof value === "object" && value !== null && !Array.isArray(value)
-		? (value as Record<string, unknown>)
-		: null;
+	/** herdr is not reading this pane's screen — its status is unreliable. */
+	screen_detection_skipped?: boolean;
 }
 
 function agentFromUnknown(value: unknown): HerdrAgentInfo | null {
-	const record = asRecord(value);
-	if (!record) return null;
-	const info: HerdrAgentInfo = {};
-	if (typeof record.agent === "string") info.agent = record.agent;
-	if (typeof record.agent_status === "string") info.agent_status = record.agent_status;
-	if (typeof record.pane_id === "string") info.pane_id = record.pane_id;
-	if (typeof record.tab_id === "string") info.tab_id = record.tab_id;
-	if (typeof record.workspace_id === "string") info.workspace_id = record.workspace_id;
-	if (typeof record.cwd === "string") info.cwd = record.cwd;
-	if (typeof record.foreground_cwd === "string") info.foreground_cwd = record.foreground_cwd;
-	if (typeof record.terminal_title_stripped === "string") info.terminal_title_stripped = record.terminal_title_stripped;
-	if (typeof record.focused === "boolean") info.focused = record.focused;
-	return info;
+	const parsed = schemaParse<HerdrAgentInfo>(HerdrAgentSchema, value);
+	return parsed.ok ? parsed.value : null;
+}
+
+/** Resolve an agent's lookup/display name from either row shape.
+ * LIVE FINDING (herdr 0.9.3, path-sourced pi rows): `agent` holds the
+ * detection KIND label ("pi"), `name` holds the pane-assigned label, and
+ * NEITHER is necessarily a command-accepted target — target pane ids for
+ * commands; use this only for matching against the name we spawned. */
+export function agentRowName(agent: HerdrAgentInfo): string | undefined {
+	return agent.name ?? agent.agent;
 }
 
 export function agentsFromResult(result: unknown): HerdrAgentInfo[] {
-	const record = asRecord(result);
-	const list = record && Array.isArray(record.agents) ? record.agents : [];
+	const parsed = schemaParse<{ agents: unknown[] }>(AgentListResultSchema, result);
+	if (!parsed.ok) return [];
 	const agents: HerdrAgentInfo[] = [];
-	for (const item of list) {
+	for (const item of parsed.value.agents) {
 		const agent = agentFromUnknown(item);
 		if (agent) agents.push(agent);
 	}
@@ -49,12 +48,12 @@ export function agentsFromResult(result: unknown): HerdrAgentInfo[] {
 }
 
 export function agentFromGetResult(result: unknown): HerdrAgentInfo | null {
-	const record = asRecord(result);
-	return record ? agentFromUnknown(record.agent) : null;
+	const parsed = schemaParse<{ agent: unknown }>(AgentGetResultSchema, result);
+	return parsed.ok ? agentFromUnknown(parsed.value.agent) : null;
 }
 
 export function formatAgent(agent: HerdrAgentInfo): string {
-	const name = agent.agent ?? "(unnamed)";
+	const name = agentRowName(agent) ?? "(unnamed)";
 	const status = agent.agent_status ?? "?";
 	const pane = agent.pane_id ?? "?";
 	const cwd = agent.cwd ?? "";
@@ -95,5 +94,5 @@ export async function getAgent(executor: HerdrExecutor, target: string): Promise
 }
 
 export function findByName(agents: HerdrAgentInfo[], name: string): HerdrAgentInfo | undefined {
-	return agents.find((a) => a.agent === name);
+	return agents.find((a) => agentRowName(a) === name);
 }

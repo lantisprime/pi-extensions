@@ -11,7 +11,7 @@
 //
 // herdr never reuses closed pane IDs, and layout commands print the IDs we
 // must use next (.result.pane.pane_id / .result.root_pane.pane_id) — we parse
-// them from the envelope, never predict them.
+// them from schema-validated envelopes (lib/schema.ts), never predict them.
 import type { HerdrExecutor } from "./exec.ts";
 import {
 	AGENT_START_MAX_TIMEOUT_MS,
@@ -21,6 +21,14 @@ import {
 	type HerdrKind,
 } from "./constants.ts";
 import { errorCodeIs, extractError, parseEnvelope } from "./json.ts";
+import {
+	schemaParse,
+	AgentLifecycleResultSchema,
+	PaneLayoutResultSchema,
+	PaneSplitResultSchema,
+	WorkspaceCreateResultSchema,
+	TabCreateResultSchema,
+} from "./schema.ts";
 import { findByName, listAgents } from "./list.ts";
 
 export type Direction = "right" | "down";
@@ -32,6 +40,8 @@ export interface SpawnRequest {
 	direction: Direction | "auto";
 	newWorkspace: boolean;
 	startTimeoutMs?: number;
+	/** Native agent arguments passed after `--` (herdr 0.9+), e.g. ["--model","gpt5"] */
+	agentArgs?: string[];
 }
 
 export type SpawnStage = "collision" | "layout" | "start" | "not-ready";
@@ -40,20 +50,10 @@ export type SpawnOutcome =
 	| { ok: true; name: string; paneId: string; workspaceId?: string; tabId?: string; status: string }
 	| { ok: false; stage: SpawnStage; error: string; paneId?: string };
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-	return typeof value === "object" && value !== null && !Array.isArray(value)
-		? (value as Record<string, unknown>)
-		: null;
-}
-
-function pickString(record: unknown, path: string[]): string | undefined {
-	let current: unknown = record;
-	for (const key of path) {
-		const rec = asRecord(current);
-		if (!rec) return undefined;
-		current = rec[key];
-	}
-	return typeof current === "string" ? current : undefined;
+function parseResultValue(stdout: string): { ok: true; result: unknown } | { ok: false; error: string } {
+	const parsed = parseEnvelope(stdout);
+	if (!parsed.ok) return parsed;
+	return { ok: true, result: parsed.envelope.result };
 }
 
 // Auto direction: split a wide pane right, a narrow/tall pane down. Caller
@@ -63,21 +63,20 @@ export async function resolveDirection(executor: HerdrExecutor): Promise<Directi
 	try {
 		const result = await executor.exec(["pane", "layout", "--current"], { timeoutMs: HERDR_SHORT_TIMEOUT_MS });
 		if (!result.ok) return "right";
-		const parsed = parseEnvelope(result.stdout);
+		const parsed = parseResultValue(result.stdout);
 		if (!parsed.ok) return "right";
-		const record = asRecord(parsed.envelope.result);
-		const layout = asRecord(record?.layout);
-		const panes = Array.isArray(layout?.panes) ? layout!.panes : [];
+		const layout = schemaParse<{
+			layout?: { panes?: Array<{ pane_id?: string; focused?: boolean; rect?: { width?: number; height?: number } }> };
+		}>(PaneLayoutResultSchema, parsed.result);
+		if (!layout.ok) return "right";
+		const panes = layout.value.layout?.panes ?? [];
 		const caller = process.env.HERDR_PANE_ID;
-		let chosen: unknown = panes[0];
+		let chosen = panes[0];
 		for (const pane of panes) {
-			const rec = asRecord(pane);
-			if (!rec) continue;
-			if (rec.focused === true || (caller && rec.pane_id === caller)) chosen = pane;
+			if (pane.focused === true || (caller && pane.pane_id === caller)) chosen = pane;
 		}
-		const rect = asRecord(asRecord(chosen)?.rect);
-		const width = typeof rect?.width === "number" ? rect.width : 0;
-		const height = typeof rect?.height === "number" ? rect.height : 0;
+		const width = chosen?.rect?.width ?? 0;
+		const height = chosen?.rect?.height ?? 0;
 		return width >= height ? "right" : "down";
 	} catch {
 		return "right";
@@ -109,19 +108,36 @@ export async function createPane(
 		const err = extractError(result.stderr, result.exitCode);
 		return { ok: false, error: `${args.join(" ")} failed: ${err.message}` };
 	}
-	const parsed = parseEnvelope(result.stdout);
+	const parsed = parseResultValue(result.stdout);
 	if (!parsed.ok) return { ok: false, error: parsed.error };
 
-	const paneId = req.newWorkspace
-		? pickString(parsed.envelope.result, ["root_pane", "pane_id"])
-		: pickString(parsed.envelope.result, ["pane", "pane_id"]);
-	if (!paneId) return { ok: false, error: "herdr layout response did not include a pane_id" };
+	if (req.newWorkspace) {
+		const created = schemaParse<{
+			root_pane?: { pane_id?: string }; workspace?: { id?: string }; tab?: { id?: string };
+		}>(WorkspaceCreateResultSchema, parsed.result);
+		if (!created.ok) return { ok: false, error: created.error };
+		const paneId = created.value.root_pane?.pane_id;
+		if (!paneId) return { ok: false, error: "herdr workspace create response did not include a pane_id" };
+		return {
+			ok: true,
+			paneId,
+			workspaceId: created.value.workspace?.id ?? process.env.HERDR_WORKSPACE_ID,
+			tabId: created.value.tab?.id,
+		};
+	}
 
+	const created = schemaParse<{ pane?: { pane_id?: string; workspace_id?: string; tab_id?: string } }>(
+		PaneSplitResultSchema,
+		parsed.result,
+	);
+	if (!created.ok) return { ok: false, error: created.error };
+	const paneId = created.value.pane?.pane_id;
+	if (!paneId) return { ok: false, error: "herdr pane split response did not include a pane_id" };
 	return {
 		ok: true,
 		paneId,
-		workspaceId: pickString(parsed.envelope.result, ["workspace", "id"]) ?? process.env.HERDR_WORKSPACE_ID,
-		tabId: req.newWorkspace ? pickString(parsed.envelope.result, ["tab", "id"]) : process.env.HERDR_TAB_ID,
+		workspaceId: created.value.pane?.workspace_id ?? process.env.HERDR_WORKSPACE_ID,
+		tabId: created.value.pane?.tab_id ?? process.env.HERDR_TAB_ID,
 	};
 }
 
@@ -135,14 +151,18 @@ export type StartOutcome =
 // name stays bound; we then wait once for idle before giving up.
 export async function startAgent(executor: HerdrExecutor, req: SpawnRequest, paneId: string): Promise<StartOutcome> {
 	const timeoutMs = clampStartTimeout(req.startTimeoutMs);
-	const result = await executor.exec(
-		["agent", "start", req.name, "--kind", req.kind, "--pane", paneId, "--timeout", String(timeoutMs)],
-		{ timeoutMs: timeoutMs + 10_000 },
-	);
+	const args = ["agent", "start", req.name, "--kind", req.kind, "--pane", paneId, "--timeout", String(timeoutMs)];
+	// herdr 0.9+: native agent arguments go after `--` verbatim.
+	if (req.agentArgs && req.agentArgs.length > 0) args.push("--", ...req.agentArgs);
+	const result = await executor.exec(args, { timeoutMs: timeoutMs + 10_000 });
 	if (result.ok) {
-		const parsed = parseEnvelope(result.stdout);
-		const status = parsed.ok ? pickString(parsed.envelope.result, ["agent", "agent_status"]) : undefined;
-		return { ok: true, status: status ?? "ready" };
+		const parsed = parseResultValue(result.stdout);
+		let status = "ready";
+		if (parsed.ok) {
+			const lifecycle = schemaParse<{ agent?: { agent_status?: string } }>(AgentLifecycleResultSchema, parsed.result);
+			if (lifecycle.ok && lifecycle.value.agent?.agent_status) status = lifecycle.value.agent.agent_status;
+		}
+		return { ok: true, status };
 	}
 
 	const err = extractError(result.stderr, result.exitCode);

@@ -1,4 +1,5 @@
-// herdr-control argv-only executor for herdr 0.8.x.
+// herdr-control argv-only executor for herdr 0.9.x (min supported 0.9.0 —
+// see lib/version.ts; live binary is the authority, see lib/constants.ts).
 // Uses child_process.execFile (argv only, no shell) with a per-call timeout
 // clamped to HERDR_EXEC_ABS_MAX_MS. Error handling mirrors cmux-control.
 //
@@ -43,6 +44,20 @@ export function defaultHerdrExecutor(bin = "herdr"): HerdrExecutor {
 				}
 				return { ok: false, stdout: e?.stdout ?? "", stderr: e?.stderr ?? String(err), exitCode: typeof e?.code === "number" ? e.code : 1 };
 			}
+		},
+	};
+}
+
+// Session-scoped executor: routes EVERY call at a named herdr session (herdr
+// --session <name> ...). Live tests run here — an isolated server with its
+// own socket and panes, so tests can never touch the user's session. The
+// whole session is torn down at test end (`herdr session stop`), which is
+// the mechanical backstop for anything the per-pane cleanup misses.
+export function sessionHerdrExecutor(bin: string, session: string): HerdrExecutor {
+	const base = defaultHerdrExecutor(bin);
+	return {
+		async exec(args, opts) {
+			return base.exec(["--session", session, ...args], opts);
 		},
 	};
 }

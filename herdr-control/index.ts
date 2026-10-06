@@ -5,8 +5,8 @@
 // herdr's official automation best practices (herdr.dev/docs/agent-automation).
 //
 // Registers:
-//   - 7 LLM tools: herdr_agents, herdr_spawn, herdr_prompt, herdr_read,
-//                  herdr_send_keys, herdr_close, herdr_terminal
+//   - 8 LLM tools: herdr_agents, herdr_spawn, herdr_prompt, herdr_read,
+//                  herdr_send_keys, herdr_close, herdr_terminal, herdr_watch
 //   - 4 slash commands: /herdr-list, /herdr-spawn, /herdr-term, /herdr-config
 //   - 1 input hook for high-confidence NL ("list herdr agents",
 //     "herdr spawn <name> <task>")
@@ -19,7 +19,9 @@
 //     confirms interactively
 //   - herdr_close only closes panes recorded in the spawn registry (persisted
 //     via pi.appendEntry so it survives /new, /resume, /fork, /reload)
-//   - session_shutdown reports (never kills) still-running subagents
+//   - session_shutdown mechanically CLOSES every pane this session spawned
+//     (keep_on_exit opts out); session_start reaps stale settled panes left
+//     by crashed sessions — pane lifecycle is code, not instructions
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
 	DEFAULT_HERDR_PREFIX,
@@ -28,6 +30,7 @@ import {
 	MAX_TRANSCRIPT_CHARS,
 	PROMPT_MAX_TIMEOUT_MS,
 	PROMPT_MIN_TIMEOUT_MS,
+	SESSION_GC_MIN_AGE_MS,
 	SPAWN_REGISTRY_ENTRY_TYPE,
 	HERDR_KINDS,
 } from "./lib/constants.ts";
@@ -44,6 +47,10 @@ import { makeCloseEvent, makeSpawnEvent, SpawnRegistry, type SpawnRecord } from 
 import { matchHerdrNlp } from "./lib/nlp.ts";
 import { parseEnvelope } from "./lib/json.ts";
 import { createTerminal, readPane, renamePane, runInPane } from "./lib/terminal.ts";
+import { withCleanupGuidance, shouldDisposeOnSettle } from "./lib/brief.ts";
+import { Watchdog, frameWatchEvent, WATCH_EVENT_ENTRY_TYPE, DEFAULT_WATCH_INTERVAL_MS, MIN_WATCH_INTERVAL_MS, MAX_WATCH_INTERVAL_MS, DEFAULT_REAP_IDLE_MS, type WatchEvent } from "./lib/watchdog.ts";
+import { lastVersionInfo } from "./lib/version.ts";
+import { DEFAULT_SOCKET_PATH } from "./lib/events.ts";
 
 const TOOL_ERROR_STDERR_LEN = 1000;
 const NOTIFY_TEXT_LEN = 1500;
@@ -51,6 +58,66 @@ const NOTIFY_TEXT_LEN = 1500;
 // Session-scoped state (in-memory; registry events persisted to the session).
 let currentPrefix = DEFAULT_HERDR_PREFIX;
 const registry = new SpawnRegistry();
+
+// Watchdog (created lazily on first use; needs the executor + pi surface).
+let watchdog: Watchdog | null = null;
+let watchdogPi: ExtensionAPI | null = null;
+
+function makeWatchdog(executor: HerdrExecutor): Watchdog {
+	return new Watchdog(
+		executor,
+		{ list: () => registry.list() },
+		(event: WatchEvent) => {
+			const frame = frameWatchEvent(event);
+			try {
+				if (event.severity === "warning") {
+					// Blocked dialogs / lost agents wake the session (monitor-threads pattern).
+					watchdogPi?.sendMessage?.(
+						{ customType: WATCH_EVENT_ENTRY_TYPE, content: frame, display: true },
+						{ triggerTurn: true, deliverAs: "steer" },
+					);
+				} else {
+					// Finished/idle transitions surface in the transcript without waking a turn.
+					watchdogPi?.sendMessage?.({ customType: WATCH_EVENT_ENTRY_TYPE, content: frame, display: true });
+				}
+			} catch {
+				// sendMessage unavailable (e.g. print mode) — event stays in the snapshot
+			}
+		},
+		{
+			// Mechanical pane lifecycle: settled panes past their lease are closed
+			// by the watchdog itself (keep_on_exit opts out per spawn). The close
+			// event is applied + persisted here so the registry cannot leak ghosts.
+			reapIdleMs: DEFAULT_REAP_IDLE_MS,
+			closePane: async (paneId) => {
+				const res = await closePane(executor, paneId);
+				if (res.ok) {
+					const record = registry.getByPane(paneId);
+					if (record) {
+						registry.apply(makeCloseEvent(record.name, record.paneId));
+						persistEvent(pi, makeCloseEvent(record.name, record.paneId));
+					}
+				}
+				return res.ok;
+			},
+		},
+	);
+	// Event-based trigger: herdr pushes pane lifecycle events over its socket.
+	// Prefer env override, then the probed server socket, then the bundled default.
+	watchdog.socketPath =
+		process.env.HERDR_SOCKET ?? lastVersionInfo()?.socketPath ?? DEFAULT_SOCKET_PATH;
+	return watchdog;
+}
+
+// Auto-arm: the first successful spawn starts the registry-scope watchdog so
+// blocked dialogs and finished tasks surface without anyone remembering to
+// call herdr_watch start.
+function maybeAutoWatch(executor: HerdrExecutor): string {
+	if (watchdog?.isRunning) return "";
+	watchdog ??= makeWatchdog(executor);
+	watchdog.start({ targets: "registry" });
+	return " Watchdog armed (herdr_watch status).";
+}
 
 function truncate(s: string, n: number): string {
 	if (s.length <= n) return s;
@@ -95,9 +162,16 @@ interface SpawnRunOptions {
 	direction: "right" | "down" | "auto";
 	timeoutMs?: number;
 	newWorkspace?: boolean;
+	agentArgs?: string[];
+	/** false = omit the mandatory cleanup footer (default: included) */
+	cleanupGuidance?: boolean;
+	/** close the pane once the task settles (default: keep for follow-ups) */
+	closeWhenDone?: boolean;
+	/** opt out of mechanical lifecycle (shutdown close + idle reaper) */
+	keepOnExit?: boolean;
 }
 
-function recordFromOutcome(outcome: Extract<SpawnOutcome, { ok: true }>, kind: string, cwd: string): SpawnRecord {
+function recordFromOutcome(outcome: Extract<SpawnOutcome, { ok: true }>, kind: string, cwd: string, opts: { keep?: boolean } = {}): SpawnRecord {
 	return {
 		name: outcome.name,
 		paneId: outcome.paneId,
@@ -105,6 +179,8 @@ function recordFromOutcome(outcome: Extract<SpawnOutcome, { ok: true }>, kind: s
 		tabId: outcome.tabId,
 		kind,
 		cwd,
+		keep: opts.keep,
+		lastActivityAt: Date.now(),
 	};
 }
 
@@ -146,6 +222,7 @@ async function runSpawn(
 		cwd: opts.cwd,
 		direction: opts.direction,
 		newWorkspace: opts.newWorkspace ?? false,
+		agentArgs: opts.agentArgs,
 	});
 	checkAbort();
 
@@ -174,22 +251,36 @@ async function runSpawn(
 		);
 	}
 
-	const record = recordFromOutcome(outcome, opts.kind, opts.cwd);
+	const record = recordFromOutcome(outcome, opts.kind, opts.cwd, { keep: opts.keepOnExit });
 	registry.spawn(record);
 	persistEvent(pi, makeSpawnEvent(record));
 
 	onUpdate?.(report(`subagent "${opts.name}" ready in ${outcome.paneId} (${outcome.status}); submitting task...`, { stage: "prompt", paneId: outcome.paneId }));
-	const prompt = await promptAgent(executor, opts.name, opts.task, opts.timeoutMs);
+	const task = withCleanupGuidance(opts.task, { cleanupGuidance: opts.cleanupGuidance });
+	const prompt = await promptAgent(executor, opts.name, task, opts.timeoutMs);
+	registry.touch(opts.name); // lease bump: the pane was active at least until now
 	checkAbort();
 
 	const base = { name: opts.name, paneId: outcome.paneId, kind: opts.kind, cwd: opts.cwd };
 
 	if (prompt.ok) {
 		const transcript = await readForReport(executor, opts.name);
+		const dispose = shouldDisposeOnSettle(prompt, opts.closeWhenDone);
+		let disposalNote = "";
+		if (dispose) {
+			const closed = await closePane(executor, outcome.paneId);
+			if (closed.ok) {
+				registry.apply(makeCloseEvent(record.name, record.paneId));
+				persistEvent(pi, makeCloseEvent(record.name, record.paneId));
+				disposalNote = `\nPane ${outcome.paneId} closed (close_when_done).`;
+			} else {
+				disposalNote = `\nNOTE: close_when_done failed: ${closed.error} — close ${outcome.paneId} with herdr_close.`;
+			}
+		}
 		return report(
 			`Spawned ${opts.kind} subagent "${opts.name}" in pane ${outcome.paneId} (cwd ${opts.cwd}).\n` +
-			`Task delivered; agent settled with status: ${prompt.status}.\n${transcript}`,
-			{ ...base, ok: true, status: prompt.status },
+			`Task delivered; agent settled with status: ${prompt.status}.\n${transcript}${disposalNote}${maybeAutoWatch(executor)}`,
+			{ ...base, ok: true, status: prompt.status, paneClosed: dispose && disposalNote.includes("closed (") },
 		);
 	}
 
@@ -224,6 +315,14 @@ async function runSpawn(
 		`Prompt to "${opts.name}" failed (${prompt.kind}): ${prompt.error}. Current status: ${status}.\n${transcript}`,
 		{ ...base, ok: false, status, kind: prompt.kind },
 	);
+}
+
+// Exported for wiring tests (test-extension.mjs); not part of the extension API.
+export const runSpawnForTest = runSpawn;
+
+// Test hook: stop the module watchdog (auto-armed by runSpawn in tests).
+export function stopWatchForTest(): void {
+	watchdog?.stop();
 }
 
 // -- LLM tools --------------------------------------------------------------
@@ -276,6 +375,10 @@ function registerTools(pi: ExtensionAPI, executor: HerdrExecutor): void {
 			direction: Type.Optional(stringEnum(["right", "down", "auto"] as const)),
 			timeout_ms: Type.Optional(Type.Integer({ description: `Prompt wait timeout in ms (${PROMPT_MIN_TIMEOUT_MS}..${PROMPT_MAX_TIMEOUT_MS}, default ${DEFAULT_SPAWN_TIMEOUT_MS})` })),
 			new_workspace: Type.Optional(Type.Boolean({ description: "Create a separate workspace instead of a sibling pane (avoid unless needed)" })),
+			agent_args: Type.Optional(Type.Array(Type.String(), { description: "Native agent arguments passed after `--` to `agent start` (e.g. [\"--model\",\"gpt5\"]); requires herdr 0.9+" })),
+			cleanup_guidance: Type.Optional(Type.Boolean({ description: "Append the mandatory worktree/temp-cleanup footer to the brief (default true)" })),
+			close_when_done: Type.Optional(Type.Boolean({ description: "Close the pane once the task settles successfully (default false; keep for follow-ups)" })),
+			keep_on_exit: Type.Optional(Type.Boolean({ description: "Opt out of mechanical lifecycle: survive session-shutdown close and the idle reaper (default false)" })),
 		}),
 		async execute(_id, params, signal, onUpdate, _ctx) {
 			try {
@@ -290,6 +393,10 @@ function registerTools(pi: ExtensionAPI, executor: HerdrExecutor): void {
 						direction: params.direction ?? "auto",
 						timeoutMs: params.timeout_ms,
 						newWorkspace: params.new_workspace,
+						agentArgs: params.agent_args,
+						cleanupGuidance: params.cleanup_guidance,
+						closeWhenDone: params.close_when_done,
+						keepOnExit: params.keep_on_exit,
 					},
 					onUpdate,
 					signal,
@@ -312,21 +419,42 @@ function registerTools(pi: ExtensionAPI, executor: HerdrExecutor): void {
 			task: Type.String({ description: "Prompt text to submit" }),
 			wait: Type.Optional(Type.Boolean({ description: "Wait for settled idle/done/blocked state (default true)" })),
 			timeout_ms: Type.Optional(Type.Integer({ description: `Wait timeout in ms (${PROMPT_MIN_TIMEOUT_MS}..${PROMPT_MAX_TIMEOUT_MS}, default 5 minutes)` })),
+			cleanup_guidance: Type.Optional(Type.Boolean({ description: "Append the mandatory worktree/temp-cleanup footer to the prompt (default true)" })),
+			close_when_done: Type.Optional(Type.Boolean({ description: "Close the pane after the prompt settles successfully (registry-recorded agents only)" })),
 		}),
 		async execute(_id, params, signal, onUpdate, _ctx) {
 			try {
 				await ensureReady(executor);
 				const wait = params.wait !== false;
 				onUpdate?.(toolText(wait ? "submitting prompt..." : "submitting prompt (no wait)...", { stage: "prompt" }));
-				const prompt = await promptAgent(executor, params.agent, params.task, wait ? params.timeout_ms : undefined, wait);
+				const task = withCleanupGuidance(params.task, { cleanupGuidance: params.cleanup_guidance });
+				const prompt = await promptAgent(executor, params.agent, task, wait ? params.timeout_ms : undefined, wait);
+				registry.touch(params.agent); // lease bump for the idle reaper
 				if (!wait) {
 					const read = await readAgent(executor, params.agent);
 					const transcript = read.ok ? read.text.trim() : `(transcript unavailable: ${read.error})`;
 					return toolText(`Prompt delivered to ${params.agent} (no wait).\n${transcript}`, { ok: true, agent: params.agent, waited: false });
 				}
 				if (prompt.ok) {
+					let disposalNote = "";
+					if (params.close_when_done === true) {
+						let record = registry.get(params.agent);
+						if (!record && isPaneId(params.agent)) record = registry.getByPane(params.agent);
+						if (record) {
+							const closed = await closePane(executor, record.paneId);
+							if (closed.ok) {
+								registry.apply(makeCloseEvent(record.name, record.paneId));
+								persistEvent(pi, makeCloseEvent(record.name, record.paneId));
+								disposalNote = ` Pane ${record.paneId} closed (close_when_done).`;
+							} else {
+								disposalNote = ` NOTE: close_when_done failed: ${closed.error}.`;
+							}
+						} else {
+							disposalNote = " NOTE: close_when_done ignored — agent is not in this session's registry (herdr_close policy).";
+						}
+					}
 					const transcript = await readForReport(executor, params.agent);
-					return toolText(`Prompt settled; status: ${prompt.status}.\n${transcript}`, { ok: true, agent: params.agent, status: prompt.status });
+					return toolText(`Prompt settled; status: ${prompt.status}.${disposalNote}\n${transcript}`, { ok: true, agent: params.agent, status: prompt.status });
 				}
 				const detail = await getAgent(executor, params.agent);
 				const status = detail.ok ? detail.agent.agent_status ?? "unknown" : "unknown";
@@ -493,6 +621,56 @@ function registerTools(pi: ExtensionAPI, executor: HerdrExecutor): void {
 			}
 		},
 	});
+
+	pi.registerTool({
+		name: "herdr_watch",
+		label: "Herdr watchdog",
+		description:
+			"Manage the proactive herdr pane watchdog: polls pane states via the classifier (herdr cannot reliably " +
+			"classify pi panes) and surfaces transitions — blocked permission dialogs (wakes the session), finished " +
+			"tasks (close candidates), unknown/gone agents. Auto-arms on the first successful herdr_spawn.",
+		promptSnippet: "Start/stop/check the herdr pane-state watchdog",
+		promptGuidelines: [
+			"Blocked herdr agents are surfaced by the watchdog; only answer dialogs via user-confirmed herdr_send_keys.",
+		],
+		parameters: Type.Object({
+			action: stringEnum(["start", "stop", "status", "once"] as const),
+			targets: Type.Optional(stringEnum(["registry", "all"] as const)),
+			interval_ms: Type.Optional(Type.Integer({ description: `Poll interval in ms (${MIN_WATCH_INTERVAL_MS}..${MAX_WATCH_INTERVAL_MS}, default ${DEFAULT_WATCH_INTERVAL_MS})` })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, _ctx) {
+			try {
+				await ensureReady(executor);
+				watchdog ??= makeWatchdog(executor);
+				if (params.action === "stop") {
+					watchdog.stop();
+					return toolText("herdr watchdog stopped.", { ok: true, running: false });
+				}
+				if (params.action === "start") {
+					watchdog.start({ intervalMs: params.interval_ms, targets: params.targets });
+				} else if (params.action === "once") {
+					if (params.targets) watchdog.targets = params.targets;
+					await watchdog.watchOnce();
+				}
+				const snap = watchdog.status();
+				const lines = [
+					`watchdog ${snap.running ? "running" : "stopped"} (interval ${snap.intervalMs}ms, targets ${snap.targets}, watching ${snap.watched})`,
+					snap.lastError ? `last error: ${snap.lastError}` : "no errors",
+				];
+				if (snap.recentEvents.length > 0) {
+					lines.push("recent events:");
+					for (const e of snap.recentEvents.slice(-10)) {
+						lines.push(`  [${e.severity}] ${e.key}: ${e.from} → ${e.to}${e.evidence.length ? ` (${e.evidence[0]})` : ""}`);
+					}
+				} else {
+					lines.push("no transitions observed yet");
+				}
+				return toolText(lines.join("\n"), { ok: true, snapshot: snap });
+			} catch (err) {
+				return toolText(`herdr_watch failed: ${truncate(err instanceof Error ? err.message : String(err), TOOL_ERROR_STDERR_LEN)}`, { ok: false });
+			}
+		},
+	});
 }
 
 // Single source of truth for the pane-ref grammar lives in lib/constants.ts
@@ -567,11 +745,12 @@ async function runTerminal(
 
 // -- Slash commands ---------------------------------------------------------
 
-function parseSpawnArgs(args: string): SpawnRunOptions | { error: string } {
+// Exported for tests (test-extension.mjs); not part of the extension API.
+export function parseSpawnArgs(args: string): SpawnRunOptions | { error: string } {
 	const tokens = args.trim().split(/\s+/).filter(Boolean);
 	if (tokens.length === 0) return { error: "usage: /herdr-spawn <name> [--kind k] [--cwd p] [--dir right|down] [--timeout ms] [--workspace] <task...>" };
 	const name = tokens.shift()!;
-	const opts: SpawnRunOptions = { name, task: "", kind: "pi", cwd: process.cwd(), direction: "auto" };
+	const opts: SpawnRunOptions = { name, task: "", kind: "pi", cwd: process.cwd(), direction: "auto", agentArgs: [] };
 	const task: string[] = [];
 	for (let i = 0; i < tokens.length; i += 1) {
 		const token = tokens[i];
@@ -580,8 +759,10 @@ function parseSpawnArgs(args: string): SpawnRunOptions | { error: string } {
 		else if (token === "--dir" && tokens[i + 1]) { opts.direction = tokens[++i] as SpawnRunOptions["direction"]; }
 		else if (token === "--timeout" && tokens[i + 1]) { opts.timeoutMs = Number.parseInt(tokens[++i], 10); }
 		else if (token === "--workspace") { opts.newWorkspace = true; }
+		else if (token === "--agent-arg" && tokens[i + 1]) { opts.agentArgs!.push(tokens[++i]); }
 		else { task.push(token); }
 	}
+	if (opts.agentArgs && opts.agentArgs.length === 0) delete opts.agentArgs;
 	opts.task = task.join(" ").trim();
 	if (!opts.task) return { error: "no task given; usage: /herdr-spawn <name> [flags] <task...>" };
 	return opts;
@@ -604,7 +785,7 @@ function registerCommands(pi: ExtensionAPI, executor: HerdrExecutor): void {
 	});
 
 	pi.registerCommand("herdr-spawn", {
-		description: "Spawn a herdr subagent and submit its task. /herdr-spawn <name> [--kind k] [--cwd p] [--dir right|down] [--timeout ms] [--workspace] <task...>",
+		description: "Spawn a herdr subagent and submit its task. /herdr-spawn <name> [--kind k] [--cwd p] [--dir right|down] [--timeout ms] [--agent-arg a] [--workspace] <task...>",
 		handler: async (args, ctx) => {
 			const parsed = parseSpawnArgs(args);
 			if ("error" in parsed) return ctx.ui.notify(parsed.error, "warning");
@@ -735,6 +916,26 @@ function registerLifecycle(pi: ExtensionAPI, executor: HerdrExecutor): void {
 			}
 			const pruned = registry.prune(paneIds);
 			for (const record of pruned) persistEvent(pi, makeCloseEvent(record.name, record.paneId));
+
+			// Mechanical GC: panes from crashed prior sessions whose agent settled
+			// (idle/done) and that are older than SESSION_GC_MIN_AGE_MS get closed.
+			// Recently-created panes and keep_on_exit records are left alone.
+			if (live.ok) {
+				const now = Date.now();
+				for (const record of registry.list()) {
+					if (record.keep) continue;
+					if (now - record.createdAt < SESSION_GC_MIN_AGE_MS) continue;
+					const row = live.agents.find((a) => (a.agent ?? a.name) === record.name && a.pane_id === record.paneId);
+					const status = row?.agent_status;
+					if (status !== "idle" && status !== "done") continue;
+					const closed = await closePane(executor, record.paneId);
+					if (closed.ok) {
+						registry.apply(makeCloseEvent(record.name, record.paneId));
+						persistEvent(pi, makeCloseEvent(record.name, record.paneId));
+						ctx.ui?.notify?.(`herdr GC: closed stale pane ${record.paneId} ("${record.name}", ${status} since before this session).`, "info");
+					}
+				}
+			}
 		} catch {
 			// hydration is best-effort
 		}
@@ -744,18 +945,34 @@ function registerLifecycle(pi: ExtensionAPI, executor: HerdrExecutor): void {
 		try {
 			const records = registry.list();
 			if (records.length === 0) return;
-			const live = await listAgents(executor);
-			const names = new Set(live.ok ? live.agents.map((a) => a.agent) : []);
-			const stillRunning = records.filter((r) => !r.orphan && r.kind !== "terminal" && names.has(r.name));
-			const openTerminals = records.filter((r) => r.kind === "terminal");
-			if (ctx.hasUI) {
-				if (stillRunning.length > 0) {
-					const lines = stillRunning.map((r) => `${r.name} (${r.paneId}, ${r.kind})`);
-					ctx.ui.notify(`herdr subagents still running: ${lines.join(", ")}. They keep working after exit; close with /herdr-close or herdr itself.`, "warning");
+			// Mechanical lifecycle: panes this session spawned are CLOSED on
+			// shutdown unless the spawn set keep_on_exit. This is code, not
+			// discipline — nothing leaks because nobody remembered to clean up.
+			const closedNames: string[] = [];
+			const kept: string[] = [];
+			for (const record of records) {
+				if (record.keep) {
+					kept.push(`${record.name} (${record.paneId})`);
+					continue;
 				}
-				if (openTerminals.length > 0) {
-					const lines = openTerminals.map((r) => `${r.name} (${r.paneId})`);
-					ctx.ui.notify(`herdr terminals still open: ${lines.join(", ")}. They keep running after exit; close with /herdr-close or herdr itself.`, "info");
+				if (record.orphan && !record.paneId) continue;
+				try {
+					const closed = await closePane(executor, record.paneId);
+					if (closed.ok) {
+						registry.apply(makeCloseEvent(record.name, record.paneId));
+						persistEvent(pi, makeCloseEvent(record.name, record.paneId));
+						closedNames.push(`${record.name} (${record.paneId})`);
+					}
+				} catch {
+					// server already gone — panes die with it
+				}
+			}
+			if (ctx.hasUI) {
+				if (closedNames.length > 0) {
+					ctx.ui.notify(`herdr lifecycle: closed ${closedNames.length} pane(s) on shutdown: ${closedNames.join(", ")}.`, "info");
+				}
+				if (kept.length > 0) {
+					ctx.ui.notify(`herdr lifecycle: kept ${kept.length} keep_on_exit pane(s): ${kept.join(", ")}.`, "info");
 				}
 			}
 		} catch {
@@ -772,6 +989,7 @@ export default function herdrControlExtension(pi: ExtensionAPI): void {
 	if (typeof pi?.registerTool !== "function") return;
 
 	const executor = defaultHerdrExecutor();
+	watchdogPi = pi;
 	registerTools(pi, executor);
 	registerCommands(pi, executor);
 	registerInputHook(pi, executor);
