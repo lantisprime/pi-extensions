@@ -21,4 +21,13 @@ try {
 	process.env.PATH = savedPath;
 }
 
+// sessionHerdrExecutor: --session prefix routes every call at a named session
+{
+	const { sessionHerdrExecutor } = await import("../lib/exec.ts");
+	const sess = sessionHerdrExecutor("echo", "hc-e2e");
+	const out = await sess.exec(["agent", "list"], { timeoutMs: 5000 });
+	assert.equal(out.ok, true);
+	assert.equal(out.stdout.trim(), "--session hc-e2e agent list", "session prefix precedes every argv");
+}
+
 console.log("test-exec: all tests passed");

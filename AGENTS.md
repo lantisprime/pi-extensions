@@ -1,5 +1,25 @@
 # Agent instructions
 
+## Working rules (learned, 2026-10-06 — herdr pane discipline)
+
+These are binding for agent work in this repo; they exist because live
+herdr testing leaked panes/sessions and nearly killed other agents' work.
+
+1. **Every herdr pane spawned gets a cleanup brief** — worktree disposal
+   (`git worktree remove`), temp files, background processes; herdr-control
+   appends this automatically (`lib/brief.ts`).
+2. **Panes are closed when the task finishes** — `close_when_done` or an
+   explicit `herdr_close`; test scripts sweep their own prefix BEFORE and
+   AFTER the run and install SIGINT/SIGTERM/uncaughtException handlers so
+   cleanup survives aborts.
+3. **Never kill a pi session or pane you did not spawn.** Before any kill:
+   verify ownership (process cwd / spawn registry). Other agents run
+   long-lived pi sessions in this machine's worktrees (e.g.
+   `home-network-wt/*`) — their processes are never ours to stop. When in
+   doubt: report and ask, never kill.
+4. **Long-running shell work streams to a log file** with explicit tool
+   timeouts and progress checks — never an unbounded silent wait.
+
 ## Working rules (learned, 2026-09-21 — smart-compaction build)
 
 These are binding for agent work in this repo; rationale in
