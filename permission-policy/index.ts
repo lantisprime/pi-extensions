@@ -1007,7 +1007,9 @@ function containsUnquotedBackslash(segment: string): boolean {
 // whitespace and the operators the splitter and redirect parser model.
 function hasOnlyModelledCharacters(segment: string): boolean {
 	const unquoted = segment.replace(/'[^']*'|"[^"]*"/g, " ");
-	return !/[^A-Za-z0-9_.\/:@%+=,\-\s>&|;#]/.test(unquoted);
+	// Only space and tab: bash's IFS does not split on \r, \v, \f or NBSP, which
+	// \s (and the token split) would treat as separators.
+	return !/[^A-Za-z0-9_.\/:@%+=,\- \t>&|;#]/.test(unquoted);
 }
 
 // B3/R2: quoting must be trivially modelled. Every token is either unquoted

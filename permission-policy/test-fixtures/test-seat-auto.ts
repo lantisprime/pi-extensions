@@ -541,6 +541,8 @@ async function runSuite(stubDir: string): Promise<void> {
 			"cat ~root/x",
 			"ls src/*",
 			"sh tests/*.sh",
+			"cat README.md\rx",
+			"cat README.md\u00a0x",
 		]) {
 			await expectDialog(harness, ctx, "bash", { command });
 		}
