@@ -15,13 +15,30 @@ type PermissionKey =
 	| "mcp";
 
 type Decision = "allow" | "deny";
-type PermissionMode = "ask" | "readOnlyAuto" | "llmAuto" | "yolo";
+type PermissionMode = "ask" | "readOnlyAuto" | "llmAuto" | "seatAuto" | "yolo";
 
+// The seat block is written by herdr-driver (Phase 1 contract). pi only reads
+// manifestPath/expiresAt; every field must survive saves verbatim.
+type SeatPolicy = {
+	installedBy?: string;
+	session?: string;
+	name?: string;
+	manifestPath?: string;
+	installedAt?: string;
+	expiresAt?: string;
+	[key: string]: unknown;
+};
+
+// Fields pi does not know about (the seat block, hd bookkeeping) round-trip
+// verbatim through load/save (spec A.5).
 type PolicyFile = {
+	schemaVersion?: number;
 	projectPath: string;
 	updatedAt: string;
 	mode: PermissionMode;
 	permissions: Partial<Record<PermissionKey, Decision>>;
+	seat?: SeatPolicy;
+	[key: string]: unknown;
 };
 
 type PermissionRequest = {
@@ -29,7 +46,18 @@ type PermissionRequest = {
 	title: string;
 	detail: string;
 	command?: string;
+	// Absolute write/edit target, plumbed from the tool input (spec A.2).
+	targetPath?: string;
 };
+
+type PermissionDecision = {
+	allowed: boolean;
+	// Set when a seatAuto write/edit allow armed a post-write guard.
+	seatAutoWrite?: { path: string };
+};
+
+// Armed between tool_call (pre-write snapshot) and tool_result (re-stat).
+type PendingSeatWrite = { path: string; previous?: Buffer };
 
 const POLICY_DIR = path.join(os.homedir(), ".pi", "agent", "permission-policy", "projects");
 const PROMPT_SHIELD_STATE_PATH = path.join(os.homedir(), ".pi", "agent", "prompt-shield", "state.json");
@@ -57,6 +85,7 @@ const MODE_LABELS: Record<PermissionMode, string> = {
 	ask: "Ask when no project/session permission is recorded",
 	readOnlyAuto: "Auto-allow read-only commands in the current project",
 	llmAuto: "Use the current LLM to auto-allow commands judged non-destructive",
+	seatAuto: "seatAuto: deterministic seat allows (read-only shapes, test runners, in-project git, in-project writes); everything else asks",
 	yolo: "YOLO: auto-allow by default except rm -f/rm -rf and repo deletion",
 };
 
@@ -74,7 +103,7 @@ export default function (pi: ExtensionAPI) {
 	extensionEvents = pi.events;
 
 	pi.registerFlag("permission-mode", {
-		description: "Set permission mode: ask, read-only, auto, or yolo",
+		description: "Set permission mode: ask, read-only, auto, seat-auto, or yolo",
 		type: "string",
 	});
 
@@ -124,15 +153,22 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_call", async (event, ctx) => {
 		const projectPath = await getProjectPath(ctx.cwd);
-		const requests = classifyToolCall(event.toolName, event.input as Record<string, unknown>, projectPath, ctx.cwd);
+		const requests = await classifyToolCall(event.toolName, event.input as Record<string, unknown>, projectPath, ctx.cwd);
 		if (requests.length === 0) return undefined;
 
 		for (const request of requests) {
-			const allowed = await ensurePermission(ctx, projectPath, request);
-			if (!allowed) return { block: true, reason: `Permission denied: ${request.title}` };
+			const decision = await ensurePermission(ctx, projectPath, request);
+			if (!decision.allowed) return { block: true, reason: `Permission denied: ${request.title}` };
+			if (decision.seatAutoWrite) await armSeatWriteGuard(event.toolCallId, decision.seatAutoWrite.path);
 		}
 
 		return undefined;
+	});
+
+	// Post-write verification for seatAuto write/edit allows (spec A.2):
+	// re-stat the target and revert from the pre-write copy on mismatch.
+	pi.on("tool_result", async (event, ctx) => {
+		await verifySeatWrite(event as { toolCallId: string; toolName: string; isError?: boolean }, ctx);
 	});
 
 	pi.on("user_bash", async (event, ctx) => {
@@ -141,8 +177,10 @@ export default function (pi: ExtensionAPI) {
 		if (requests.length === 0) return undefined;
 
 		for (const request of requests) {
-			const allowed = await ensurePermission(ctx, projectPath, request);
-			if (!allowed) {
+			// Operator-typed ! commands keep today's behaviour and are never
+			// subject to seatAuto allows (spec N6).
+			const decision = await ensurePermission(ctx, projectPath, request, { userBash: true });
+			if (!decision.allowed) {
 				return {
 					result: {
 						output: `Permission denied: ${request.title}\n`,
@@ -158,7 +196,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("permissions", {
-		description: "Show/reset permission-policy settings, or set mode: /permissions mode ask|read-only|auto|yolo",
+		description: "Show/reset permission-policy settings, or set mode: /permissions mode ask|read-only|auto|seat-auto|yolo",
 		handler: async (args, ctx) => {
 			const projectPath = await getProjectPath(ctx.cwd);
 			const normalizedArgs = args.trim().toLowerCase();
@@ -176,7 +214,7 @@ export default function (pi: ExtensionAPI) {
 				const modeArg = normalizedArgs.replace(/^mode\s*/, "");
 				const mode = parseMode(modeArg);
 				if (!mode) {
-					ctx.ui.notify("Usage: /permissions mode ask|read-only|auto|yolo", "warning");
+					ctx.ui.notify("Usage: /permissions mode ask|read-only|auto|seat-auto|yolo", "warning");
 					return;
 				}
 				if (mode === "yolo" && policy.mode !== "yolo" && !(await confirmYoloMode(ctx))) return;
@@ -200,7 +238,7 @@ export default function (pi: ExtensionAPI) {
 				"Current-session permissions:",
 				...formatPermissions(session),
 				"",
-				"Use /permissions mode ask|read-only|auto|yolo to change mode.",
+				"Use /permissions mode ask|read-only|auto|seat-auto|yolo to change mode.",
 				"Use /permissions reset to clear both for this project.",
 			];
 
@@ -209,12 +247,12 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 
-function classifyToolCall(
+async function classifyToolCall(
 	toolName: string,
 	input: Record<string, unknown>,
 	projectPath: string,
 	cwd: string,
-): PermissionRequest[] {
+): Promise<PermissionRequest[]> {
 	if (toolName === "read") {
 		const requestedPath = String(input.path || "");
 		if (requestedPath && isOutsideProject(requestedPath, projectPath, cwd)) {
@@ -229,11 +267,17 @@ function classifyToolCall(
 	}
 
 	if (toolName === "write" || toolName === "edit") {
+		const rawPath = String(input.path || "");
+		// Resolve against the real-pathed cwd: the raw cwd can sit under a
+		// symlinked prefix (macOS /tmp → /private/tmp), which would make every
+		// in-project target look outside the project (spec A.2 plumbing).
+		const baseCwd = await getProjectPath(cwd);
 		return [
 			{
 				key: "writeFiles",
 				title: PERMISSION_LABELS.writeFiles,
-				detail: `${toolName} path: ${String(input.path || "(unknown)")}`,
+				detail: `${toolName} path: ${rawPath || "(unknown)"}`,
+				targetPath: rawPath ? path.resolve(baseCwd, rawPath) : undefined,
 			},
 		];
 	}
@@ -377,38 +421,574 @@ function isReadOnlyGitCommand(command: string): boolean {
 	]).has(match[1].toLowerCase());
 }
 
+// Newline is a command separator too (spec N4): a smuggled second line must
+// never inherit the first line's shape.
+function splitCommandSegments(command: string): string[] {
+	return command
+		.split(/\s*(?:\r?\n|&&|\|\||;|\|)\s*/)
+		.map((segment) => segment.trim())
+		.filter(Boolean);
+}
+
+function shellTokens(segment: string): string[] {
+	return (segment.match(/(?:"[^"]+"|'[^']+'|\S+)/g) || []).map((token) => token.replace(/^['"]|['"]$/g, ""));
+}
+
+// Strict read-only shapes (spec N1): find may not delete/execute/print-to-file,
+// sed is only -n with a print script, awk and xargs are not read-only. When
+// unsure, NOT read-only.
+const SIMPLE_READONLY_COMMANDS = new Set([
+	"pwd",
+	"ls",
+	"grep",
+	"rg",
+	"cat",
+	"head",
+	"tail",
+	"wc",
+	"sort",
+	"uniq",
+	"file",
+	"stat",
+	"du",
+	"df",
+	"echo",
+	"printf",
+	"which",
+	"command",
+	"test",
+]);
+
+function isFindReadOnly(args: string[]): boolean {
+	return !args.some((arg) => /^-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)$/.test(arg));
+}
+
+function isPrintOnlySedSubstitute(part: string): boolean {
+	if (part.length < 2) return false;
+	const delimiter = part[1];
+	const body = part.slice(2).split(`\\${delimiter}`).join("\u0000");
+	const pieces = body.split(delimiter);
+	if (pieces.length < 2 || pieces.length > 3) return false;
+	// s/// flags: g, p, case/match flags and occurrence numbers are fine; the
+	// w (write-to-file) and e (execute) flags are not.
+	return !/[^gpIiMm0-9]/.test(pieces[2] || "");
+}
+
+function isPrintOnlySedScript(script: string): boolean {
+	return script
+		.split(";")
+		.map((part) => part.trim())
+		.every((part) => {
+			if (!part) return false;
+			if (/^(?:\/[^/]+\/|\$|\d+)(?:,(?:\/[^/]+\/|\$|\d+))?p$/.test(part)) return true;
+			return part.startsWith("s") && isPrintOnlySedSubstitute(part);
+		});
+}
+
+function isSedPrintOnly(args: string[]): boolean {
+	let sawN = false;
+	const scriptArgs: string[] = [];
+	for (const arg of args) {
+		if (arg === "-n") {
+			sawN = true;
+			continue;
+		}
+		if (arg.startsWith("-")) return false; // -i, -e, -f, ...: unsure → not read-only
+		scriptArgs.push(arg);
+	}
+	if (!sawN || scriptArgs.length === 0) return false;
+	return isPrintOnlySedScript(scriptArgs[0]);
+}
+
+function isReadOnlyShellSegment(segment: string): boolean {
+	const tokens = shellTokens(segment);
+	const first = tokens[0];
+	if (!first) return false;
+	if (first === "find") return isFindReadOnly(tokens.slice(1));
+	if (first === "sed") return isSedPrintOnly(tokens.slice(1));
+	return SIMPLE_READONLY_COMMANDS.has(first);
+}
+
 function isReadOnlyShellCommand(command: string): boolean {
 	if (/[;&]\s*(rm|mv|cp|chmod|chown|install|truncate|touch|mkdir|rmdir)\b/i.test(command)) return false;
-	const readOnlyCommands = new Set([
-		"pwd",
-		"ls",
-		"find",
-		"grep",
-		"rg",
-		"cat",
-		"head",
-		"tail",
-		"wc",
-		"sort",
-		"uniq",
-		"awk",
-		"sed",
-		"file",
-		"stat",
-		"du",
-		"df",
-		"echo",
-		"printf",
-		"which",
-		"command",
-		"test",
+	return splitCommandSegments(command).every(isReadOnlyShellSegment);
+}
+
+// ---------------------------------------------------------------------------
+// seatAuto: deterministic seat allows (Phase 1 spec A). No LLM decides any
+// allow here; anything not matching the shapes below falls through to the
+// normal operator dialog, where hd watch reports the pane as blocked.
+// ---------------------------------------------------------------------------
+
+const SEAT_BASH_KEYS: PermissionKey[] = ["bashCommands", "destructiveBash", "git"];
+const SEAT_GIT_READ_SUBCOMMANDS = new Set(["status", "diff", "log", "show", "rev-parse"]);
+const PENDING_SEAT_WRITE_LIMIT = 64;
+const pendingSeatWrites = new Map<string, PendingSeatWrite>();
+const SEAT_VIOLATIONS_PATH = path.join(os.homedir(), ".pi", "agent", "permission-policy", "seat-violations.jsonl");
+
+function seatManifestPath(policy: PolicyFile): string | undefined {
+	const manifestPath = policy.seat?.manifestPath;
+	return typeof manifestPath === "string" && manifestPath ? manifestPath : undefined;
+}
+
+// Spec N7: mode seatAuto with a missing or expired seat block behaves as ask.
+function isSeatAutoActive(policy: PolicyFile): boolean {
+	if (policy.mode !== "seatAuto") return false;
+	const expiresAt = policy.seat?.expiresAt;
+	if (typeof expiresAt !== "string") return false;
+	const expires = Date.parse(expiresAt);
+	return Number.isFinite(expires) && expires > Date.now();
+}
+
+// realpath that tolerates a missing leaf: resolves the longest existing
+// prefix and rejoins the rest, so a path through a symlinked directory is
+// still caught even when the final component does not exist yet.
+async function realpathThroughExisting(absolute: string): Promise<string | undefined> {
+	let current = absolute;
+	const missing: string[] = [];
+	for (let i = 0; i < 64; i++) {
+		try {
+			const real = await fs.realpath(current);
+			return missing.length ? path.join(real, ...missing) : real;
+		} catch {
+			missing.unshift(path.basename(current));
+			const parent = path.dirname(current);
+			if (parent === current) return undefined;
+			current = parent;
+		}
+	}
+	return undefined;
+}
+
+async function seatProtectedRootsFor(home: string): Promise<string[]> {
+	const real = await realpathThroughExisting(home);
+	const homes = real && real !== home ? [home, real] : [home];
+	return homes.flatMap((root) => [
+		path.join(root, ".pi", "agent", "permission-policy"),
+		path.join(root, ".ssh"),
+		path.join(root, ".config"),
+		path.join(root, ".aws"),
+		path.join(root, ".gnupg"),
+		path.join(root, ".cache", "herdr-driver"),
 	]);
-	const normalized = command.replace(/\s+/g, " ").trim();
-	const segments = normalized.split(/\s*(?:&&|\|\||\|)\s*/);
-	return segments.every((segment) => {
-		const first = segment.trim().match(/^([A-Za-z0-9_.-]+)/)?.[1];
-		return !!first && readOnlyCommands.has(first) && !/\s(-i|--in-place)\b/.test(segment);
+}
+
+function isInsideAny(candidate: string, roots: string[]): boolean {
+	return roots.some((root) => candidate === root || candidate.startsWith(`${root}${path.sep}`));
+}
+
+// The worktree's .git entry: the file (or dir) at <project>/.git plus the
+// git-dir and common dir ($(git rev-parse --git-common-dir)) it points at.
+async function resolveGitEntryDirs(projectPath: string): Promise<string[]> {
+	const entry = path.join(projectPath, ".git");
+	const dirs = [entry];
+	try {
+		const st = await fs.lstat(entry);
+		if (st.isDirectory()) return dirs;
+		if (st.isFile()) {
+			const text = await fs.readFile(entry, "utf8");
+			const match = text.match(/gitdir:\s*(.+)/);
+			if (match) {
+				let gitDir = match[1].trim();
+				if (!path.isAbsolute(gitDir)) gitDir = path.resolve(projectPath, gitDir);
+				dirs.push(gitDir);
+				// <main>/.git/worktrees/<name> → common dir <main>/.git
+				const parent = path.dirname(gitDir);
+				dirs.push(path.basename(parent) === "worktrees" ? path.dirname(parent) : parent);
+			}
+		}
+	} catch {
+		// No .git entry (or unreadable): lexical entry protection only.
+	}
+	return dirs;
+}
+
+// A path is protected when it — or, for existing paths, the target it resolves
+// to through symlinks — lands on the .git entry, a git dir, or a protected
+// root under $HOME (spec A.1).
+async function isProtectedPath(absolute: string, home: string, gitDirs: string[]): Promise<boolean> {
+	const candidates = [absolute];
+	const real = await realpathThroughExisting(absolute);
+	if (real && real !== absolute) candidates.push(real);
+	const protectedRoots = await seatProtectedRootsFor(home);
+	for (const candidate of candidates) {
+		if (isInsideAny(candidate, gitDirs)) return true;
+		if (isInsideAny(candidate, protectedRoots)) return true;
+	}
+	return false;
+}
+
+// Spec A.2(a): component-wise lstat walk with no symlink component. Anchored
+// at the (already real-pathed) project for in-project targets; the seat
+// manifest exception (N3) anchors at realpath($HOME), which herdr-driver
+// owns. Targets outside both have no trusted anchor and are rejected earlier.
+// Spec A.2(a): component-wise lstat walk with no symlink component. Anchored
+// at the (already real-pathed) project; the seat manifest exception (N3)
+// anchors at realpath($HOME). macOS-style aliases (/tmp → /private/tmp) are
+// tolerated only when realpath resolves the target back onto the anchor, so
+// in-project symlink components are still caught on the lexical walk.
+async function hasNoSymlinkComponent(absolute: string, projectPath: string, home: string): Promise<boolean> {
+	let walkRoot = projectPath;
+	let walkTarget = absolute;
+	if (isOutsideProject(absolute, projectPath, projectPath)) {
+		const real = await realpathThroughExisting(absolute);
+		if (real && !isOutsideProject(real, projectPath, projectPath)) {
+			// Tolerate a macOS-style aliased prefix (/tmp → /private/tmp) only
+			// when the divergence sits above the project root: the lexical target
+			// must end with the project-relative real remainder. A differing tail
+			// means an in-project symlink component — denied.
+			const aliasTail = path.join(path.sep, path.relative(projectPath, real));
+			if (!absolute.endsWith(aliasTail)) return false;
+			walkTarget = real;
+		} else {
+			const realHome = (await realpathThroughExisting(home)) || home;
+			const underHome =
+				absolute === home ||
+				absolute.startsWith(`${home}${path.sep}`) ||
+				absolute === realHome ||
+				absolute.startsWith(`${realHome}${path.sep}`) ||
+				(!!real && (real === realHome || real.startsWith(`${realHome}${path.sep}`)));
+			if (!underHome) return false;
+			try {
+				walkRoot = await fs.realpath(realHome);
+			} catch {
+				return false;
+			}
+			if (real) walkTarget = real;
+		}
+	}
+	const relative = path.relative(walkRoot, walkTarget);
+	if (!relative) return true;
+	let current = walkRoot;
+	for (const part of relative.split(path.sep)) {
+		current = path.join(current, part);
+		try {
+			const st = await fs.lstat(current);
+			if (st.isSymbolicLink()) return false;
+		} catch {
+			// First missing component: nothing below it can exist yet.
+			return true;
+		}
+	}
+	return true;
+}
+
+async function passesSeatPathChecks(
+	absolute: string,
+	projectPath: string,
+	home: string,
+	gitDirs: string[],
+	opts: { allowManifest: boolean; manifestPath?: string },
+): Promise<boolean> {
+	let isManifest = false;
+	if (opts.allowManifest && opts.manifestPath) {
+		isManifest = absolute === opts.manifestPath;
+		if (!isManifest) {
+			const realManifest = await realpathThroughExisting(opts.manifestPath);
+			isManifest = !!realManifest && realManifest === absolute;
+		}
+	}
+	if (!isManifest && (await isProtectedPath(absolute, home, gitDirs))) return false;
+	return hasNoSymlinkComponent(absolute, projectPath, home);
+}
+
+// Spec A.2: deterministic write/edit allow. Returns the resolved absolute
+// target when the write is allowed, so the caller can arm the post-write
+// guard.
+async function seatAutoWriteAllowPath(
+	request: PermissionRequest,
+	projectPath: string,
+	cwd: string,
+	policy: PolicyFile,
+): Promise<string | undefined> {
+	if (request.key !== "writeFiles" || !request.targetPath) return undefined;
+	const home = os.homedir();
+	const manifestPath = seatManifestPath(policy);
+	const absolute = path.resolve(cwd, request.targetPath);
+	// Containment tolerates a macOS-style aliased prefix (/tmp → /private/tmp):
+	// the target counts as inside when its realpath resolves back into the
+	// project. In-project symlink components are still caught by the walk.
+	const real = await realpathThroughExisting(absolute);
+	const inProject = !isOutsideProject(absolute, projectPath, cwd) || (!!real && !isOutsideProject(real, projectPath, cwd));
+	// N3: the seat's exact manifest path is the ONE allowed write outside the
+	// project, and only here — never for shell redirects.
+	if (!inProject && absolute !== manifestPath) return undefined;
+	const gitDirs = await resolveGitEntryDirs(projectPath);
+	if (!(await passesSeatPathChecks(absolute, projectPath, home, gitDirs, { allowManifest: true, manifestPath }))) return undefined;
+	try {
+		const st = await fs.lstat(absolute);
+		// (b) an existing target must have exactly one link. Directories always
+		// carry nlink >= 2 and would fail the write anyway, so they are denied.
+		if (st.isSymbolicLink() || st.nlink !== 1) return undefined;
+	} catch {
+		// (d) new file: the nearest existing ancestor already passed the walk
+		// above (it stops at the first missing component after checking every
+		// existing one); nothing deeper exists yet.
+	}
+	return absolute;
+}
+
+type SegmentRedirect = { op: string; target: string };
+
+// Splits redirects out of a segment. Heredocs/here-strings and clobber
+// redirects are never auto-allowed (N4); stream dups (2>&1, >&2) are removed;
+// a remaining bare & is backgrounding (N4).
+function parseSegmentRedirects(segment: string): { bare: string; redirects: SegmentRedirect[]; forbidden: boolean } {
+	if (/<<|>\|/.test(segment)) return { bare: "", redirects: [], forbidden: true };
+	let rest = segment.replace(/\d*>\s*&\s*\d+\b/g, " ");
+	const redirects: SegmentRedirect[] = [];
+	rest = rest.replace(/(\d*)\s*(&>>|>>|&>|>&|>)\s*(\S*)/g, (_match, fd: string, op: string, target: string) => {
+		redirects.push({ op: (fd || "") + op, target });
+		return " ";
 	});
+	if (redirects.some((redirect) => !redirect.target)) return { bare: "", redirects, forbidden: true };
+	if (/&/.test(rest)) return { bare: "", redirects, forbidden: true };
+	return { bare: rest.replace(/\s+/g, " ").trim(), redirects, forbidden: false };
+}
+
+// Redirect targets may be /dev/null or a file inside the project that passes
+// the A.2 path checks. The manifest exception never extends to redirects.
+async function isRedirectTargetAllowed(
+	redirect: SegmentRedirect,
+	projectPath: string,
+	cwd: string,
+	home: string,
+	gitDirs: string[],
+): Promise<boolean> {
+	if (redirect.target === "/dev/null") return true;
+	const absolute = path.resolve(cwd, redirect.target);
+	if (isOutsideProject(absolute, projectPath, cwd)) return false;
+	return passesSeatPathChecks(absolute, projectPath, home, gitDirs, { allowManifest: false });
+}
+
+// Spec A.3 test-runner shapes. N5: the type-check shape is
+// ./node_modules/.bin/tsc --noEmit only, never npx. Test runners execute
+// seat-authored code as the operator; that is allowlisted on purpose and
+// documented as a residual risk.
+function isTestRunnerSegment(tokens: string[]): boolean {
+	const [first, second, third] = tokens;
+	if (first === "python3" && second === "-m" && (third === "unittest" || third === "pytest")) return true;
+	if (first === "sh" && tokens.length === 2 && /^tests\/.+\.sh$/.test(tokens[1])) return true;
+	if (first === "node" && second === "--test") return true;
+	if (first === "npm" && second === "test") return true;
+	if (
+		first === "./node_modules/.bin/tsc" &&
+		tokens.includes("--noEmit") &&
+		!tokens.some((token) => /^--(build|emit|emitDeclarationOnly|outDir|outFile|declaration|incremental)/.test(token))
+	)
+		return true;
+	if (first === "claude" && second === "plugin" && (third === "test" || third === "validate")) return true;
+	return false;
+}
+
+// Parses leading git global options. N2: -c/--config-env and the repo/config
+// redirecting options are denied outright; -C may only target the project.
+function parseGitSegment(
+	tokens: string[],
+	projectPath: string,
+	cwd: string,
+): { subcommand: string; args: string[] } | { denied: string } | undefined {
+	let i = 1;
+	for (; i < tokens.length; i++) {
+		const token = tokens[i];
+		if (token === "--") {
+			i++;
+			break;
+		}
+		if (!token.startsWith("-")) break;
+		if (/^-(?:c|config-env)$/.test(token) || /^--config-env/.test(token)) {
+			return { denied: "git -c/--config-env is not permitted without operator approval" };
+		}
+		if (/^(--git-dir|--work-tree|--exec-path|--namespace|--super-prefix)(=|$)/.test(token)) {
+			return { denied: "git global repo/config options are not permitted without operator approval" };
+		}
+		if (token === "-C" || /^-C[^-]/.test(token)) {
+			const target = token === "-C" ? tokens[i + 1] : token.slice(2);
+			if (!target || isOutsideProject(path.resolve(cwd, target), projectPath, cwd)) {
+				return { denied: "git -C outside the project is not permitted without operator approval" };
+			}
+			if (token === "-C") i++;
+			continue;
+		}
+	}
+	const subcommand = tokens[i];
+	if (!subcommand) return undefined;
+	return { subcommand, args: tokens.slice(i + 1) };
+}
+
+function isSeatGitCommitArgs(args: string[], projectPath: string, cwd: string): boolean {
+	if (args.length === 0) return false;
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (arg === "-m" || arg === "--message") {
+			if (i + 1 >= args.length) return false;
+			i++;
+			continue;
+		}
+		if (arg.startsWith("--message=")) continue;
+		if (arg === "-F" || arg === "--file") {
+			const target = args[i + 1];
+			if (!target || isOutsideProject(path.resolve(cwd, target), projectPath, cwd)) return false;
+			i++;
+			continue;
+		}
+		if (arg.startsWith("--file=")) {
+			const target = arg.slice("--file=".length);
+			if (!target || isOutsideProject(path.resolve(cwd, target), projectPath, cwd)) return false;
+			continue;
+		}
+		return false;
+	}
+	return true;
+}
+
+// In-project git shapes (spec A.3): status/diff/log/show/rev-parse free-form,
+// add with plain paths, commit with -m/-F only, branch --show-current only.
+function isInProjectGitSegment(tokens: string[], projectPath: string, cwd: string): boolean {
+	if (tokens[0] !== "git") return false;
+	const parsed = parseGitSegment(tokens, projectPath, cwd);
+	if (!parsed || "denied" in parsed) return false;
+	const { subcommand, args } = parsed;
+	if (SEAT_GIT_READ_SUBCOMMANDS.has(subcommand)) return true;
+	if (subcommand === "branch") return args.length === 1 && args[0] === "--show-current";
+	if (subcommand === "add") return args.length > 0 && args.every((arg) => !arg.startsWith("-") && arg !== "--");
+	if (subcommand === "commit") return isSeatGitCommitArgs(args, projectPath, cwd);
+	return false;
+}
+
+// The sed script argument (tokens[2]: sed -n SCRIPT FILES...) only looks like
+// an absolute path; it is validated by isSedPrintOnly instead.
+function withoutSedScript(bare: string): string {
+	const tokens = shellTokens(bare);
+	if (tokens[0] === "sed" && tokens[1] === "-n" && tokens.length > 2) {
+		return tokens.filter((_, index) => index !== 2).join(" ");
+	}
+	return bare;
+}
+
+async function isSeatAutoBashAllowed(command: string, projectPath: string, cwd: string, policy: PolicyFile): Promise<boolean> {
+	const segments = splitCommandSegments(command);
+	if (segments.length === 0) return false;
+	const home = os.homedir();
+	const gitDirs = await resolveGitEntryDirs(projectPath);
+	for (const segment of segments) {
+		const parsed = parseSegmentRedirects(segment);
+		if (parsed.forbidden || !parsed.bare) return false;
+		for (const redirect of parsed.redirects) {
+			if (!(await isRedirectTargetAllowed(redirect, projectPath, cwd, home, gitDirs))) return false;
+		}
+		const bare = parsed.bare;
+		// sed scripts (/re/p, s/.../p) are arguments, not paths: run the outside
+		// mention scan with the script argument excluded.
+		if (commandMentionsOutsideProject(withoutSedScript(bare), projectPath, cwd)) return false;
+		if (isReadOnlyShellSegment(bare)) continue;
+		const tokens = shellTokens(bare);
+		if (isTestRunnerSegment(tokens)) continue;
+		if (isInProjectGitSegment(tokens, projectPath, cwd)) continue;
+		return false;
+	}
+	return true;
+}
+
+// Spec A.1 hard-deny set beyond isYoloHardDenied: never reaches any allow path
+// in any mode; only the interactive dialog keystroke may let these through.
+async function seatHardDeniedReason(command: string, projectPath: string, cwd: string): Promise<string | undefined> {
+	if (/~/u.test(command)) return "shell ~ paths are not permitted without operator approval";
+	if (/\$\{?\s*HOME\s*\}?/.test(command)) return "$HOME is not permitted without operator approval";
+	if (/`|\$\(|<\(|>\(/.test(command)) return "command substitution is not permitted without operator approval";
+	const home = os.homedir();
+	const gitDirs = await resolveGitEntryDirs(projectPath);
+	for (const segment of splitCommandSegments(command)) {
+		const tokens = shellTokens(segment);
+		for (const token of tokens) {
+			const base = path.basename(token);
+			if (["ln", "link", "curl", "wget", "nc", "ssh", "scp", "rsync", "eval", "source"].includes(base)) {
+				return `"${base}" is not permitted without operator approval`;
+			}
+		}
+		for (let i = 0; i < tokens.length; i++) {
+			if (tokens[i].toLowerCase() !== "git") continue;
+			const parsed = parseGitSegment(tokens.slice(i), projectPath, cwd);
+			if (parsed && "denied" in parsed) return parsed.denied;
+			if (parsed && ["config", "push", "worktree", "remote", "submodule"].includes(parsed.subcommand)) {
+				return `git ${parsed.subcommand} is not permitted without operator approval`;
+			}
+		}
+		for (const token of tokens) {
+			if (token.startsWith("-")) continue;
+			const absolute = path.resolve(cwd, token);
+			if (await isProtectedPath(absolute, home, gitDirs)) {
+				return "paths into protected locations are not permitted without operator approval";
+			}
+		}
+	}
+	return undefined;
+}
+
+async function isSeatHardDenied(command: string, projectPath: string, cwd: string): Promise<string | undefined> {
+	return isYoloHardDenied(command, projectPath, cwd) || (await seatHardDeniedReason(command, projectPath, cwd));
+}
+
+async function armSeatWriteGuard(toolCallId: string, targetPath: string): Promise<void> {
+	// Normalize aliased prefixes (macOS /tmp → /private/tmp) so the post-write
+	// realpath comparison does not fail on the path's own spelling.
+	const guardPath = (await realpathThroughExisting(targetPath)) || targetPath;
+	let previous: Buffer | undefined;
+	try {
+		previous = await fs.readFile(guardPath);
+	} catch {
+		previous = undefined;
+	}
+	if (pendingSeatWrites.size >= PENDING_SEAT_WRITE_LIMIT) {
+		const oldest = pendingSeatWrites.keys().next().value;
+		if (oldest !== undefined) pendingSeatWrites.delete(oldest);
+	}
+	pendingSeatWrites.set(toolCallId, { path: guardPath, previous });
+}
+
+async function recordSeatViolation(violatedPath: string, note: string): Promise<void> {
+	try {
+		await fs.mkdir(path.dirname(SEAT_VIOLATIONS_PATH), { recursive: true });
+		await fs.appendFile(
+			SEAT_VIOLATIONS_PATH,
+			`${JSON.stringify({ ts: new Date().toISOString(), path: violatedPath, action: "reverted", note })}\n`,
+			"utf8",
+		);
+	} catch {
+		// Recording must never break the tool flow.
+	}
+}
+
+// Spec A.2 post-write verification: re-stat (realpath plus nlink) after the
+// tool ran; on mismatch, revert from the pre-write copy and record a
+// violation. The window between the write landing and this re-stat remains a
+// documented residual swap race.
+async function verifySeatWrite(
+	event: { toolCallId: string; toolName: string; isError?: boolean },
+	ctx: ExtensionContext,
+): Promise<void> {
+	const entry = pendingSeatWrites.get(event.toolCallId);
+	if (!entry) return;
+	pendingSeatWrites.delete(event.toolCallId);
+	if (event.isError) return;
+	let intact = false;
+	try {
+		const st = await fs.lstat(entry.path);
+		intact = !st.isSymbolicLink() && st.nlink === 1 && (await fs.realpath(entry.path)) === entry.path;
+	} catch {
+		intact = false;
+	}
+	if (intact) return;
+	let note: string;
+	try {
+		await fs.rm(entry.path, { force: true, recursive: true });
+		if (entry.previous) await fs.writeFile(entry.path, entry.previous);
+		note = entry.previous ? "reverted from pre-write copy" : "removed created file";
+	} catch (error) {
+		note = `revert failed: ${error instanceof Error ? error.message : String(error)}`;
+	}
+	await recordSeatViolation(entry.path, note);
+	if (ctx.hasUI) ctx.ui.notify(`seatAuto: post-write check failed for ${entry.path}; ${note}`, "warning");
 }
 
 function commandMentionsOutsideProject(command: string, projectPath: string, cwd: string): boolean {
@@ -477,17 +1057,40 @@ function emitPermissionDialogBlocked(active: boolean, label?: string) {
 	}
 }
 
-async function ensurePermission(ctx: ExtensionContext, projectPath: string, request: PermissionRequest): Promise<boolean> {
+async function ensurePermission(
+	ctx: ExtensionContext,
+	projectPath: string,
+	request: PermissionRequest,
+	opts: { userBash?: boolean } = {},
+): Promise<PermissionDecision> {
 	const policy = await loadPolicy(projectPath);
+	const userBash = opts.userBash === true;
+
+	// Spec A.1: hard-deny categories never reach any allow path in any mode.
+	// Only the interactive dialog keystroke may let them through; stored
+	// session/project grants are not operator actions (N6). Operator-typed !
+	// commands keep today's flow and skip this gate (N6).
+	if (!userBash && request.command) {
+		const hardDenyReason = await isSeatHardDenied(request.command, projectPath, projectPath);
+		if (hardDenyReason) {
+			if (policy.mode === "yolo") {
+				// YOLO denies outright and never shows a dialog.
+				if (ctx.hasUI) ctx.ui.notify(hardDenyReason, "warning");
+				return { allowed: false };
+			}
+			return promptForPermission(ctx, projectPath, request, policy);
+		}
+	}
+
 	if (policy.mode === "yolo") {
 		if (request.command) {
 			const hardDenyReason = isYoloHardDenied(request.command, projectPath, ctx.cwd);
 			if (hardDenyReason) {
 				if (ctx.hasUI) ctx.ui.notify(hardDenyReason, "warning");
-				return false;
+				return { allowed: false };
 			}
 		}
-		return true;
+		return { allowed: true };
 	}
 
 	const promptShieldStrict = await isPromptShieldStrict();
@@ -495,25 +1098,45 @@ async function ensurePermission(ctx: ExtensionContext, projectPath: string, requ
 
 	if (!sensitiveUnderShield) {
 		const sessionDecision = SESSION_PERMISSIONS.get(projectPath)?.[request.key];
-		if (sessionDecision) return sessionDecision === "allow";
+		if (sessionDecision) return { allowed: sessionDecision === "allow" };
 	}
 
 	if (!sensitiveUnderShield) {
 		const projectDecision = policy.permissions[request.key];
-		if (projectDecision) return projectDecision === "allow";
+		if (projectDecision) return { allowed: projectDecision === "allow" };
 
 		if (policy.mode === "readOnlyAuto" && isReadOnlyAutoAllowed(request, projectPath, ctx.cwd)) {
-			return true;
+			return { allowed: true };
+		}
+
+		if (policy.mode === "seatAuto" && !userBash && isSeatAutoActive(policy)) {
+			// projectPath is the realpath of ctx.cwd, so it is also the correct
+			// base for resolving seat request paths (macOS /tmp → /private/tmp).
+			const seatWritePath = await seatAutoWriteAllowPath(request, projectPath, projectPath, policy);
+			if (seatWritePath) return { allowed: true, seatAutoWrite: { path: seatWritePath } };
+			if (request.command && SEAT_BASH_KEYS.includes(request.key) && (await isSeatAutoBashAllowed(request.command, projectPath, projectPath, policy))) {
+				return { allowed: true };
+			}
 		}
 
 		if (policy.mode === "llmAuto" && request.command) {
 			const safe = await evaluateCommandWithLlm(ctx, request.command, projectPath);
-			if (safe === true) return true;
+			if (safe === true) return { allowed: true };
 		}
 	}
 
+	return promptForPermission(ctx, projectPath, request, policy, sensitiveUnderShield);
+}
+
+async function promptForPermission(
+	ctx: ExtensionContext,
+	projectPath: string,
+	request: PermissionRequest,
+	policy: PolicyFile,
+	shieldBypassed = false,
+): Promise<PermissionDecision> {
 	if (!ctx.hasUI) {
-		return false;
+		return { allowed: false };
 	}
 
 	// Report the open modal to herdr and ALWAYS clear it, even if the dialog
@@ -527,7 +1150,7 @@ async function ensurePermission(ctx: ExtensionContext, projectPath: string, requ
 				"",
 				`Project: ${projectPath}`,
 				request.detail,
-				...(sensitiveUnderShield ? ["", "Prompt Shield has active unapproved risk, so automatic/project grants are bypassed for this sensitive action."] : []),
+				...(shieldBypassed ? ["", "Prompt Shield has active unapproved risk, so automatic/project grants are bypassed for this sensitive action."] : []),
 				"",
 				"How should Pi handle this permission?",
 			].join("\n"),
@@ -544,12 +1167,12 @@ async function ensurePermission(ctx: ExtensionContext, projectPath: string, requ
 		emitPermissionDialogBlocked(false);
 	}
 
-	if (choice === "Allow once") return true;
-	if (choice === "Deny once" || !choice) return false;
+	if (choice === "Allow once") return { allowed: true };
+	if (choice === "Deny once" || !choice) return { allowed: false };
 
 	if (choice === "Allow for current session" || choice === "Deny for current session") {
 		setSessionDecision(projectPath, request.key, choice.startsWith("Allow") ? "allow" : "deny");
-		return choice.startsWith("Allow");
+		return { allowed: choice.startsWith("Allow") };
 	}
 
 	if (choice === "Allow permanently for this project" || choice === "Deny permanently for this project") {
@@ -557,10 +1180,10 @@ async function ensurePermission(ctx: ExtensionContext, projectPath: string, requ
 		policy.permissions[request.key] = decision;
 		policy.updatedAt = new Date().toISOString();
 		await savePolicy(projectPath, policy);
-		return decision === "allow";
+		return { allowed: decision === "allow" };
 	}
 
-	return false;
+	return { allowed: false };
 }
 
 function setSessionDecision(projectPath: string, key: PermissionKey, decision: Decision) {
@@ -602,6 +1225,7 @@ async function confirmYoloMode(ctx: ExtensionContext): Promise<boolean> {
 function modeShortLabel(mode: PermissionMode): string {
 	if (mode === "readOnlyAuto") return "read-only";
 	if (mode === "llmAuto") return "auto";
+	if (mode === "seatAuto") return "seat-auto";
 	if (mode === "yolo") return "yolo";
 	return "ask";
 }
@@ -617,6 +1241,7 @@ function parseMode(mode: string): PermissionMode | undefined {
 	if (mode === "ask" || mode === "manual") return "ask";
 	if (mode === "read-only" || mode === "readonly" || mode === "readOnlyAuto".toLowerCase()) return "readOnlyAuto";
 	if (mode === "auto" || mode === "llm" || mode === "llm-auto" || mode === "automatic") return "llmAuto";
+	if (mode === "seat-auto" || mode === "seatauto") return "seatAuto";
 	if (mode === "yolo" || mode === "unsafe" || mode === "dangerous") return "yolo";
 	return undefined;
 }
@@ -625,7 +1250,11 @@ async function loadPolicy(projectPath: string): Promise<PolicyFile> {
 	try {
 		const text = await fs.readFile(policyPath(projectPath), "utf8");
 		const parsed = JSON.parse(text) as PolicyFile;
+		// Spec A.5: fields pi does not know about (the seat block, hd
+		// bookkeeping) must survive every load/save round trip verbatim, so the
+		// parsed object is spread and only managed fields are normalised.
 		return {
+			...parsed,
 			projectPath,
 			updatedAt: parsed.updatedAt || new Date().toISOString(),
 			mode: parsed.mode || "ask",
@@ -638,7 +1267,9 @@ async function loadPolicy(projectPath: string): Promise<PolicyFile> {
 
 async function savePolicy(projectPath: string, policy: PolicyFile) {
 	await fs.mkdir(POLICY_DIR, { recursive: true });
-	await fs.writeFile(policyPath(projectPath), `${JSON.stringify(policy, null, "\t")}\n`, "utf8");
+	const { schemaVersion, ...rest } = policy;
+	const output = { schemaVersion: schemaVersion ?? 2, ...rest };
+	await fs.writeFile(policyPath(projectPath), `${JSON.stringify(output, null, "\t")}\n`, "utf8");
 }
 
 async function deletePolicy(projectPath: string) {

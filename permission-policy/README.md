@@ -55,7 +55,35 @@ Use the current LLM to classify bash/git commands. Commands classified as `SAFE`
 
 Dangerous YOLO mode. Automatically allows permission requests by default, including bash/git/web/write/outside-read/MCP categories, without prompting. The extension still hard-blocks `rm -f`/`rm -rf` style commands and commands that appear to delete the repository or its `.git` metadata.
 
+The seatAuto hard-deny categories below (git config/push/worktree/remote/submodule, `ln`/`link`, command substitution, `~`/`$HOME`, network verbs, protected paths) are also hard-denied in YOLO mode, without a dialog.
+
 When enabling YOLO mode, Pi shows an explicit warning and confirmation prompt. Use YOLO only in disposable or fully trusted workspaces.
+
+```text
+/permissions mode seat-auto
+```
+
+Deterministic seat mode for delegated agents (installed by herdr-driver's `hd start --kind pi --approve`, which writes the policy file with a `seat` block; pi treats seatAuto with a missing or expired `seat.expiresAt` as ask). No LLM decides any allow in this mode. Everything that does not match the shapes below falls through to the normal permission prompt — under herdr, `hd watch` reports the pane as `blocked` and wakes the orchestrator, which decides.
+
+What seatAuto auto-allows, and only after a hard-deny check (see below):
+
+- Write/edit tools: targets inside the project that pass a component-wise lstat walk from the project root (no symlink components), where an existing target has exactly one link (`st_nlink == 1`, so hardlinked files are refused), that are not the `.git` entry (file or dir, including the worktree git-dir and common dir) or a protected path, and where a new file's nearest existing ancestor passes the same checks. After every seat write, pi re-stats the target (realpath plus nlink); on mismatch it reverts from a pre-write copy and records a violation in `~/.pi/agent/permission-policy/seat-violations.jsonl`. The window between the write landing and the re-stat remains a residual swap race.
+- Bash: only when every `;`, `&&`, `||`, `|`, and newline-separated segment matches an allowed shape:
+  - read-only commands in strict shapes: `find` without `-delete`/`-exec`/`-execdir`/`-ok`/`-okdir`/`-fprint*`/`-fls`; `sed` only `-n` with a print script (never `-i` or a `w` command); `awk` and `xargs` are never read-only; when unsure, not read-only;
+  - test runners: `python3 -m unittest|pytest`, `sh tests/*.sh`, `node --test`, `npm test`, `./node_modules/.bin/tsc --noEmit` (never `npx`), `claude plugin test|validate`;
+  - in-project git: `status`, `diff`, `log`, `show`, `rev-parse`, `add <paths>`, `commit -m/-F`, `branch --show-current`;
+  - redirects only to `/dev/null`, stream dups (`2>&1`), or a file inside the project that passes the write checks above.
+
+Hard-deny categories never reach any allow path in any mode — only the interactive dialog keystroke can let them through (stored session or project grants are not operator actions):
+
+- the YOLO hard-deny patterns (`rm -f`/`rm -rf`, repository deletion);
+- `ln`/`link`, `git config` (any key), `git push`, `git worktree`, `git remote`, `git submodule`;
+- git global options `-c`/`--config-env`/`--git-dir`/`--work-tree`/`--exec-path`/`--namespace`, and `-C` targeting a path outside the project;
+- command substitution/backticks/process substitution, `eval`, `source`, `~` or `$HOME`;
+- network verbs `curl`, `wget`, `nc`, `ssh`, `scp`, `rsync`;
+- any path resolving into `~/.pi/agent/permission-policy`, `~/.ssh`, `~/.config`, `~/.aws`, `~/.gnupg`, the herdr-driver cache — except the seat's exact `seat.manifestPath`, which write/edit tools may write with the same link checks.
+
+Residual risks, accepted by design: test runners execute seat-authored code as the operator (they are allowlisted on purpose); in-project shell redirects and writes can modify any project file that passes the link checks; and the post-write swap race described above. Operator-typed `!` commands are not subject to seatAuto allows and keep their normal behaviour.
 
 ## Prompt Shield integration
 
@@ -83,6 +111,8 @@ Persistent policy files are stored outside the repo under:
 ~/.pi/agent/permission-policy/projects/<project-path-hash>.json
 ```
 
+Policy files carry `schemaVersion: 2`. Fields the extension does not know about (the herdr-driver `seat` block, vendor bookkeeping) are preserved verbatim on every save. Seat post-write violations are appended to `~/.pi/agent/permission-policy/seat-violations.jsonl`.
+
 Session grants are kept only in memory.
 
 ## Install
@@ -104,6 +134,7 @@ The extension shows the current mode in Pi's status/footer line:
 │ permission: ask
 │ permission: read-only
 │ permission: auto
+│ permission: seat-auto
 │ permission: yolo
 ```
 
@@ -118,6 +149,8 @@ Pressing `ctrl+shift+m` cycles modes in this order:
 ```text
 ask -> read-only -> auto -> yolo -> ask
 ```
+
+`seat-auto` is not part of the interactive cycle; set it via herdr-driver or `/permissions mode seat-auto`.
 
 Pi's default `shift+tab` binding remains available for thinking level cycling.
 
@@ -136,7 +169,7 @@ Shows the mode plus persistent and current-session permissions for the current p
 Clears persistent and current-session permissions for the current project.
 
 ```text
-/permissions mode ask|read-only|auto|yolo
+/permissions mode ask|read-only|auto|seat-auto|yolo
 ```
 
 Sets the current project's permission mode and updates the status line. Setting `yolo` requires confirmation and shows a danger warning.
@@ -144,10 +177,10 @@ Sets the current project's permission mode and updates the status line. Setting 
 ### CLI Flag
 
 ```bash
-pi --permission-mode ask|read-only|auto|yolo
+pi --permission-mode ask|read-only|auto|seat-auto|yolo
 ```
 
-Set the permission mode from the command line at startup. The mode is persisted to the project policy file, same as `/permissions mode`. Accepts the same value aliases (`ask`/`manual`, `read-only`/`readonly`/`readonlyauto`, `auto`/`llm`/`llm-auto`/`automatic`, `yolo`/`unsafe`/`dangerous`). Invalid values are fail-closed: the policy is explicitly reset to `ask`.
+Set the permission mode from the command line at startup. The mode is persisted to the project policy file, same as `/permissions mode`. Accepts the same value aliases (`ask`/`manual`, `read-only`/`readonly`/`readonlyauto`, `auto`/`llm`/`llm-auto`/`automatic`, `seat-auto`/`seatauto`, `yolo`/`unsafe`/`dangerous`). Invalid values are fail-closed: the policy is explicitly reset to `ask`.
 
 ```bash
 # Examples
@@ -167,6 +200,20 @@ permission-policy/test-fixtures/run-all-tests.sh
 ```
 
 Runs classification unit tests covering destructive detection, git detection, read-only command classification, outside-project detection, tool classification, read-only auto allowance logic, YOLO hard-deny negative/adversarial scenarios, and parseMode for CLI flag values.
+
+seatAuto unit tests (spec Phase 1 + v3 amendments):
+
+```bash
+npx --yes tsx permission-policy/test-fixtures/test-seat-auto.ts
+```
+
+Loads the real extension with a throwaway `HOME` (never touches the real `~/.pi`) and drives write/edit/bash/user_bash flows: the adversarial table (hardlinks, symlink components, the worktree `.git` file, `git -c core.hooksPath`, `$(...)`, curl in a pipe, `find -delete`, `sed -i`, redirects into `~/`, newline-joined commands, heredocs, `tee`, `npx tsc`), expired/missing seat blocks, the manifestPath exception, post-write revert wiring, and unknown-field preservation across mode toggles and "Allow permanently" saves.
+
+herdr:blocked dialog-reporting unit tests:
+
+```bash
+npx --yes tsx permission-policy/test-fixtures/test-herdr-blocked.ts
+```
 
 End-to-end scenarios verified against a live Pi instance:
 

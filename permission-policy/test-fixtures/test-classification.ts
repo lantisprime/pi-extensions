@@ -17,19 +17,16 @@ const PERMISSION_LABELS: Record<string, string> = {
 
 const WEB_TOOL_NAMES = new Set(["web_search", "search_web", "web", "browser", "fetch", "http_get"]);
 
-const readOnlyCommands = new Set([
-	"pwd", "ls", "find", "grep", "rg", "cat", "head", "tail", "wc",
-	"sort", "uniq", "awk", "sed", "file", "stat", "du", "df",
-	"echo", "printf", "which", "command", "test",
-]);
-
 function looksLikeGitCommand(command: string): boolean {
 	return /\bgit\b/i.test(command);
 }
 
 function looksDestructive(command: string): boolean {
 	const destructiveCommand = /(^|[;&|()\s])(rm|mv|cp|unlink|rmdir|chmod|chown|install|truncate)\s+/i.test(command);
-	const overwriteRedirect = /(^|\s)(\d?>|&>|tee\s+)(?!>)/i.test(command);
+	// Stream dups (2>&1, >&2) and /dev/null discard output instead of overwriting
+	// a file, and >> appends; none of those are overwrite redirects (spec A.4).
+	// Everything else with an overwrite-style redirect or tee into a file is.
+	const overwriteRedirect = /(^|\s)(?:\d*&?>|\d?>|tee\s+)(?!>|\s*\/dev\/null\b|\s*&\s*\d+\b)/i.test(command);
 	const inPlaceEdit = /(^|[;&|()\s])(sed|perl|python|node|ruby)\s+.*\s(-i|--in-place)\b/i.test(command);
 	return destructiveCommand || overwriteRedirect || inPlaceEdit;
 }
@@ -72,14 +69,81 @@ function extractRmLikeTargets(command: string): string[] {
 	return targets;
 }
 
+function splitCommandSegments(command: string): string[] {
+	// Newline is a command separator too (spec N4); a smuggled second line must
+	// never inherit the first line's shape.
+	return command
+		.split(/\s*(?:\r?\n|&&|\|\||;|\|)\s*/)
+		.map((segment) => segment.trim())
+		.filter(Boolean);
+}
+
+function shellTokens(segment: string): string[] {
+	return (segment.match(/(?:"[^"]+"|'[^']+'|\S+)/g) || []).map((token) => token.replace(/^['"]|['"]$/g, ""));
+}
+
+// Strict read-only shapes (spec N1): find may not delete/execute/print-to-file,
+// sed is only -n with a print script, awk and xargs are not read-only. When
+// unsure, NOT read-only.
+const SIMPLE_READONLY_COMMANDS = new Set([
+	"pwd", "ls", "grep", "rg", "cat", "head", "tail", "wc",
+	"sort", "uniq", "file", "stat", "du", "df",
+	"echo", "printf", "which", "command", "test",
+]);
+
+function isFindReadOnly(args: string[]): boolean {
+	return !args.some((arg) => /^-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)$/.test(arg));
+}
+
+function isPrintOnlySedSubstitute(part: string): boolean {
+	if (part.length < 2) return false;
+	const delimiter = part[1];
+	const body = part.slice(2).split(`\\${delimiter}`).join("\u0000");
+	const pieces = body.split(delimiter);
+	if (pieces.length < 2 || pieces.length > 3) return false;
+	// s/// flags: g, p, case/match flags and occurrence numbers are fine; the
+	// w (write-to-file) and e (execute) flags are not.
+	return !/[^gpIiMm0-9]/.test(pieces[2] || "");
+}
+
+function isPrintOnlySedScript(script: string): boolean {
+	return script
+		.split(";")
+		.map((part) => part.trim())
+		.every((part) => {
+			if (!part) return false;
+			if (/^(?:\/[^/]+\/|\$|\d+)(?:,(?:\/[^/]+\/|\$|\d+))?p$/.test(part)) return true;
+			return part.startsWith("s") && isPrintOnlySedSubstitute(part);
+		});
+}
+
+function isSedPrintOnly(args: string[]): boolean {
+	let sawN = false;
+	const scriptArgs: string[] = [];
+	for (const arg of args) {
+		if (arg === "-n") {
+			sawN = true;
+			continue;
+		}
+		if (arg.startsWith("-")) return false; // -i, -e, -f, ...: unsure → not read-only
+		scriptArgs.push(arg);
+	}
+	if (!sawN || scriptArgs.length === 0) return false;
+	return isPrintOnlySedScript(scriptArgs[0]);
+}
+
+function isReadOnlyShellSegment(segment: string): boolean {
+	const tokens = shellTokens(segment);
+	const first = tokens[0];
+	if (!first) return false;
+	if (first === "find") return isFindReadOnly(tokens.slice(1));
+	if (first === "sed") return isSedPrintOnly(tokens.slice(1));
+	return SIMPLE_READONLY_COMMANDS.has(first);
+}
+
 function isReadOnlyShellCommand(command: string): boolean {
 	if (/[;&]\s*(rm|mv|cp|chmod|chown|install|truncate|touch|mkdir|rmdir)\b/i.test(command)) return false;
-	const normalized = command.replace(/\s+/g, " ").trim();
-	const segments = normalized.split(/\s*(?:&&|\|\||\|)\s*/);
-	return segments.every((segment) => {
-		const first = segment.trim().match(/^([A-Za-z0-9_.-]+)/)?.[1];
-		return !!first && readOnlyCommands.has(first) && !/\s(-i|--in-place)\b/.test(segment);
-	});
+	return splitCommandSegments(command).every(isReadOnlyShellSegment);
 }
 
 function isReadOnlyGitCommand(command: string): boolean {
@@ -168,6 +232,12 @@ check("unlink is destructive", looksDestructive("unlink x"), true);
 check("rmdir is destructive", looksDestructive("rmdir x"), true);
 check("overwrite redirect is destructive", looksDestructive("echo x > y"), true);
 check("tee is destructive", looksDestructive("echo x | tee y"), true);
+check("2>&1 is not an overwrite redirect (A.4)", looksDestructive("npm test 2>&1"), false);
+check(">&2 is not an overwrite redirect (A.4)", looksDestructive("npm test >&2"), false);
+check(">/dev/null is not an overwrite redirect (A.4)", looksDestructive("npm test > /dev/null"), false);
+check("2>/dev/null is not an overwrite redirect (A.4)", looksDestructive("npm test 2> /dev/null"), false);
+check("&>file is an overwrite redirect", looksDestructive("npm test &> out.txt"), true);
+check(">| is an overwrite redirect", looksDestructive("echo x >| out.txt"), true);
 check("append redirect is not destructive", looksDestructive("echo x >> y"), false);
 // The in-place-edit regex requires text between the command name and the flag.
 // When -i/--in-place is the first argument, the greedy .* consumes it and 
@@ -195,13 +265,21 @@ check("pwd is read-only", isReadOnlyShellCommand("pwd"), true);
 check("ls is read-only", isReadOnlyShellCommand("ls -la"), true);
 check("cat is read-only", isReadOnlyShellCommand("cat file"), true);
 check("grep is read-only", isReadOnlyShellCommand("grep pattern file"), true);
-check("find is read-only", isReadOnlyShellCommand("find . -name '*.ts'"), true);
+check("find is read-only (strict shape)", isReadOnlyShellCommand("find . -name '*.ts'"), true);
+check("find -delete is not read-only (N1)", isReadOnlyShellCommand("find . -name '*.ts' -delete"), false);
+check("find -exec is not read-only (N1)", isReadOnlyShellCommand("find . -exec rm {} +"), false);
+check("find -fprint is not read-only (N1)", isReadOnlyShellCommand("find . -fprint out.txt"), false);
 check("wc is read-only", isReadOnlyShellCommand("wc -l file"), true);
 check("head is read-only", isReadOnlyShellCommand("head -20 file"), true);
 check("tail is read-only", isReadOnlyShellCommand("tail -f file"), true);
 check("sort is read-only", isReadOnlyShellCommand("sort file"), true);
-check("awk is read-only", isReadOnlyShellCommand("awk '{print $1}' file"), true);
-check("sed is read-only (no -i)", isReadOnlyShellCommand("sed 's/a/b/' file"), true);
+check("awk is not read-only (N1)", isReadOnlyShellCommand("awk '{print $1}' file"), false);
+check("xargs is not read-only (N1)", isReadOnlyShellCommand("ls | xargs cat"), false);
+check("sed -n with a print script is read-only (N1)", isReadOnlyShellCommand("sed -n '10,20p' file"), true);
+check("sed -n with an address print is read-only (N1)", isReadOnlyShellCommand("sed -n '/error/p' log"), true);
+check("sed without -n is not read-only (N1)", isReadOnlyShellCommand("sed 's/a/b/' file"), false);
+check("sed -n with a w command is not read-only (N1)", isReadOnlyShellCommand("sed -n 's/a/b/w out.txt' file"), false);
+check("sed -i is not read-only (N1)", isReadOnlyShellCommand("sed -i 's/a/b/' file"), false);
 check("echo is read-only", isReadOnlyShellCommand("echo hello"), true);
 check("which is read-only", isReadOnlyShellCommand("which node"), true);
 check("touch is not read-only", isReadOnlyShellCommand("touch file"), false);
@@ -210,6 +288,8 @@ check("npm install is not read-only", isReadOnlyShellCommand("npm install"), fal
 check("rm in chain makes not read-only", isReadOnlyShellCommand("ls && rm -f x"), false);
 check("chained read-only is read-only", isReadOnlyShellCommand("ls && cat file"), true);
 check("pipe with read-only is read-only", isReadOnlyShellCommand("cat file | grep pattern"), true);
+check("newline smuggles a second command (N4)", isReadOnlyShellCommand("ls\ntouch file"), false);
+check("newline-joined read-only stays read-only (N4)", isReadOnlyShellCommand("ls\nwc -l file"), true);
 
 // read-only git
 check("git status is read-only", isReadOnlyGitCommand("git status"), true);
@@ -230,6 +310,11 @@ check("chmod blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("chmod 777 x
 check("git status allowed in readOnlyAuto", isReadOnlyAutoAllowedForBash("git status", projectPath, cwd), true);
 check("git push blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("git push", projectPath, cwd), false);
 check("overwrite redirect blocked", isReadOnlyAutoAllowedForBash("echo x > y", projectPath, cwd), false);
+check("/dev/null is not an overwrite redirect (A.4)", looksDestructive("echo x > /dev/null"), false);
+check("echo with /dev/null redirect still blocked by the outside-mention gate in readOnlyAuto", isReadOnlyAutoAllowedForBash("echo x > /dev/null", projectPath, cwd), false);
+check("awk blocked in readOnlyAuto (N1)", isReadOnlyAutoAllowedForBash("awk '{print $1}' f", projectPath, cwd), false);
+check("sed -n print allowed in readOnlyAuto (N1)", isReadOnlyAutoAllowedForBash("sed -n '1p' f", projectPath, cwd), true);
+check("sed without -n blocked in readOnlyAuto (N1)", isReadOnlyAutoAllowedForBash("sed 's/a/b/' f", projectPath, cwd), false);
 
 // outside project detection
 check("/etc outside", isOutsideProject("/etc/passwd", projectPath, cwd), true);
@@ -299,12 +384,13 @@ check("YOLO blocks forced git worktree removal", isYoloHardDeniedBool("git workt
 check("YOLO allows non-forced git worktree removal by hard-deny scope", isYoloHardDeniedBool("git worktree remove ../project", projectPath, cwd), false);
 
 // parseMode (for CLI --permission-mode flag)
-type PermissionMode = "ask" | "readOnlyAuto" | "llmAuto" | "yolo";
+type PermissionMode = "ask" | "readOnlyAuto" | "llmAuto" | "seatAuto" | "yolo";
 
 function parseMode(mode: string): PermissionMode | undefined {
 	if (mode === "ask" || mode === "manual") return "ask";
 	if (mode === "read-only" || mode === "readonly" || mode === "readOnlyAuto".toLowerCase()) return "readOnlyAuto";
 	if (mode === "auto" || mode === "llm" || mode === "llm-auto" || mode === "automatic") return "llmAuto";
+	if (mode === "seat-auto" || mode === "seatauto") return "seatAuto";
 	if (mode === "yolo" || mode === "unsafe" || mode === "dangerous") return "yolo";
 	return undefined;
 }
@@ -322,6 +408,8 @@ check("parseMode automatic", parseMode("automatic"), "llmAuto");
 check("parseMode yolo", parseMode("yolo"), "yolo");
 check("parseMode unsafe", parseMode("unsafe"), "yolo");
 check("parseMode dangerous", parseMode("dangerous"), "yolo");
+check("parseMode seat-auto", parseMode("seat-auto"), "seatAuto");
+check("parseMode seatauto", parseMode("seatauto"), "seatAuto");
 check("parseMode invalid", parseMode("garbage"), undefined);
 check("parseMode empty", parseMode(""), undefined);
 
