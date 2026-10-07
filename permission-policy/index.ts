@@ -429,6 +429,9 @@ export function isReadOnlyAutoAllowed(request: PermissionRequest, projectPath: s
 	if (request.key === "readOutsideProject" || request.key === "writeFiles" || request.key === "destructiveBash" || request.key === "web") {
 		return false;
 	}
+	// R3: the same "checked text is what runs" guards as seatAuto.
+	if (!hasTriviallyModelledQuotes(request.command)) return false;
+	if (containsUnquotedDollar(request.command) || containsUnquotedBackslash(request.command)) return false;
 	if (commandMentionsOutsideProject(request.command, projectPath, cwd)) return false;
 	if (looksDestructive(request.command)) return false;
 	if (request.key === "git") return isReadOnlyGitCommand(request.command);
@@ -523,7 +526,8 @@ function isUniqReadOnly(args: string[]): boolean {
 
 // `file -C/--compile` compiles a magic file to disk.
 function isFileReadOnly(args: string[]): boolean {
-	return !args.some((arg) => /^-[A-Za-z]*C/.test(arg) || /^--compile/.test(arg));
+	// R3: -f/--files-from reads the paths to inspect from a file the scan never sees.
+	return !args.some((arg) => /^-[A-Za-z]*[Cf]/.test(arg) || /^--(compile|files-from)/.test(arg));
 }
 
 // `wc --files0-from=FILE` / `du --files0-from=FILE` read the input list from
@@ -868,8 +872,13 @@ function isTestRunnerSegment(tokens: string[]): boolean {
 	const [first, second, third] = tokens;
 	if (first === "python3" && second === "-m" && (third === "unittest" || third === "pytest")) return true;
 	// A7: every argument must be a tests/<name>.sh path.
-	if (first === "sh" && tokens.length >= 2 && tokens.slice(1).every((token) => /^tests\/.+\.sh$/.test(token))) return true;
-	if (first === "node" && second === "--test") return true;
+	if (
+		first === "sh" &&
+		tokens.length >= 2 &&
+		tokens.slice(1).every((token) => /^tests\/.+\.sh$/.test(token) && !token.split("/").some((part) => part === "." || part === ".."))
+	)
+		return true;
+	if (first === "node" && second === "--test" && !tokens.some((token) => /^(-e|-p|--eval|--print)(=|$)/.test(token))) return true;
 	if (first === "npm" && second === "test") return true;
 	if (
 		first === "./node_modules/.bin/tsc" &&
@@ -980,6 +989,14 @@ function containsUnquotedDollar(segment: string): boolean {
 	return segment.replace(/'[^']*'/g, " ").includes("$");
 }
 
+// R3: bash removes an unquoted backslash (and some inside double quotes)
+// before running, while path.resolve keeps it: `cat ..\/.ssh\/id_rsa` and
+// `> \/abs` were checked as in-project names. Any backslash outside single
+// quotes means the checked text is not what will run — fail closed.
+function containsUnquotedBackslash(segment: string): boolean {
+	return segment.replace(/'[^']*'/g, " ").includes("\\");
+}
+
 // B3/R2: quoting must be trivially modelled. Every token is either unquoted
 // or exactly one quote pair wrapping the whole token ('a b', "x # y") flanked
 // by whitespace. Internal quotes ("x'$PWD/..'y" — the case
@@ -1021,6 +1038,7 @@ async function isSeatAutoBashAllowed(command: string, projectPath: string, cwd: 
 		// B4: reject any segment with an unquoted `$` — redirect targets and
 		// path-bearing tokens would be checked literally but expanded by bash.
 		if (containsUnquotedDollar(segment)) return false;
+		if (containsUnquotedBackslash(segment)) return false;
 		const parsed = parseSegmentRedirects(segment);
 		if (parsed.forbidden || !parsed.bare) return false;
 		for (const redirect of parsed.redirects) {

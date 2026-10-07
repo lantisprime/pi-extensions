@@ -228,6 +228,11 @@ check("pwd allowed in readOnlyAuto", isReadOnlyAutoAllowedForBash("pwd", project
 check("ls allowed in readOnlyAuto", isReadOnlyAutoAllowedForBash("ls -la", projectPath, cwd), true);
 check("touch blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("touch x", projectPath, cwd), false);
 check("rm blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("rm x", projectPath, cwd), false);
+// R3: readOnlyAuto checks only text bash will run as written
+check("backslash path blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("cat \\/etc/passwd", projectPath, cwd), false);
+check("unquoted $ blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("cat $TMPDIR/x", projectPath, cwd), false);
+check("glued quotes blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash('cat "a"b', projectPath, cwd), false);
+check("single-quoted backslash allowed in readOnlyAuto", isReadOnlyAutoAllowedForBash("grep 'x\\.y' f.txt", projectPath, cwd), true);
 check("chmod blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("chmod 777 x", projectPath, cwd), false);
 check("git status allowed in readOnlyAuto", isReadOnlyAutoAllowedForBash("git status", projectPath, cwd), true);
 check("git push blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("git push", projectPath, cwd), false);

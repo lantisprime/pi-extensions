@@ -515,6 +515,29 @@ async function runSuite(stubDir: string): Promise<void> {
 		await expectAllowed(harness, ctx, "bash", { command: "git -C sub status" });
 	});
 
+	await check("backslash escapes never reach a path check (R3)", async () => {
+		const ctx = makeCtx(wtProject);
+		await expectDialog(harness, ctx, "bash", { command: "cat ..\\/.ssh\\/id_rsa" });
+		await expectDialog(harness, ctx, "bash", { command: "cat \\/etc/passwd" });
+		await expectDialog(harness, ctx, "bash", { command: "echo x >> \\/tmp/seatauto-r3-evil" });
+		await expectDialog(harness, ctx, "bash", { command: "git -C ..\\/.. status" });
+		await expectDialog(harness, ctx, "bash", { command: "cat \"a\\b\"" });
+		// a backslash inside single quotes is literal to bash too
+		await expectAllowed(harness, ctx, "bash", { command: "grep 'x\\.y' README.md" });
+	});
+
+	await check("file -f, dotted sh tests/ paths and node --test -e ask (R3)", async () => {
+		const ctx = makeCtx(wtProject);
+		await expectDialog(harness, ctx, "bash", { command: "file -f list.txt" });
+		await expectDialog(harness, ctx, "bash", { command: "file --files-from=list.txt" });
+		await expectDialog(harness, ctx, "bash", { command: "sh tests/../evil.sh" });
+		await expectDialog(harness, ctx, "bash", { command: "sh tests/./x.sh" });
+		await expectDialog(harness, ctx, "bash", { command: "node --test -e 1" });
+		await expectDialog(harness, ctx, "bash", { command: "node --test --eval=1" });
+		await expectAllowed(harness, ctx, "bash", { command: "file README.md" });
+		await expectAllowed(harness, ctx, "bash", { command: "sh tests/a.sh" });
+	});
+
 	await check("git global options are an allowlist: -C/--no-pager only (B5a)", async () => {
 		const ctx = makeCtx(wtProject);
 		await expectDialog(harness, ctx, "bash", { command: "git --pager=sh log" });
