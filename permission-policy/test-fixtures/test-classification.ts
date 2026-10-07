@@ -93,8 +93,15 @@ async function main() {
 
 	// Minimal stub for index.ts's runtime import of @earendil-works/pi-ai.
 	// A6: removed again in the finally below, but only when this run created
-	// it, so a pre-existing install is never clobbered.
+	// it, so a pre-existing install is never clobbered. A3/R2: if a stub (or a
+	// real install) is already present, fail instead of overwriting it.
 	const stubDir = path.join(REPO_ROOT, "node_modules", "@earendil-works", "pi-ai");
+	if (existsSync(stubDir)) {
+		console.error(
+			`refusing to run: ${stubDir} already exists — remove the @earendil-works/pi-ai stub from node_modules first (A3: the suites never overwrite an existing install)`,
+		);
+		process.exit(1);
+	}
 	const createdStub = !existsSync(stubDir);
 	try {
 		mkdirSync(stubDir, { recursive: true });
@@ -174,6 +181,20 @@ check("wc is read-only", isReadOnlyShellCommand("wc -l file"), true);
 check("head is read-only", isReadOnlyShellCommand("head -20 file"), true);
 check("tail is read-only", isReadOnlyShellCommand("tail -f file"), true);
 check("sort is read-only", isReadOnlyShellCommand("sort file"), true);
+// B1/R2: strict shapes for members with write/exec argument forms.
+check("sort -o writes OUT, not read-only (B1/R2)", isReadOnlyShellCommand("sort -o out.txt in.txt"), false);
+check("sort --output= is not read-only (B1/R2)", isReadOnlyShellCommand("sort --output=x in.txt"), false);
+check("sort --output==x is not read-only (B1/R2)", isReadOnlyShellCommand("sort --output==x in.txt"), false);
+check("sort short cluster containing o (-no) is not read-only (B1/R2)", isReadOnlyShellCommand("sort -no in.txt"), false);
+check("sort --compress-program executes, not read-only (B1/R2)", isReadOnlyShellCommand("sort --compress-program=gzip in.txt"), false);
+check("sort with benign flags stays read-only (B1/R2)", isReadOnlyShellCommand("sort -rn -k2 in.txt"), true);
+check("uniq IN OUT writes OUT, not read-only (B1/R2)", isReadOnlyShellCommand("uniq in.txt out.txt"), false);
+check("uniq with a single input stays read-only (B1/R2)", isReadOnlyShellCommand("uniq -c in.txt"), true);
+check("wc --files0-from is not read-only (B1/R2)", isReadOnlyShellCommand("wc --files0-from=list.txt"), false);
+check("du --files0-from is not read-only (B1/R2)", isReadOnlyShellCommand("du --files0-from=list.txt"), false);
+check("file -C compiles a magic file, not read-only (B1/R2)", isReadOnlyShellCommand("file -C"), false);
+check("rg --pre executes CMD, not read-only (B1/R2)", isReadOnlyShellCommand("rg --pre=./evil.sh pat f"), false);
+check("rg search stays read-only (B1/R2)", isReadOnlyShellCommand("rg pattern src"), true);
 check("awk is not read-only (N1)", isReadOnlyShellCommand("awk '{print $1}' file"), false);
 check("xargs is not read-only (N1)", isReadOnlyShellCommand("ls | xargs cat"), false);
 check("sed -n with a print script is read-only (N1)", isReadOnlyShellCommand("sed -n '10,20p' file"), true);
@@ -234,6 +255,16 @@ check("--import=/abs mentions outside (A3)", commandMentionsOutsideProject("node
 check("--prefix=../.. mentions outside (A3)", commandMentionsOutsideProject("npm test --prefix=../..", projectPath, cwd), true);
 check("glued -X/abs mentions outside (A3)", commandMentionsOutsideProject("tool -L/abs/x", projectPath, cwd), true);
 check("--flag=value inside project does not mention outside", commandMentionsOutsideProject("node --test --import=./setup.js", projectPath, cwd), false);
+// B2: relative tokens that escape lexically must resolve to outside. Real
+// callers pass cwd ≡ the project root (commandMentionsOutsideProject is fed
+// projectPath/ctx.cwd), so the brief-literal rows run from the project root.
+check("cat x/../../.zsh_history mentions outside (B2)", commandMentionsOutsideProject("cat x/../../.zsh_history", projectPath, projectPath), true);
+check("cat ./../.netrc mentions outside (B2)", commandMentionsOutsideProject("cat ./../.netrc", projectPath, projectPath), true);
+check("git diff --no-index with ../ escape mentions outside (B2)", commandMentionsOutsideProject("git diff --no-index x/../../etc/passwd /dev/null", projectPath, projectPath), true);
+check("../ escape resolves against a subdirectory cwd too (B2)", commandMentionsOutsideProject("cat x/../../../.zsh_history", projectPath, cwd), true);
+check("alias-spelled cwd does not make in-project tokens look outside (B2)", commandMentionsOutsideProject("ls -la", "/p", "/link/p"), false);
+check("plain in-project relative path does not mention outside (B2)", commandMentionsOutsideProject("cat src/a.ts", projectPath, cwd), false);
+check("./-prefixed in-project relative path does not mention outside (B2)", commandMentionsOutsideProject("cat ./src/a.ts", projectPath, cwd), false);
 
 // classifyBashCommand
 check("git cmd -> git", classifyBashCommand("git status"), ["git"]);

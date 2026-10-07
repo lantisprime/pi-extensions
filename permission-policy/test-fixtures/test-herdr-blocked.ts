@@ -127,7 +127,15 @@ async function main() {
 	// index.ts imports @earendil-works/pi-ai at runtime; the repo ships no
 	// node_modules, so write a minimal gitignored stub it can resolve. A6:
 	// removed again in the finally below, but only when this run created it.
+	// A3/R2: if a stub (or a real install) is already present, fail instead of
+	// overwriting it.
 	const stubDir = path.join(REPO_ROOT, "node_modules", "@earendil-works", "pi-ai");
+	if (existsSync(stubDir)) {
+		console.error(
+			`refusing to run: ${stubDir} already exists — remove the @earendil-works/pi-ai stub from node_modules first (A3: the suites never overwrite an existing install)`,
+		);
+		process.exit(1);
+	}
 	const createdStub = !existsSync(stubDir);
 	try {
 		await runSuite(stubDir);

@@ -198,8 +198,15 @@ async function main() {
 
 	// Minimal stub for index.ts's runtime import of @earendil-works/pi-ai.
 	// A6: removed again in the finally below, but only when this run created
-	// it, so a pre-existing install is never clobbered.
+	// it, so a pre-existing install is never clobbered. A3/R2: if a stub (or a
+	// real install) is already present, fail instead of overwriting it.
 	const stubDir = path.join(REPO_ROOT, "node_modules", "@earendil-works", "pi-ai");
+	if (existsSync(stubDir)) {
+		console.error(
+			`refusing to run: ${stubDir} already exists — remove the @earendil-works/pi-ai stub from node_modules first (A3: the suites never overwrite an existing install)`,
+		);
+		process.exit(1);
+	}
 	const createdStub = !existsSync(stubDir);
 	try {
 		await runSuite(stubDir);
@@ -307,6 +314,40 @@ async function runSuite(stubDir: string): Promise<void> {
 		await expectAllowed(harness, makeCtx(wtProject), "write", { path: wtManifest, content: "{}" });
 		await expectDialog(harness, makeCtx(wtProject), "write", { path: path.join(path.dirname(wtManifest), "other.json"), content: "{}" });
 		await expectDialog(harness, makeCtx(wtProject), "write", { path: path.join(realpathSync(fakeHome), ".cache", "herdr-driver", "drv-other", "x.json"), content: "{}" });
+	});
+
+	await check("N3 manifest exception applies only while seatAuto is active and stays lstat-checked (A4/R2)", async () => {
+		const manifestDir = path.join(realpathSync(fakeHome), ".cache", "herdr-driver", "drv-a4");
+		mkdirSync(manifestDir, { recursive: true });
+		const manifest = path.join(manifestDir, "seat.manifest.json");
+		writeFileSync(manifest, "{}");
+
+		// ask mode + seat block + stored writeFiles grant: the exception does
+		// not apply, so the protected-path check decides → dialog.
+		const askProject = freshProjectDir();
+		writePolicy(askProject, seatAutoPolicy(askProject, { mode: "ask", seatManifest: manifest, permissions: { writeFiles: "allow" } }));
+		await expectDialog(harness, makeCtx(askProject), "write", { path: manifest, content: "{}" });
+
+		// Expired seat + seatAuto + stored grant: isSeatAutoActive false → dialog.
+		const expiredProject = freshProjectDir();
+		writePolicy(
+			expiredProject,
+			seatAutoPolicy(expiredProject, {
+				seat: seatBlock(manifest, new Date(Date.now() - 1000).toISOString()),
+				permissions: { writeFiles: "allow" },
+			}),
+		);
+		await expectDialog(harness, makeCtx(expiredProject), "write", { path: manifest, content: "{}" });
+
+		// Active seatAuto + grant: the exception applies → still allowed.
+		const seatProject = freshProjectDir();
+		writePolicy(seatProject, seatAutoPolicy(seatProject, { seatManifest: manifest, permissions: { writeFiles: "allow" } }));
+		await expectAllowed(harness, makeCtx(seatProject), "write", { path: manifest, content: "{}" });
+
+		// Active seatAuto but the manifest is hardlinked (nlink 2): the lstat
+		// check in the pre-grant gate fails the exception closed → dialog.
+		linkSync(manifest, path.join(manifestDir, "manifest-hard.txt"));
+		await expectDialog(harness, makeCtx(seatProject), "write", { path: manifest, content: "{}" });
 	});
 
 	await check("expired seat block escalates every seatAuto allow to the operator (N7)", async () => {
@@ -455,6 +496,15 @@ async function runSuite(stubDir: string): Promise<void> {
 		await expectAllowed(harness, ctx, "bash", { command: "node --test --import=./setup.js" });
 	});
 
+	await check("test-runner argument files are rejected (B5b)", async () => {
+		const ctx = makeCtx(wtProject);
+		await expectDialog(harness, ctx, "bash", { command: "./node_modules/.bin/tsc --noEmit @args" });
+		await expectDialog(harness, ctx, "bash", { command: "node --test @args" });
+		await expectDialog(harness, ctx, "bash", { command: "npm test @pkg" });
+		await expectDialog(harness, ctx, "bash", { command: "sh tests/run.sh @extra" });
+		await expectAllowed(harness, ctx, "bash", { command: "./node_modules/.bin/tsc --noEmit" });
+	});
+
 	await check("git -c / --git-dir / -C outside are hard-denied (N2)", async () => {
 		const ctx = makeCtx(wtProject);
 		await expectDialog(harness, ctx, "bash", { command: "git -c core.hooksPath=/tmp/hooks commit -m x" });
@@ -463,6 +513,20 @@ async function runSuite(stubDir: string): Promise<void> {
 		await expectDialog(harness, ctx, "bash", { command: "git -C /tmp status" });
 		mkdirSync(path.join(wtProject, "sub"), { recursive: true });
 		await expectAllowed(harness, ctx, "bash", { command: "git -C sub status" });
+	});
+
+	await check("git global options are an allowlist: -C/--no-pager only (B5a)", async () => {
+		const ctx = makeCtx(wtProject);
+		await expectDialog(harness, ctx, "bash", { command: "git --pager=sh log" });
+		await expectDialog(harness, ctx, "bash", { command: "git -p log" });
+		await expectDialog(harness, ctx, "bash", { command: "git -P log" });
+		await expectDialog(harness, ctx, "bash", { command: "git --exec-path" });
+		await expectDialog(harness, ctx, "bash", { command: "git --namespace=x status" });
+		await expectDialog(harness, ctx, "bash", { command: "git --no-pager --exec-path" });
+		await expectDialog(harness, ctx, "bash", { command: "git --paginate log" });
+		// The allowlist itself stays allowed.
+		await expectAllowed(harness, ctx, "bash", { command: "git --no-pager diff" });
+		await expectAllowed(harness, ctx, "bash", { command: "git -Csub status" });
 	});
 
 	await check("glued git -c<key>=<value> is denied like spaced -c; -C stays distinct (A1)", async () => {
@@ -545,7 +609,9 @@ async function runSuite(stubDir: string): Promise<void> {
 		const ctx = makeCtx(wtProject);
 		// The rm text after # matches the hard-deny shape, so the command asks.
 		await expectDialog(harness, ctx, "bash", { command: "ls # rm -rf build" });
-		// ; splits segments and the second is rm -rf / — asks.
+		// A2/R2: `#` comments to end of line, so bash would only run `echo ok`;
+		// the dialog is the fail-closed outcome (the classifier still sees the
+		// commented rm text).
 		await expectDialog(harness, ctx, "bash", { command: "echo ok #; rm -rf /" });
 		// A # inside a quoted -m message is inert: the commit shape allows it.
 		await expectAllowed(harness, ctx, "bash", { command: 'git commit -m "x # y"' });
@@ -564,6 +630,33 @@ async function runSuite(stubDir: string): Promise<void> {
 		await expectDialog(harness, ctx, "bash", { command: "find . -fprint out.txt" });
 		await expectDialog(harness, ctx, "bash", { command: "awk '{print $1}' f.txt" });
 		await expectDialog(harness, ctx, "bash", { command: "ls | xargs cat" });
+	});
+
+	await check("read-only heads cannot write or execute via options (B1/R2)", async () => {
+		const ctx = makeCtx(wtProject);
+		// sort: -o*, --output* (even --output==x) and clusters containing o write.
+		await expectDialog(harness, ctx, "bash", { command: "sort -o out.txt in.txt" });
+		await expectDialog(harness, ctx, "bash", { command: "sort --output=x in.txt" });
+		await expectDialog(harness, ctx, "bash", { command: "sort --output==x in.txt" });
+		await expectDialog(harness, ctx, "bash", { command: "sort -no in.txt" });
+		// Audit finds: uniq's second positional, --files0-from lists, file -C,
+		// rg --pre (executes), sort --compress-program (executes).
+		await expectDialog(harness, ctx, "bash", { command: "uniq in.txt out.txt" });
+		await expectDialog(harness, ctx, "bash", { command: "wc --files0-from=list.txt" });
+		await expectDialog(harness, ctx, "bash", { command: "du --files0-from=list.txt" });
+		await expectDialog(harness, ctx, "bash", { command: "file -C" });
+		await expectDialog(harness, ctx, "bash", { command: "rg --pre=./evil.sh pat f.txt" });
+		await expectDialog(harness, ctx, "bash", { command: "sort --compress-program=gzip in.txt" });
+		// Benign forms of the same heads stay allowed.
+		await expectAllowed(harness, ctx, "bash", { command: "sort in.txt" });
+		await expectAllowed(harness, ctx, "bash", { command: "sort -rn -k2 in.txt" });
+		await expectAllowed(harness, ctx, "bash", { command: "uniq in.txt" });
+		await expectAllowed(harness, ctx, "bash", { command: "uniq -c in.txt" });
+		await expectAllowed(harness, ctx, "bash", { command: "wc -l f.txt" });
+		await expectAllowed(harness, ctx, "bash", { command: "file x.txt" });
+		await expectAllowed(harness, ctx, "bash", { command: "rg pattern src" });
+		await expectAllowed(harness, ctx, "bash", { command: "rg --files" });
+		await expectAllowed(harness, ctx, "bash", { command: "du -sh ." });
 	});
 
 	await check("redirects: /dev/null and 2>&1 fine, in-project log fine, outside target escalates (A.3/A.4)", async () => {
@@ -598,6 +691,22 @@ async function runSuite(stubDir: string): Promise<void> {
 		await expectAllowed(harness, ctx, "bash", { command: "grep '$1' src/a.ts" });
 	});
 
+	await check("non-trivial quoting fails closed to a dialog (B3/R2)", async () => {
+		const ctx = makeCtx(wtProject);
+		// The B3 example: '$PWD/..' sits inside double quotes, so the old
+		// single-quote strip hid the expansion from containsUnquotedDollar.
+		await expectDialog(harness, ctx, "bash", { command: 'cat "x\'$PWD/..\'y"' });
+		// Internal/unbalanced quotes and adjacent quoted fragments.
+		await expectDialog(harness, ctx, "bash", { command: 'cat a"b"c' });
+		await expectDialog(harness, ctx, "bash", { command: 'echo x > "a"b' });
+		await expectDialog(harness, ctx, "bash", { command: 'echo x > "my log.txt"' });
+		await expectDialog(harness, ctx, "bash", { command: 'echo x > \'ab\'' });
+		// Whole-token pairs stay fine.
+		await expectAllowed(harness, ctx, "bash", { command: 'git commit -m "x # y"' });
+		await expectAllowed(harness, ctx, "bash", { command: "sed -n '10,20p' src/a.ts" });
+		await expectAllowed(harness, ctx, "bash", { command: "echo '$TMPDIR' > literal.log" });
+	});
+
 	await check("read-only segments are allowed and tokens may not escape via symlinks into protected paths", async () => {
 		const ctx = makeCtx(wtProject);
 		await expectAllowed(harness, ctx, "bash", { command: "ls -la" });
@@ -607,6 +716,16 @@ async function runSuite(stubDir: string): Promise<void> {
 		await expectDialog(harness, ctx, "bash", { command: "cat ssh-link/config" });
 		await expectDialog(harness, ctx, "bash", { command: "cat .git" });
 		await expectDialog(harness, ctx, "bash", { command: `cat ${path.join(mainRepo, ".git", "config")}` });
+	});
+
+	await check("relative path tokens that escape lexically ask (B2)", async () => {
+		const ctx = makeCtx(wtProject);
+		await expectDialog(harness, ctx, "bash", { command: "cat x/../../.zsh_history" });
+		await expectDialog(harness, ctx, "bash", { command: "cat ./../.netrc" });
+		await expectDialog(harness, ctx, "bash", { command: "git diff --no-index x/../../etc/passwd /dev/null" });
+		// Plain in-project relative paths stay allowed (no fail-closed regression).
+		await expectAllowed(harness, ctx, "bash", { command: "cat src/main.ts" });
+		await expectAllowed(harness, ctx, "bash", { command: "cat ./src/main.ts" });
 	});
 
 	await check("read through an in-project symlink into a protected root asks (B5)", async () => {
@@ -621,6 +740,47 @@ async function runSuite(stubDir: string): Promise<void> {
 		await expectDialog(harness, ctx, "read", { path: "ssh-read-link/id_rsa" });
 		await expectDialog(harness, ctx, "read", { path: "ssh-read-link" });
 		await expectAllowed(harness, ctx, "read", { path: "src/x.ts" });
+	});
+
+	await check("protected-path reads never ride stored readOutsideProject grants (A1/B4)", async () => {
+		mkdirSync(path.join(fakeHome, ".ssh"), { recursive: true });
+		const protectedRead = path.join(realpathSync(fakeHome), ".ssh", "id_rsa");
+		writeFileSync(protectedRead, "secret");
+		// seatAuto + stored project grant: the read gate must decide, not the grant.
+		const seatProject = freshProjectDir();
+		writePolicy(seatProject, seatAutoPolicy(seatProject, { permissions: { readOutsideProject: "allow" } }));
+		await expectDialog(harness, makeCtx(seatProject), "read", { path: protectedRead });
+		// ask mode + stored project grant: the gate runs in every mode. (pi
+		// expands a leading ~ before the tool runs, so the absolute path here is
+		// exactly what `read ~/.ssh/id_rsa` delivers.)
+		const askProject = freshProjectDir();
+		writePolicy(askProject, { projectPath: askProject, updatedAt: new Date().toISOString(), mode: "ask", permissions: { readOutsideProject: "allow" } });
+		await expectDialog(harness, makeCtx(askProject), "read", { path: protectedRead });
+		// Same outcome through an in-project symlink into a protected dir.
+		const linkProject = freshProjectDir();
+		writePolicy(linkProject, seatAutoPolicy(linkProject, { permissions: { readOutsideProject: "allow" } }));
+		symlinkSync(path.join(fakeHome, ".ssh"), path.join(linkProject, "ssh-link"), "dir");
+		await expectDialog(harness, makeCtx(linkProject), "read", { path: "ssh-link/id_rsa" });
+		// An ordinary outside read still works via the stored grant.
+		const outsideFile = path.join(realpathSync(fakeHome), "plain-note.txt");
+		writeFileSync(outsideFile, "ok");
+		await expectAllowed(harness, makeCtx(seatProject), "read", { path: outsideFile });
+	});
+
+	await check("yolo: protected-path reads ask instead of auto-allow (A1/B4)", async () => {
+		mkdirSync(path.join(fakeHome, ".ssh"), { recursive: true });
+		const protectedRead = path.join(realpathSync(fakeHome), ".ssh", "id_rsa");
+		writeFileSync(protectedRead, "secret");
+		const project = freshProjectDir();
+		writePolicy(project, { projectPath: project, updatedAt: new Date().toISOString(), mode: "yolo", permissions: {} });
+		symlinkSync(path.join(fakeHome, ".ssh"), path.join(project, "ssh-link"), "dir");
+		const ctx = makeCtx(project);
+		await expectDialog(harness, ctx, "read", { path: protectedRead });
+		await expectDialog(harness, ctx, "read", { path: "ssh-link/id_rsa" });
+		// Non-protected outside reads stay yolo-allowed.
+		const outsideFile = path.join(realpathSync(fakeHome), "plain-yolo.txt");
+		writeFileSync(outsideFile, "ok");
+		await expectAllowed(harness, makeCtx(project), "read", { path: outsideFile });
 	});
 
 	// -----------------------------------------------------------------------

@@ -46,7 +46,9 @@ type PermissionRequest = {
 	title: string;
 	detail: string;
 	command?: string;
-	// Absolute write/edit target, plumbed from the tool input (spec A.2).
+	// Absolute write/edit/read target, plumbed from the tool input (spec A.2).
+	// Read requests carry the resolved absolute path (the realpath when one
+	// exists) so ensurePermission can hard-gate protected reads like writes.
 	targetPath?: string;
 };
 
@@ -259,12 +261,14 @@ export async function classifyToolCall(
 		// A.2 plumbing): the raw cwd can sit under a symlinked prefix (macOS /tmp
 		// → /private/tmp), which would make in-project reads look outside.
 		const baseCwd = requestedPath ? await getProjectPath(cwd) : cwd;
-		if (requestedPath && isOutsideProject(path.resolve(baseCwd, requestedPath), projectPath, baseCwd)) {
+		const absolute = requestedPath ? path.resolve(baseCwd, requestedPath) : "";
+		if (requestedPath && isOutsideProject(absolute, projectPath, baseCwd)) {
 			return [
 				{
 					key: "readOutsideProject",
 					title: PERMISSION_LABELS.readOutsideProject,
-					detail: `Requested path: ${path.resolve(baseCwd, requestedPath)}`,
+					detail: `Requested path: ${absolute}`,
+					targetPath: absolute,
 				},
 			];
 		}
@@ -272,7 +276,6 @@ export async function classifyToolCall(
 		// dir through a symlink (read ssh-link/id_rsa where the link points at
 		// ~/.ssh); resolve the real path and hard-deny those too.
 		if (requestedPath) {
-			const absolute = path.resolve(baseCwd, requestedPath);
 			const real = await realpathThroughExisting(absolute);
 			if (real) {
 				const gitDirs = await resolveGitEntryDirs(projectPath);
@@ -282,6 +285,9 @@ export async function classifyToolCall(
 							key: "readOutsideProject",
 							title: PERMISSION_LABELS.readOutsideProject,
 							detail: `Requested path resolves into a protected location: ${real}`,
+							// A1/B4: carry the resolved realpath so the pre-grant read
+							// gate in ensurePermission sees the protected target.
+							targetPath: real,
 						},
 					];
 				}
@@ -461,8 +467,10 @@ function shellTokens(segment: string): string[] {
 }
 
 // Strict read-only shapes (spec N1): find may not delete/execute/print-to-file,
-// sed is only -n with a print script, awk and xargs are not read-only. When
-// unsure, NOT read-only.
+// sed is only -n with a print script, awk and xargs are not read-only. B1/R2:
+// sort/uniq/file/wc/du/rg carry argument forms that write, read arbitrary
+// lists or execute — each gets a strict shape below. When unsure, NOT
+// read-only.
 const SIMPLE_READONLY_COMMANDS = new Set([
 	"pwd",
 	"ls",
@@ -486,6 +494,47 @@ const SIMPLE_READONLY_COMMANDS = new Set([
 
 function isFindReadOnly(args: string[]): boolean {
 	return !args.some((arg) => /^-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)$/.test(arg));
+}
+
+// B1/R2: strict shapes for the set members that carry write or exec argument
+// forms. Anything not matching the shape is NOT read-only (fail closed).
+
+// sort -o/-ofile/-o clustered, --output(=…, even ==x) write a file;
+// --compress-program=CMD executes CMD; --random-source/--files0-from/-T read
+// or place arbitrary files. Everything else sorts to stdout.
+function isSortReadOnly(args: string[]): boolean {
+	return !args.some(
+		(arg) =>
+			/^--output/.test(arg) ||
+			/^--compress-program/.test(arg) ||
+			/^--random-source/.test(arg) ||
+			/^--files0-from/.test(arg) ||
+			/^--temporary-directory/.test(arg) ||
+			/^-[A-Za-z]*o/i.test(arg) ||
+			/^-T/.test(arg),
+	);
+}
+
+// `uniq IN OUT` writes OUT as its second positional: at most one positional
+// argument (the input) may appear.
+function isUniqReadOnly(args: string[]): boolean {
+	return args.filter((arg) => !arg.startsWith("-")).length <= 1;
+}
+
+// `file -C/--compile` compiles a magic file to disk.
+function isFileReadOnly(args: string[]): boolean {
+	return !args.some((arg) => /^-[A-Za-z]*C/.test(arg) || /^--compile/.test(arg));
+}
+
+// `wc --files0-from=FILE` / `du --files0-from=FILE` read the input list from
+// an arbitrary file — kept out of the auto-allow set out of caution.
+function isFiles0FromReadOnly(args: string[]): boolean {
+	return !args.some((arg) => /^--files0-from/.test(arg));
+}
+
+// rg --pre[=|--pre-file] executes a preprocessing command on every file.
+function isRipgrepReadOnly(args: string[]): boolean {
+	return !args.some((arg) => /^--pre/.test(arg));
 }
 
 function isPrintOnlySedSubstitute(part: string): boolean {
@@ -531,6 +580,12 @@ function isReadOnlyShellSegment(segment: string): boolean {
 	if (!first) return false;
 	if (first === "find") return isFindReadOnly(tokens.slice(1));
 	if (first === "sed") return isSedPrintOnly(tokens.slice(1));
+	// B1/R2: strict shapes for members with write/exec argument forms.
+	if (first === "sort") return isSortReadOnly(tokens.slice(1));
+	if (first === "uniq") return isUniqReadOnly(tokens.slice(1));
+	if (first === "file") return isFileReadOnly(tokens.slice(1));
+	if (first === "wc" || first === "du") return isFiles0FromReadOnly(tokens.slice(1));
+	if (first === "rg") return isRipgrepReadOnly(tokens.slice(1));
 	// B1: `command` is an exec wrapper — `command node -e …` or
 	// `command bash -c …` must not ride the read-only set. Only the exact
 	// shape `command -v <word>` (print a command's path) is read-only.
@@ -785,6 +840,9 @@ async function isRedirectTargetAllowed(
 	gitDirs: string[],
 ): Promise<boolean> {
 	if (redirect.target === "/dev/null") return true;
+	// B3/R2: quoted redirect targets are not modelled (the \S* target capture
+	// splits "my log.txt" and quotes would be resolved literally) — fail closed.
+	if (/['"]/.test(redirect.target)) return false;
 	const absolute = path.resolve(cwd, redirect.target);
 	if (isOutsideProject(absolute, projectPath, cwd)) return false;
 	if (!(await passesSeatPathChecks(absolute, projectPath, home, gitDirs, { allowManifest: false }))) return false;
@@ -804,6 +862,9 @@ async function isRedirectTargetAllowed(
 // seat-authored code as the operator; that is allowlisted on purpose and
 // documented as a residual risk.
 function isTestRunnerSegment(tokens: string[]): boolean {
+	// B5b/R2: an argument file (@args) executes seat-authored content — never
+	// auto-allowed in any runner shape.
+	if (tokens.slice(1).some((token) => token.startsWith("@"))) return false;
 	const [first, second, third] = tokens;
 	if (first === "python3" && second === "-m" && (third === "unittest" || third === "pytest")) return true;
 	// A7: every argument must be a tests/<name>.sh path.
@@ -822,6 +883,9 @@ function isTestRunnerSegment(tokens: string[]): boolean {
 
 // Parses leading git global options. N2: -c/--config-env and the repo/config
 // redirecting options are denied outright; -C may only target the project.
+// B5a/R2: the global options before the subcommand are an ALLOWLIST —
+// `-C <in-project>` and `--no-pager` only. Anything else (--pager=…, -p, -P,
+// --exec-path, --git-dir, --work-tree, --namespace, …) is denied.
 function parseGitSegment(
 	tokens: string[],
 	projectPath: string,
@@ -840,9 +904,6 @@ function parseGitSegment(
 		if (/^-c/.test(token) || /^--config-env/.test(token)) {
 			return { denied: "git -c/--config-env is not permitted without operator approval" };
 		}
-		if (/^(--git-dir|--work-tree|--exec-path|--namespace|--super-prefix)(=|$)/.test(token)) {
-			return { denied: "git global repo/config options are not permitted without operator approval" };
-		}
 		if (token === "-C" || /^-C[^-]/.test(token)) {
 			const target = token === "-C" ? tokens[i + 1] : token.slice(2);
 			if (!target || isOutsideProject(path.resolve(cwd, target), projectPath, cwd)) {
@@ -851,6 +912,8 @@ function parseGitSegment(
 			if (token === "-C") i++;
 			continue;
 		}
+		if (token === "--no-pager") continue;
+		return { denied: "git global options other than -C/--no-pager are not permitted without operator approval" };
 	}
 	const subcommand = tokens[i];
 	if (!subcommand) return undefined;
@@ -917,12 +980,44 @@ function containsUnquotedDollar(segment: string): boolean {
 	return segment.replace(/'[^']*'/g, " ").includes("$");
 }
 
+// B3/R2: quoting must be trivially modelled. Every token is either unquoted
+// or exactly one quote pair wrapping the whole token ('a b', "x # y") flanked
+// by whitespace. Internal quotes ("x'$PWD/..'y" — the case
+// containsUnquotedDollar's single-quote strip gets wrong), mixed kinds,
+// unbalanced tokens (a"b, a"b"c) and adjacent quoted fragments ("a""b") all
+// mean the checked text is not what bash will run — fail closed to a dialog.
+function hasTriviallyModelledQuotes(segment: string): boolean {
+	for (const match of segment.matchAll(/(?:"[^"]+"|'[^']+'|\S+)/g)) {
+		const token = match[0];
+		const start = match.index ?? 0;
+		const end = start + token.length;
+		if (!token.startsWith(`"`) && !token.startsWith(`'`)) {
+			if (/['"]/.test(token)) return false;
+			continue;
+		}
+		const quote = token[0];
+		if (token.length < 2 || !token.endsWith(quote)) return false;
+		const inner = token.slice(1, -1);
+		if (inner.includes(`"`) || inner.includes(`'`)) return false;
+		// Bash glues "a"b into the single word ab, which the token split above
+		// cannot model: quoted tokens must be whitespace-delimited.
+		const before = start > 0 ? segment[start - 1] : " ";
+		const after = end < segment.length ? segment[end] : " ";
+		if (!/\s/.test(before) || !/\s/.test(after)) return false;
+	}
+	return true;
+}
+
 async function isSeatAutoBashAllowed(command: string, projectPath: string, cwd: string, policy: PolicyFile): Promise<boolean> {
 	const segments = splitCommandSegments(command);
 	if (segments.length === 0) return false;
 	const home = os.homedir();
 	const gitDirs = await resolveGitEntryDirs(projectPath);
 	for (const segment of segments) {
+		// B3/R2: reject any token whose quoting is not one simple whole-token
+		// pair — expansion can hide inside mixed quotes and bash can glue
+		// adjacent quoted fragments into words the token split never sees.
+		if (!hasTriviallyModelledQuotes(segment)) return false;
 		// B4: reject any segment with an unquoted `$` — redirect targets and
 		// path-bearing tokens would be checked literally but expanded by bash.
 		if (containsUnquotedDollar(segment)) return false;
@@ -1063,7 +1158,19 @@ function optionValueOf(token: string): string | undefined {
 
 function mentionsOutsideProject(token: string, projectPath: string, cwd: string): boolean {
 	if (token === ".." || token.startsWith(`..${path.sep}`)) return true;
-	return path.isAbsolute(token) && isOutsideProject(token, projectPath, cwd);
+	// B2: the lexical token alone misses escapes like x/../../etc/passwd or
+	// ./../.netrc — resolve every path-like token against the cwd (as
+	// isSeatGitCommitArgs already does for -F) and check the resolved target.
+	// Non-path tokens (flags like -la) resolve to a path inside the project,
+	// so the fail-closed false positives this admits stay harmless.
+	const absolute = path.resolve(cwd, token);
+	if (!isOutsideProject(absolute, projectPath, cwd)) return false;
+	// Alias tolerance (same hazard as the spec A.2 plumbing): cwd can be a
+	// macOS-style alias spelling of the real-pathed project (/tmp →
+	// /private/tmp), which would make every resolved token look outside. The
+	// token counts as outside only when it also escapes when resolved from the
+	// project root itself — the same real directory bash runs in.
+	return isOutsideProject(path.resolve(projectPath, token), projectPath, projectPath);
 }
 
 export function commandMentionsOutsideProject(command: string, projectPath: string, cwd: string): boolean {
@@ -1169,8 +1276,36 @@ async function ensurePermission(
 		const gitDirs = await resolveGitEntryDirs(projectPath);
 		const real = (await realpathThroughExisting(request.targetPath)) || request.targetPath;
 		const manifestPath = seatManifestPath(policy);
-		const isManifest = !!manifestPath && (request.targetPath === manifestPath || real === manifestPath);
+		// A4/R2: the N3 manifest exception applies ONLY while seatAuto is active
+		// (mode seatAuto + unexpired seat), and even then only when the target
+		// passes the same lstat checks as seatAuto's own write allow — no
+		// symlink, exactly one link. Otherwise the protected-path check decides.
+		let isManifest = false;
+		if (isSeatAutoActive(policy) && manifestPath) {
+			isManifest = request.targetPath === manifestPath || real === manifestPath;
+			if (isManifest) {
+				try {
+					const st = await fs.lstat(real);
+					if (st.isSymbolicLink() || st.nlink !== 1) isManifest = false;
+				} catch {
+					// New file: nothing exists to swap yet.
+				}
+			}
+		}
 		if (!isManifest && (await isProtectedPath(real, home, gitDirs))) {
+			return promptForPermission(ctx, projectPath, request, policy);
+		}
+	}
+
+	// A1/B4: a read whose target resolves onto a protected path never reaches
+	// any allow path — stored grants included, and not yolo either — in any
+	// mode (spec A.1/N6). Mirrors the B3 write gate above; runs before every
+	// grant lookup and before the yolo auto-allow.
+	if (request.key === "readOutsideProject" && request.targetPath) {
+		const home = os.homedir();
+		const gitDirs = await resolveGitEntryDirs(projectPath);
+		const real = (await realpathThroughExisting(request.targetPath)) || request.targetPath;
+		if (await isProtectedPath(real, home, gitDirs)) {
 			return promptForPermission(ctx, projectPath, request, policy);
 		}
 	}
