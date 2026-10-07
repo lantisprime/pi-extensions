@@ -83,7 +83,7 @@ Hard-deny categories never reach any allow path in any mode — only the interac
 - network verbs `curl`, `wget`, `nc`, `ssh`, `scp`, `rsync`;
 - any path resolving into `~/.pi/agent/permission-policy`, `~/.ssh`, `~/.config`, `~/.aws`, `~/.gnupg`, the herdr-driver cache — except the seat's exact `seat.manifestPath`, which write/edit tools may write with the same link checks.
 
-Residual risks, accepted by design: test runners execute seat-authored code as the operator (they are allowlisted on purpose); in-project shell redirects and writes can modify any project file that passes the link checks; and the post-write swap race described above. Operator-typed `!` commands are not subject to seatAuto allows and keep their normal behaviour.
+Residual risks, accepted by design: test runners execute seat-authored code as the operator (they are allowlisted on purpose); in-project shell redirects and writes can modify any project file that passes the link checks; and the post-write swap race described above. Segment splitting is token-based, not quote-aware (deferred); it fails closed — a command the splitter cannot parse asks the operator instead of being auto-allowed. Operator-typed `!` commands are not subject to seatAuto allows and keep their normal behaviour.
 
 ## Prompt Shield integration
 

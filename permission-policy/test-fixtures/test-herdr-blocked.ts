@@ -13,7 +13,7 @@
 
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -125,8 +125,22 @@ async function main() {
 	process.env.HOME = fakeHome;
 
 	// index.ts imports @earendil-works/pi-ai at runtime; the repo ships no
-	// node_modules, so write a minimal gitignored stub it can resolve.
+	// node_modules, so write a minimal gitignored stub it can resolve. A6:
+	// removed again in the finally below, but only when this run created it.
 	const stubDir = path.join(REPO_ROOT, "node_modules", "@earendil-works", "pi-ai");
+	const createdStub = !existsSync(stubDir);
+	try {
+		await runSuite(stubDir);
+	} finally {
+		if (createdStub) rmSync(stubDir, { recursive: true, force: true });
+	}
+
+	// Reported after the finally above so a failing run still cleans the stub.
+	console.log(`\n${passed} passed, ${failed} failed out of ${passed + failed} scenarios`);
+	if (failed > 0) process.exit(1);
+}
+
+async function runSuite(stubDir: string): Promise<void> {
 	mkdirSync(stubDir, { recursive: true });
 	writeFileSync(
 		path.join(stubDir, "package.json"),
@@ -265,9 +279,6 @@ async function main() {
 		assert.deepEqual(harness.emissions[0].data, { active: true, label: "Permission required: Enable YOLO permission mode?" });
 		assert.deepEqual(harness.emissions[1].data, { active: false });
 	});
-
-	console.log(`\n${passed} passed, ${failed} failed out of ${passed + failed} scenarios`);
-	if (failed > 0) process.exit(1);
 }
 
 main().catch((error) => {

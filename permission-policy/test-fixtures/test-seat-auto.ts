@@ -10,7 +10,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, symlinkSync, unlinkSync, linkSync, lstatSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, symlinkSync, unlinkSync, linkSync, lstatSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -197,7 +197,22 @@ async function main() {
 	process.env.HOME = fakeHome;
 
 	// Minimal stub for index.ts's runtime import of @earendil-works/pi-ai.
+	// A6: removed again in the finally below, but only when this run created
+	// it, so a pre-existing install is never clobbered.
 	const stubDir = path.join(REPO_ROOT, "node_modules", "@earendil-works", "pi-ai");
+	const createdStub = !existsSync(stubDir);
+	try {
+		await runSuite(stubDir);
+	} finally {
+		if (createdStub) rmSync(stubDir, { recursive: true, force: true });
+	}
+
+	// Reported after the finally above so a failing run still cleans the stub.
+	console.log(`\n${passed} passed, ${failed} failed out of ${passed + failed} scenarios`);
+	if (failed > 0) process.exit(1);
+}
+
+async function runSuite(stubDir: string): Promise<void> {
 	mkdirSync(stubDir, { recursive: true });
 	writeFileSync(
 		path.join(stubDir, "package.json"),
@@ -390,6 +405,14 @@ async function main() {
 		await expectDialog(harness, ctx, "bash", { command: "python3 -m http.server 8080" });
 	});
 
+	await check("sh runner: every argument must be tests/<name>.sh (A7)", async () => {
+		const ctx = makeCtx(wtProject);
+		await expectAllowed(harness, ctx, "bash", { command: "sh tests/a.sh tests/b.sh" });
+		await expectDialog(harness, ctx, "bash", { command: "sh tests/a.sh evil.sh" });
+		await expectDialog(harness, ctx, "bash", { command: "sh tests/a.sh -x" });
+		await expectDialog(harness, ctx, "bash", { command: "sh src/a.sh" });
+	});
+
 	await check("in-project git shapes are allowed", async () => {
 		const ctx = makeCtx(wtProject);
 		for (const command of [
@@ -415,6 +438,23 @@ async function main() {
 		await expectDialog(harness, ctx, "bash", { command: "git checkout -b x" });
 	});
 
+	await check("git read subcommands cannot write via --output/-o (A3/B2)", async () => {
+		const ctx = makeCtx(wtProject);
+		await expectDialog(harness, ctx, "bash", { command: "git show --output=/tmp/evil.patch" });
+		await expectDialog(harness, ctx, "bash", { command: "git log --output=/tmp/evil.patch" });
+		await expectDialog(harness, ctx, "bash", { command: "git diff --output=escape.patch" });
+		await expectDialog(harness, ctx, "bash", { command: "git show -o/tmp/evil.patch" });
+		await expectDialog(harness, ctx, "bash", { command: "git log -o /tmp/evil.patch" });
+		await expectAllowed(harness, ctx, "bash", { command: "git log --oneline -5" });
+	});
+
+	await check("test-runner option values cannot smuggle outside paths (A3/B8)", async () => {
+		const ctx = makeCtx(wtProject);
+		await expectDialog(harness, ctx, "bash", { command: "node --test --import=/tmp/evil-hook.js" });
+		await expectDialog(harness, ctx, "bash", { command: "npm test --prefix=../.." });
+		await expectAllowed(harness, ctx, "bash", { command: "node --test --import=./setup.js" });
+	});
+
 	await check("git -c / --git-dir / -C outside are hard-denied (N2)", async () => {
 		const ctx = makeCtx(wtProject);
 		await expectDialog(harness, ctx, "bash", { command: "git -c core.hooksPath=/tmp/hooks commit -m x" });
@@ -423,6 +463,14 @@ async function main() {
 		await expectDialog(harness, ctx, "bash", { command: "git -C /tmp status" });
 		mkdirSync(path.join(wtProject, "sub"), { recursive: true });
 		await expectAllowed(harness, ctx, "bash", { command: "git -C sub status" });
+	});
+
+	await check("glued git -c<key>=<value> is denied like spaced -c; -C stays distinct (A1)", async () => {
+		const ctx = makeCtx(wtProject);
+		await expectDialog(harness, ctx, "bash", { command: "git -ccore.hooksPath=.githooks commit -m x" });
+		await expectDialog(harness, ctx, "bash", { command: "git -ccore.hooksPath=.githooks status" });
+		await expectDialog(harness, ctx, "bash", { command: "git --config-env=core.hooksPath=/tmp/x status" });
+		await expectDialog(harness, ctx, "bash", { command: "git --config-env core.hooksPath=/tmp/x status" });
 	});
 
 	await check("git config/push/worktree/remote/submodule and ln/link are hard-denied (A.1)", async () => {
@@ -466,12 +514,41 @@ async function main() {
 		await expectDialog(harness, ctx, "bash", { command: "sleep 1 & echo done" });
 	});
 
+	await check("exec wrappers never ride the read-only set; only command -v <word> does (B1)", async () => {
+		const ctx = makeCtx(wtProject);
+		await expectAllowed(harness, ctx, "bash", { command: "command -v node" });
+		await expectDialog(harness, ctx, "bash", { command: "command node -e 'console.log(1)'" });
+		await expectDialog(harness, ctx, "bash", { command: "command bash -c 'id > pwned.txt'" });
+		await expectDialog(harness, ctx, "bash", { command: "command -v node -e x" });
+		await expectDialog(harness, ctx, "bash", { command: "exec rm -rf build" });
+		await expectDialog(harness, ctx, "bash", { command: "builtin rm -rf build" });
+		await expectDialog(harness, ctx, "bash", { command: "env rm -rf build" });
+		await expectDialog(harness, ctx, "bash", { command: "nice rm -rf build" });
+		await expectDialog(harness, ctx, "bash", { command: "nohup rm -rf build" });
+		await expectDialog(harness, ctx, "bash", { command: "time rm -rf build" });
+		await expectDialog(harness, ctx, "bash", { command: "timeout 5 rm -rf build" });
+		await expectDialog(harness, ctx, "bash", { command: "ls | xargs rm -rf build" });
+		await expectDialog(harness, ctx, "bash", { command: "eval 'rm -rf build'" });
+		await expectDialog(harness, ctx, "bash", { command: "source ./evil.sh" });
+		await expectDialog(harness, ctx, "bash", { command: ". ./evil.sh" });
+	});
+
 	await check("newline-joined commands: every line must pass the allowlist (N4)", async () => {
 		const ctx = makeCtx(wtProject);
 		await expectAllowed(harness, ctx, "bash", { command: "ls\ngit status" });
 		await expectAllowed(harness, ctx, "bash", { command: "echo a\necho b" });
 		await expectDialog(harness, ctx, "bash", { command: "ls\nrm -rf build" });
 		await expectDialog(harness, ctx, "bash", { command: "ls\ntouch x" });
+	});
+
+	await check("injected-comment adversarial rows land on their safe outcomes (A5)", async () => {
+		const ctx = makeCtx(wtProject);
+		// The rm text after # matches the hard-deny shape, so the command asks.
+		await expectDialog(harness, ctx, "bash", { command: "ls # rm -rf build" });
+		// ; splits segments and the second is rm -rf / — asks.
+		await expectDialog(harness, ctx, "bash", { command: "echo ok #; rm -rf /" });
+		// A # inside a quoted -m message is inert: the commit shape allows it.
+		await expectAllowed(harness, ctx, "bash", { command: 'git commit -m "x # y"' });
 	});
 
 	await check("strict read-only shapes: find/sed restricted, awk/xargs never (N1)", async () => {
@@ -499,6 +576,28 @@ async function main() {
 		await expectDialog(harness, ctx, "bash", { command: "echo hi >> ~/.cache/herdr-driver/log" });
 	});
 
+	await check("redirect targets must be plain single-link files (A4/B7)", async () => {
+		const ctx = makeCtx(wtProject);
+		const a = path.join(wtProject, "redir-a.txt");
+		writeFileSync(a, "data");
+		linkSync(a, path.join(wtProject, "redir-hard.txt"));
+		await expectDialog(harness, ctx, "bash", { command: "echo x > redir-hard.txt" });
+		writeFileSync(path.join(wtProject, "redir-plain.txt"), "data");
+		await expectAllowed(harness, ctx, "bash", { command: "echo x > redir-plain.txt" });
+		writeFileSync(path.join(wtProject, "redir-real.txt"), "data");
+		symlinkSync(path.join(wtProject, "redir-real.txt"), path.join(wtProject, "redir-link.txt"));
+		await expectDialog(harness, ctx, "bash", { command: "echo x > redir-link.txt" });
+	});
+
+	await check("unquoted $VAR in redirect targets or path tokens asks; single-quoted $ is fine (B4)", async () => {
+		const ctx = makeCtx(wtProject);
+		await expectDialog(harness, ctx, "bash", { command: "echo x > $TMPDIR/evil" });
+		await expectDialog(harness, ctx, "bash", { command: "cat $TMPDIR/x" });
+		await expectDialog(harness, ctx, "bash", { command: 'echo x > "$TMPDIR/evil"' });
+		await expectAllowed(harness, ctx, "bash", { command: "echo '$TMPDIR' > literal.log" });
+		await expectAllowed(harness, ctx, "bash", { command: "grep '$1' src/a.ts" });
+	});
+
 	await check("read-only segments are allowed and tokens may not escape via symlinks into protected paths", async () => {
 		const ctx = makeCtx(wtProject);
 		await expectAllowed(harness, ctx, "bash", { command: "ls -la" });
@@ -508,6 +607,20 @@ async function main() {
 		await expectDialog(harness, ctx, "bash", { command: "cat ssh-link/config" });
 		await expectDialog(harness, ctx, "bash", { command: "cat .git" });
 		await expectDialog(harness, ctx, "bash", { command: `cat ${path.join(mainRepo, ".git", "config")}` });
+	});
+
+	await check("read through an in-project symlink into a protected root asks (B5)", async () => {
+		const project = freshProjectDir();
+		writePolicy(project, seatAutoPolicy(project));
+		mkdirSync(path.join(project, "src"), { recursive: true });
+		writeFileSync(path.join(project, "src", "x.ts"), "export {};");
+		mkdirSync(path.join(fakeHome, ".ssh"), { recursive: true });
+		writeFileSync(path.join(fakeHome, ".ssh", "id_rsa"), "secret");
+		symlinkSync(path.join(fakeHome, ".ssh"), path.join(project, "ssh-read-link"), "dir");
+		const ctx = makeCtx(project);
+		await expectDialog(harness, ctx, "read", { path: "ssh-read-link/id_rsa" });
+		await expectDialog(harness, ctx, "read", { path: "ssh-read-link" });
+		await expectAllowed(harness, ctx, "read", { path: "src/x.ts" });
 	});
 
 	// -----------------------------------------------------------------------
@@ -542,6 +655,35 @@ async function main() {
 		// still reach the operator because isYoloHardDenied patterns never reach
 		// any allow path (A.1).
 		await expectDialog(harness, makeCtx(project), "bash", { command: "rm -f two.txt" });
+	});
+
+	await check("stored writeFiles grants cannot bypass protected-path checks in any mode (B3)", async () => {
+		const protectedTarget = path.join(realpathSync(fakeHome), ".ssh", "authorized_keys");
+		// seatAuto + stored project grant: seatAuto's checks must decide, not the grant.
+		const seatProject = freshProjectDir();
+		writePolicy(seatProject, seatAutoPolicy(seatProject, { permissions: { writeFiles: "allow" } }));
+		await expectDialog(harness, makeCtx(seatProject), "write", { path: protectedTarget, content: "x" });
+		// ask mode + stored project grant: same hard rule in every mode.
+		const askProject = freshProjectDir();
+		writePolicy(askProject, { projectPath: askProject, updatedAt: new Date().toISOString(), mode: "ask", permissions: { writeFiles: "allow" } });
+		await expectDialog(harness, makeCtx(askProject), "write", { path: protectedTarget, content: "x" });
+	});
+
+	await check("in seatAuto stored writeFiles grants cannot bypass symlink/nlink checks (B3)", async () => {
+		const project = freshProjectDir();
+		writePolicy(project, seatAutoPolicy(project, { permissions: { writeFiles: "allow" } }));
+		const realFile = path.join(project, "real.txt");
+		writeFileSync(realFile, "x");
+		const linkPath = path.join(project, "swap-link.txt");
+		symlinkSync(realFile, linkPath);
+		// The stored project grant must not decide: seatAuto denies the symlink.
+		await expectDialog(harness, makeCtx(project), "write", { path: linkPath, content: "y" });
+		// Store a session grant via the dialog on the same symlinked target...
+		const ctxSession = makeCtx(project, { selectResult: "Allow for current session" });
+		await harness.toolCall({ toolName: "write", input: { path: linkPath, content: "z" }, toolCallId: nextId() }, ctxSession);
+		assert.equal(ctxSession.dialogs.length, 1, "seatAuto denies the symlinked target, so the dialog stored a session grant");
+		// ...the session grant must not let a follow-up symlinked write through.
+		await expectDialog(harness, makeCtx(project), "write", { path: linkPath, content: "w" });
 	});
 
 	await check("operator-typed ! commands are not subject to seatAuto allows (N6)", async () => {
@@ -623,8 +765,23 @@ async function main() {
 		assert.ok(saved.seat && (saved.seat as Record<string, unknown>).expiresAt, "seat block must survive the permanent save");
 	});
 
-	console.log(`\n${passed} passed, ${failed} failed out of ${passed + failed} scenarios`);
-	if (failed > 0) process.exit(1);
+	await check("pendingSeatWrites past the limit fails closed instead of evicting a guard (B9)", async () => {
+		// Drain guards armed by earlier scenarios so the limit is exact.
+		for (let id = 1; id <= callCounter; id++) {
+			await harness.toolResult({ toolCallId: `call-${id}`, toolName: "write", isError: false, content: [] }, makeCtx(wtProject));
+		}
+		const project = freshProjectDir();
+		writePolicy(project, seatAutoPolicy(project));
+		const ctx = makeCtx(project);
+		for (let i = 0; i < 64; i++) {
+			await expectAllowed(harness, ctx, "write", { path: path.join(project, `fill-${i}.txt`), content: "x" });
+		}
+		// The 65th armed write would evict a guard under the old LRU: ask instead.
+		await expectDialog(harness, ctx, "write", { path: path.join(project, "overflow.txt"), content: "x" });
+		// Settling one write frees a guard slot again.
+		await harness.toolResult({ toolCallId: `call-${callCounter - 1}`, toolName: "write", isError: false, content: [] }, makeCtx(project));
+		await expectAllowed(harness, ctx, "write", { path: path.join(project, "after-drain.txt"), content: "x" });
+	});
 }
 
 main().catch((error) => {

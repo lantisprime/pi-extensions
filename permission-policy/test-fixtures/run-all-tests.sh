@@ -13,6 +13,11 @@ echo "=== Permission-Policy herdr:blocked Unit Tests ==="
 npx --yes tsx "$ROOT/permission-policy/test-fixtures/test-herdr-blocked.ts" 2>&1
 
 echo ""
+echo "=== Permission-Policy seatAuto Unit Tests ==="
+
+npx --yes tsx "$ROOT/permission-policy/test-fixtures/test-seat-auto.ts" 2>&1
+
+echo ""
 echo "=== Permission-Policy End-to-End Tests ==="
 
 bash "$ROOT/permission-policy/test-fixtures/run-permission-policy-test.sh" 2>&1

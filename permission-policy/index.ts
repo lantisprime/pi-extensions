@@ -247,7 +247,7 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 
-async function classifyToolCall(
+export async function classifyToolCall(
 	toolName: string,
 	input: Record<string, unknown>,
 	projectPath: string,
@@ -255,14 +255,37 @@ async function classifyToolCall(
 ): Promise<PermissionRequest[]> {
 	if (toolName === "read") {
 		const requestedPath = String(input.path || "");
-		if (requestedPath && isOutsideProject(requestedPath, projectPath, cwd)) {
+		// Resolve against the real-pathed cwd like write/edit targets do (spec
+		// A.2 plumbing): the raw cwd can sit under a symlinked prefix (macOS /tmp
+		// → /private/tmp), which would make in-project reads look outside.
+		const baseCwd = requestedPath ? await getProjectPath(cwd) : cwd;
+		if (requestedPath && isOutsideProject(path.resolve(baseCwd, requestedPath), projectPath, baseCwd)) {
 			return [
 				{
 					key: "readOutsideProject",
 					title: PERMISSION_LABELS.readOutsideProject,
-					detail: `Requested path: ${path.resolve(cwd, requestedPath)}`,
+					detail: `Requested path: ${path.resolve(baseCwd, requestedPath)}`,
 				},
 			];
+		}
+		// B5: the lexical check misses paths that reach a protected root or git
+		// dir through a symlink (read ssh-link/id_rsa where the link points at
+		// ~/.ssh); resolve the real path and hard-deny those too.
+		if (requestedPath) {
+			const absolute = path.resolve(baseCwd, requestedPath);
+			const real = await realpathThroughExisting(absolute);
+			if (real) {
+				const gitDirs = await resolveGitEntryDirs(projectPath);
+				if (await isProtectedPath(real, os.homedir(), gitDirs)) {
+					return [
+						{
+							key: "readOutsideProject",
+							title: PERMISSION_LABELS.readOutsideProject,
+							detail: `Requested path resolves into a protected location: ${real}`,
+						},
+					];
+				}
+			}
 		}
 	}
 
@@ -309,7 +332,7 @@ async function classifyToolCall(
 	return [];
 }
 
-function classifyBashCommand(command: string): PermissionRequest[] {
+export function classifyBashCommand(command: string): PermissionRequest[] {
 	const requests: PermissionRequest[] = [];
 
 	if (looksLikeGitCommand(command)) {
@@ -344,21 +367,24 @@ function classifyBashCommand(command: string): PermissionRequest[] {
 	return dedupeRequests(requests);
 }
 
-function looksLikeGitCommand(command: string): boolean {
+export function looksLikeGitCommand(command: string): boolean {
 	// Be intentionally broad: the policy is "ask before git commands", including
 	// read-only git commands and commands embedded in shell chains like
 	// `cd repo && git status` or `env FOO=bar git status`.
 	return /\bgit\b/i.test(command);
 }
 
-function looksDestructive(command: string): boolean {
+export function looksDestructive(command: string): boolean {
 	const destructiveCommand = /(^|[;&|()\s])(rm|mv|cp|unlink|rmdir|chmod|chown|install|truncate)\s+/i.test(command);
-	const overwriteRedirect = /(^|\s)(\d?>|&>|tee\s+)(?!>)/i.test(command);
+	// Stream dups (2>&1, >&2) and /dev/null discard output instead of overwriting
+	// a file, and >> appends; none of those are overwrite redirects (spec A.4).
+	// Everything else with an overwrite-style redirect or tee into a file is.
+	const overwriteRedirect = /(^|\s)(?:\d*&?>|\d?>|tee\s+)(?!>|\s*\/dev\/null\b|\s*&\s*\d+\b)/i.test(command);
 	const inPlaceEdit = /(^|[;&|()\s])(sed|perl|python|node|ruby)\s+.*\s(-i|--in-place)\b/i.test(command);
 	return destructiveCommand || overwriteRedirect || inPlaceEdit;
 }
 
-function isYoloHardDenied(command: string, projectPath: string, cwd: string): string | undefined {
+export function isYoloHardDenied(command: string, projectPath: string, cwd: string): string | undefined {
 	const normalized = command.replace(/\\n|[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
 	if (!normalized) return undefined;
 	if (/(^|[;&|()\s])rm\s+[^;&|()]*?(?:--force\b|-[A-Za-z]*f[A-Za-z]*\b)/i.test(normalized)) return "rm -f/rm -rf commands are blocked even in YOLO mode";
@@ -392,7 +418,7 @@ function extractRmLikeTargets(command: string): string[] {
 	return targets;
 }
 
-function isReadOnlyAutoAllowed(request: PermissionRequest, projectPath: string, cwd: string): boolean {
+export function isReadOnlyAutoAllowed(request: PermissionRequest, projectPath: string, cwd: string): boolean {
 	if (!request.command) return false;
 	if (request.key === "readOutsideProject" || request.key === "writeFiles" || request.key === "destructiveBash" || request.key === "web") {
 		return false;
@@ -403,7 +429,7 @@ function isReadOnlyAutoAllowed(request: PermissionRequest, projectPath: string, 
 	return isReadOnlyShellCommand(request.command);
 }
 
-function isReadOnlyGitCommand(command: string): boolean {
+export function isReadOnlyGitCommand(command: string): boolean {
 	const match = command.match(/\bgit\s+(?:-[^\s]+\s+)*(\w[\w-]*)/i);
 	if (!match) return false;
 	return new Set([
@@ -455,7 +481,6 @@ const SIMPLE_READONLY_COMMANDS = new Set([
 	"echo",
 	"printf",
 	"which",
-	"command",
 	"test",
 ]);
 
@@ -506,10 +531,14 @@ function isReadOnlyShellSegment(segment: string): boolean {
 	if (!first) return false;
 	if (first === "find") return isFindReadOnly(tokens.slice(1));
 	if (first === "sed") return isSedPrintOnly(tokens.slice(1));
+	// B1: `command` is an exec wrapper — `command node -e …` or
+	// `command bash -c …` must not ride the read-only set. Only the exact
+	// shape `command -v <word>` (print a command's path) is read-only.
+	if (first === "command") return tokens.length === 3 && tokens[1] === "-v" && /^[A-Za-z0-9_./-]+$/.test(tokens[2]);
 	return SIMPLE_READONLY_COMMANDS.has(first);
 }
 
-function isReadOnlyShellCommand(command: string): boolean {
+export function isReadOnlyShellCommand(command: string): boolean {
 	if (/[;&]\s*(rm|mv|cp|chmod|chown|install|truncate|touch|mkdir|rmdir)\b/i.test(command)) return false;
 	return splitCommandSegments(command).every(isReadOnlyShellSegment);
 }
@@ -619,10 +648,6 @@ async function isProtectedPath(absolute: string, home: string, gitDirs: string[]
 }
 
 // Spec A.2(a): component-wise lstat walk with no symlink component. Anchored
-// at the (already real-pathed) project for in-project targets; the seat
-// manifest exception (N3) anchors at realpath($HOME), which herdr-driver
-// owns. Targets outside both have no trusted anchor and are rejected earlier.
-// Spec A.2(a): component-wise lstat walk with no symlink component. Anchored
 // at the (already real-pathed) project; the seat manifest exception (N3)
 // anchors at realpath($HOME). macOS-style aliases (/tmp → /private/tmp) are
 // tolerated only when realpath resolves the target back onto the anchor, so
@@ -702,6 +727,10 @@ async function seatAutoWriteAllowPath(
 	policy: PolicyFile,
 ): Promise<string | undefined> {
 	if (request.key !== "writeFiles" || !request.targetPath) return undefined;
+	// B9: the post-write guard map is bounded. Past the limit, fail closed
+	// (the request falls through to the operator dialog) instead of evicting
+	// an armed guard.
+	if (pendingSeatWrites.size >= PENDING_SEAT_WRITE_LIMIT) return undefined;
 	const home = os.homedir();
 	const manifestPath = seatManifestPath(policy);
 	const absolute = path.resolve(cwd, request.targetPath);
@@ -758,7 +787,16 @@ async function isRedirectTargetAllowed(
 	if (redirect.target === "/dev/null") return true;
 	const absolute = path.resolve(cwd, redirect.target);
 	if (isOutsideProject(absolute, projectPath, cwd)) return false;
-	return passesSeatPathChecks(absolute, projectPath, home, gitDirs, { allowManifest: false });
+	if (!(await passesSeatPathChecks(absolute, projectPath, home, gitDirs, { allowManifest: false }))) return false;
+	// A4/B7: an existing redirect target must be a plain file with exactly one
+	// link, like write/edit targets (spec A.2/A.4).
+	try {
+		const st = await fs.lstat(absolute);
+		if (st.isSymbolicLink() || st.nlink !== 1) return false;
+	} catch {
+		// New file: nothing exists to swap yet.
+	}
+	return true;
 }
 
 // Spec A.3 test-runner shapes. N5: the type-check shape is
@@ -768,7 +806,8 @@ async function isRedirectTargetAllowed(
 function isTestRunnerSegment(tokens: string[]): boolean {
 	const [first, second, third] = tokens;
 	if (first === "python3" && second === "-m" && (third === "unittest" || third === "pytest")) return true;
-	if (first === "sh" && tokens.length === 2 && /^tests\/.+\.sh$/.test(tokens[1])) return true;
+	// A7: every argument must be a tests/<name>.sh path.
+	if (first === "sh" && tokens.length >= 2 && tokens.slice(1).every((token) => /^tests\/.+\.sh$/.test(token))) return true;
 	if (first === "node" && second === "--test") return true;
 	if (first === "npm" && second === "test") return true;
 	if (
@@ -796,7 +835,9 @@ function parseGitSegment(
 			break;
 		}
 		if (!token.startsWith("-")) break;
-		if (/^-(?:c|config-env)$/.test(token) || /^--config-env/.test(token)) {
+		// A1: deny -c, the glued -c<key>=<value> form (e.g. -ccore.hooksPath=…)
+		// and --config-env outright; -C stays a distinct, case-sensitive option.
+		if (/^-c/.test(token) || /^--config-env/.test(token)) {
 			return { denied: "git -c/--config-env is not permitted without operator approval" };
 		}
 		if (/^(--git-dir|--work-tree|--exec-path|--namespace|--super-prefix)(=|$)/.test(token)) {
@@ -849,6 +890,9 @@ function isInProjectGitSegment(tokens: string[], projectPath: string, cwd: strin
 	const parsed = parseGitSegment(tokens, projectPath, cwd);
 	if (!parsed || "denied" in parsed) return false;
 	const { subcommand, args } = parsed;
+	// A3/B2: --output, --output=… and glued -o… on read subcommands write
+	// anywhere on disk; never auto-allowed.
+	if (args.some((arg) => /^--output/.test(arg) || /^-o/.test(arg))) return false;
 	if (SEAT_GIT_READ_SUBCOMMANDS.has(subcommand)) return true;
 	if (subcommand === "branch") return args.length === 1 && args[0] === "--show-current";
 	if (subcommand === "add") return args.length > 0 && args.every((arg) => !arg.startsWith("-") && arg !== "--");
@@ -866,12 +910,22 @@ function withoutSedScript(bare: string): string {
 	return bare;
 }
 
+// B4: `$` outside single-quoted spans is expanded by bash before any literal
+// check below runs; single quotes are the only quoting that suppresses
+// expansion, so an unquoted `$` means the checked text is not what will run.
+function containsUnquotedDollar(segment: string): boolean {
+	return segment.replace(/'[^']*'/g, " ").includes("$");
+}
+
 async function isSeatAutoBashAllowed(command: string, projectPath: string, cwd: string, policy: PolicyFile): Promise<boolean> {
 	const segments = splitCommandSegments(command);
 	if (segments.length === 0) return false;
 	const home = os.homedir();
 	const gitDirs = await resolveGitEntryDirs(projectPath);
 	for (const segment of segments) {
+		// B4: reject any segment with an unquoted `$` — redirect targets and
+		// path-bearing tokens would be checked literally but expanded by bash.
+		if (containsUnquotedDollar(segment)) return false;
 		const parsed = parseSegmentRedirects(segment);
 		if (parsed.forbidden || !parsed.bare) return false;
 		for (const redirect of parsed.redirects) {
@@ -915,10 +969,14 @@ async function seatHardDeniedReason(command: string, projectPath: string, cwd: s
 			}
 		}
 		for (const token of tokens) {
-			if (token.startsWith("-")) continue;
-			const absolute = path.resolve(cwd, token);
-			if (await isProtectedPath(absolute, home, gitDirs)) {
-				return "paths into protected locations are not permitted without operator approval";
+			// A3/B2/B8: option values hide paths; scan the value part as well.
+			const candidates = [token, optionValueOf(token)].filter((candidate): candidate is string => !!candidate);
+			for (const candidate of candidates) {
+				if (candidate.startsWith("-")) continue;
+				const absolute = path.resolve(cwd, candidate);
+				if (await isProtectedPath(absolute, home, gitDirs)) {
+					return "paths into protected locations are not permitted without operator approval";
+				}
 			}
 		}
 	}
@@ -940,8 +998,10 @@ async function armSeatWriteGuard(toolCallId: string, targetPath: string): Promis
 		previous = undefined;
 	}
 	if (pendingSeatWrites.size >= PENDING_SEAT_WRITE_LIMIT) {
-		const oldest = pendingSeatWrites.keys().next().value;
-		if (oldest !== undefined) pendingSeatWrites.delete(oldest);
+		// B9: never evict an armed guard. Unreachable while seatAuto arms guards
+		// (seatAutoWriteAllowPath fails the request closed at the limit); kept
+		// defensive so a future call site cannot silently evict a guard.
+		return;
 	}
 	pendingSeatWrites.set(toolCallId, { path: guardPath, previous });
 }
@@ -991,12 +1051,29 @@ async function verifySeatWrite(
 	if (ctx.hasUI) ctx.ui.notify(`seatAuto: post-write check failed for ${entry.path}; ${note}`, "warning");
 }
 
-function commandMentionsOutsideProject(command: string, projectPath: string, cwd: string): boolean {
+// A3/B2/B8: option values (`--opt=/abs`, glued `-X/abs`) hide a path that
+// never appears as its own token; extract the value part so the path scans
+// see it.
+function optionValueOf(token: string): string | undefined {
+	const eq = token.match(/^--[^\s=]+=(.+)$/);
+	if (eq) return eq[1];
+	const glued = token.match(/^-[A-Za-z](.+)$/);
+	return glued ? glued[1] : undefined;
+}
+
+function mentionsOutsideProject(token: string, projectPath: string, cwd: string): boolean {
+	if (token === ".." || token.startsWith(`..${path.sep}`)) return true;
+	return path.isAbsolute(token) && isOutsideProject(token, projectPath, cwd);
+}
+
+export function commandMentionsOutsideProject(command: string, projectPath: string, cwd: string): boolean {
 	const tokens = command.match(/(?:"[^"]+"|'[^']+'|\S+)/g) || [];
 	for (const rawToken of tokens) {
 		const token = rawToken.replace(/^['"]|['"]$/g, "");
-		if (token === ".." || token.startsWith(`..${path.sep}`)) return true;
-		if (path.isAbsolute(token) && isOutsideProject(token, projectPath, cwd)) return true;
+		if (mentionsOutsideProject(token, projectPath, cwd)) return true;
+		// The value of an --opt=… / -X… token is a path too (spec A3).
+		const value = optionValueOf(token);
+		if (value && mentionsOutsideProject(value, projectPath, cwd)) return true;
 	}
 	return false;
 }
@@ -1082,6 +1159,22 @@ async function ensurePermission(
 		}
 	}
 
+	// B3: a write/edit target that resolves onto a protected path never
+	// reaches any allow path — stored grants included — in any mode (spec
+	// A.1/N6). Run before every grant lookup so write/edit requests cannot
+	// bypass the protected-path, symlink and nlink checks. N3: the seat's own
+	// exact manifest path stays the one writable location outside the project.
+	if (request.key === "writeFiles" && request.targetPath) {
+		const home = os.homedir();
+		const gitDirs = await resolveGitEntryDirs(projectPath);
+		const real = (await realpathThroughExisting(request.targetPath)) || request.targetPath;
+		const manifestPath = seatManifestPath(policy);
+		const isManifest = !!manifestPath && (request.targetPath === manifestPath || real === manifestPath);
+		if (!isManifest && (await isProtectedPath(real, home, gitDirs))) {
+			return promptForPermission(ctx, projectPath, request, policy);
+		}
+	}
+
 	if (policy.mode === "yolo") {
 		if (request.command) {
 			const hardDenyReason = isYoloHardDenied(request.command, projectPath, ctx.cwd);
@@ -1095,21 +1188,27 @@ async function ensurePermission(
 
 	const promptShieldStrict = await isPromptShieldStrict();
 	const sensitiveUnderShield = promptShieldStrict && isSensitiveWhenPromptShieldRiskActive(request.key);
+	// B3: while seatAuto is active, stored writeFiles grants (session and
+	// project) never decide — seatAuto's own checks must run instead.
+	const seatAutoActive = !userBash && isSeatAutoActive(policy);
+	const ignoreWriteGrants = seatAutoActive && request.key === "writeFiles";
 
-	if (!sensitiveUnderShield) {
+	if (!sensitiveUnderShield && !ignoreWriteGrants) {
 		const sessionDecision = SESSION_PERMISSIONS.get(projectPath)?.[request.key];
 		if (sessionDecision) return { allowed: sessionDecision === "allow" };
 	}
 
 	if (!sensitiveUnderShield) {
-		const projectDecision = policy.permissions[request.key];
-		if (projectDecision) return { allowed: projectDecision === "allow" };
+		if (!ignoreWriteGrants) {
+			const projectDecision = policy.permissions[request.key];
+			if (projectDecision) return { allowed: projectDecision === "allow" };
+		}
 
 		if (policy.mode === "readOnlyAuto" && isReadOnlyAutoAllowed(request, projectPath, ctx.cwd)) {
 			return { allowed: true };
 		}
 
-		if (policy.mode === "seatAuto" && !userBash && isSeatAutoActive(policy)) {
+		if (seatAutoActive) {
 			// projectPath is the realpath of ctx.cwd, so it is also the correct
 			// base for resolving seat request paths (macOS /tmp → /private/tmp).
 			const seatWritePath = await seatAutoWriteAllowPath(request, projectPath, projectPath, policy);
@@ -1237,7 +1336,7 @@ function nextMode(mode: PermissionMode): PermissionMode {
 	return "ask";
 }
 
-function parseMode(mode: string): PermissionMode | undefined {
+export function parseMode(mode: string): PermissionMode | undefined {
 	if (mode === "ask" || mode === "manual") return "ask";
 	if (mode === "read-only" || mode === "readonly" || mode === "readOnlyAuto".toLowerCase()) return "readOnlyAuto";
 	if (mode === "auto" || mode === "llm" || mode === "llm-auto" || mode === "automatic") return "llmAuto";
@@ -1293,7 +1392,7 @@ async function getProjectPath(cwd: string): Promise<string> {
 	}
 }
 
-function isOutsideProject(requestedPath: string, projectPath: string, cwd: string): boolean {
+export function isOutsideProject(requestedPath: string, projectPath: string, cwd: string): boolean {
 	const absolute = path.resolve(cwd, requestedPath);
 	const relative = path.relative(projectPath, absolute);
 	return relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);

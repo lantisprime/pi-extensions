@@ -1,204 +1,70 @@
 #!/usr/bin/env -S node --require jiti/register
 // Usage: node --require jiti/register permission-policy/test-fixtures/test-classification.ts
 // or run via the shell wrapper
+//
+// These scenarios import the classification helpers from the REAL extension
+// module (permission-policy/index.ts) so the tests cannot drift from the
+// implementation (spec A.2/B6). Like test-seat-auto.ts, it points HOME at a
+// throwaway directory and stubs @earendil-works/pi-ai before the dynamic
+// import, removing the stub afterwards (only when this run created it).
 
-import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const PERMISSION_LABELS: Record<string, string> = {
-	readOutsideProject: "Read files outside this project",
-	bashCommands: "Run bash commands",
-	destructiveBash: "Run destructive shell commands",
-	git: "Run git commands",
-	web: "Search or fetch from the web",
-	writeFiles: "Write or edit files",
-	mcp: "Call MCP server tools",
-};
+const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(THIS_DIR, "..", "..");
 
-const WEB_TOOL_NAMES = new Set(["web_search", "search_web", "web", "browser", "fetch", "http_get"]);
+// Filled in by main() after the dynamic import below.
+type IndexModule = Record<string, any>;
+let index: IndexModule;
 
 function looksLikeGitCommand(command: string): boolean {
-	return /\bgit\b/i.test(command);
+	return index.looksLikeGitCommand(command) as boolean;
 }
 
 function looksDestructive(command: string): boolean {
-	const destructiveCommand = /(^|[;&|()\s])(rm|mv|cp|unlink|rmdir|chmod|chown|install|truncate)\s+/i.test(command);
-	// Stream dups (2>&1, >&2) and /dev/null discard output instead of overwriting
-	// a file, and >> appends; none of those are overwrite redirects (spec A.4).
-	// Everything else with an overwrite-style redirect or tee into a file is.
-	const overwriteRedirect = /(^|\s)(?:\d*&?>|\d?>|tee\s+)(?!>|\s*\/dev\/null\b|\s*&\s*\d+\b)/i.test(command);
-	const inPlaceEdit = /(^|[;&|()\s])(sed|perl|python|node|ruby)\s+.*\s(-i|--in-place)\b/i.test(command);
-	return destructiveCommand || overwriteRedirect || inPlaceEdit;
-}
-
-function isYoloHardDenied(command: string, projectPath: string, cwd: string): string | undefined {
-	const normalized = command.replace(/\\n|[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
-	if (!normalized) return undefined;
-	if (/(^|[;&|()\s])rm\s+[^;&|()]*?(?:--force\b|-[A-Za-z]*f[A-Za-z]*\b)/i.test(normalized)) return "rm -f/rm -rf commands are blocked even in YOLO mode";
-	if (/(^|[;&|()\s])rm\s+[^;&|()]*\s(?:\.git|\.git\/|\.\/\.git|\.\/\.git\/)(?:\s|$)/i.test(normalized)) return "commands that delete the repository metadata are blocked even in YOLO mode";
-	if (/(?:\.git\b.{0,120}\brm\b|\brm\b.{0,120}\.git\b)/i.test(normalized)) return "commands that delete the repository metadata are blocked even in YOLO mode";
-	if (/\bgit\s+worktree\s+remove\b/i.test(normalized) && /(?:^|\s)(?:--force|-f)(?:\s|$)/i.test(normalized)) return "forced repository worktree deletion is blocked even in YOLO mode";
-
-	const rmTargets = extractRmLikeTargets(normalized);
-	for (const target of rmTargets) {
-		if (target === ".git" || target.startsWith(`.git${path.sep}`)) return "commands that delete the repository metadata are blocked even in YOLO mode";
-		const absolute = path.resolve(cwd, target);
-		if (absolute === projectPath || projectPath.startsWith(`${absolute}${path.sep}`)) {
-			return "commands that delete the project repository are blocked even in YOLO mode";
-		}
-	}
-	return undefined;
-}
-
-function isYoloHardDeniedBool(command: string, projectPath: string, cwd: string): boolean {
-	return !!isYoloHardDenied(command, projectPath, cwd);
-}
-
-function extractRmLikeTargets(command: string): string[] {
-	const targets: string[] = [];
-	for (const segment of command.split(/\s*(?:&&|\|\||;|\|)\s*/)) {
-		const tokens = segment.match(/(?:"[^"]+"|'[^']+'|\S+)/g) || [];
-		const commandIndex = tokens.findIndex((token) => /^(rm|rmdir|unlink)$/.test(token));
-		if (commandIndex < 0) continue;
-		for (const raw of tokens.slice(commandIndex + 1)) {
-			const token = raw.replace(/^['"]|['"]$/g, "");
-			if (!token || token === "--" || token.startsWith("-")) continue;
-			targets.push(token);
-		}
-	}
-	return targets;
-}
-
-function splitCommandSegments(command: string): string[] {
-	// Newline is a command separator too (spec N4); a smuggled second line must
-	// never inherit the first line's shape.
-	return command
-		.split(/\s*(?:\r?\n|&&|\|\||;|\|)\s*/)
-		.map((segment) => segment.trim())
-		.filter(Boolean);
-}
-
-function shellTokens(segment: string): string[] {
-	return (segment.match(/(?:"[^"]+"|'[^']+'|\S+)/g) || []).map((token) => token.replace(/^['"]|['"]$/g, ""));
-}
-
-// Strict read-only shapes (spec N1): find may not delete/execute/print-to-file,
-// sed is only -n with a print script, awk and xargs are not read-only. When
-// unsure, NOT read-only.
-const SIMPLE_READONLY_COMMANDS = new Set([
-	"pwd", "ls", "grep", "rg", "cat", "head", "tail", "wc",
-	"sort", "uniq", "file", "stat", "du", "df",
-	"echo", "printf", "which", "command", "test",
-]);
-
-function isFindReadOnly(args: string[]): boolean {
-	return !args.some((arg) => /^-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)$/.test(arg));
-}
-
-function isPrintOnlySedSubstitute(part: string): boolean {
-	if (part.length < 2) return false;
-	const delimiter = part[1];
-	const body = part.slice(2).split(`\\${delimiter}`).join("\u0000");
-	const pieces = body.split(delimiter);
-	if (pieces.length < 2 || pieces.length > 3) return false;
-	// s/// flags: g, p, case/match flags and occurrence numbers are fine; the
-	// w (write-to-file) and e (execute) flags are not.
-	return !/[^gpIiMm0-9]/.test(pieces[2] || "");
-}
-
-function isPrintOnlySedScript(script: string): boolean {
-	return script
-		.split(";")
-		.map((part) => part.trim())
-		.every((part) => {
-			if (!part) return false;
-			if (/^(?:\/[^/]+\/|\$|\d+)(?:,(?:\/[^/]+\/|\$|\d+))?p$/.test(part)) return true;
-			return part.startsWith("s") && isPrintOnlySedSubstitute(part);
-		});
-}
-
-function isSedPrintOnly(args: string[]): boolean {
-	let sawN = false;
-	const scriptArgs: string[] = [];
-	for (const arg of args) {
-		if (arg === "-n") {
-			sawN = true;
-			continue;
-		}
-		if (arg.startsWith("-")) return false; // -i, -e, -f, ...: unsure → not read-only
-		scriptArgs.push(arg);
-	}
-	if (!sawN || scriptArgs.length === 0) return false;
-	return isPrintOnlySedScript(scriptArgs[0]);
-}
-
-function isReadOnlyShellSegment(segment: string): boolean {
-	const tokens = shellTokens(segment);
-	const first = tokens[0];
-	if (!first) return false;
-	if (first === "find") return isFindReadOnly(tokens.slice(1));
-	if (first === "sed") return isSedPrintOnly(tokens.slice(1));
-	return SIMPLE_READONLY_COMMANDS.has(first);
+	return index.looksDestructive(command) as boolean;
 }
 
 function isReadOnlyShellCommand(command: string): boolean {
-	if (/[;&]\s*(rm|mv|cp|chmod|chown|install|truncate|touch|mkdir|rmdir)\b/i.test(command)) return false;
-	return splitCommandSegments(command).every(isReadOnlyShellSegment);
+	return index.isReadOnlyShellCommand(command) as boolean;
 }
 
 function isReadOnlyGitCommand(command: string): boolean {
-	const match = command.match(/\bgit\s+(?:-[^\s]+\s+)*(\w[\w-]*)/i);
-	if (!match) return false;
-	return new Set([
-		"status", "diff", "log", "show", "branch", "remote", "rev-parse",
-		"ls-files", "grep", "describe", "blame",
-	]).has(match[1].toLowerCase());
+	return index.isReadOnlyGitCommand(command) as boolean;
 }
 
 function isOutsideProject(requestedPath: string, projectPath: string, cwd: string): boolean {
-	const absolute = path.resolve(cwd, requestedPath);
-	const relative = path.relative(projectPath, absolute);
-	return relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
-}
-
-function classifyBashCommand(command: string): string[] {
-	const keys: string[] = [];
-	if (looksLikeGitCommand(command)) keys.push("git");
-	if (looksDestructive(command)) keys.push("destructiveBash");
-	if (keys.length === 0 && command.trim()) keys.push("bashCommands");
-	return keys;
-}
-
-function classifyToolCall(toolName: string, input: Record<string, unknown>, projectPath: string, cwd: string): string[] {
-	if (toolName === "read") {
-		const requestedPath = String(input.path || "");
-		if (requestedPath && isOutsideProject(requestedPath, projectPath, cwd)) return ["readOutsideProject"];
-		return [];
-	}
-	if (toolName === "write" || toolName === "edit") return ["writeFiles"];
-	if (toolName === "bash") return classifyBashCommand(String(input.command || ""));
-	// MCP bridge tools (mcp_<server>_<tool>) are user-configured integrations
-	// with their own "mcp" permission key; do not classify them as web by name.
-	if (toolName.startsWith("mcp_")) return ["mcp"];
-	if (WEB_TOOL_NAMES.has(toolName) || /(^|_)(web|search|browser)(_|$)/i.test(toolName)) return ["web"];
-	return [];
-}
-
-function isReadOnlyAutoAllowedForBash(command: string, projectPath: string, cwd: string): boolean {
-	if (looksDestructive(command)) return false;
-	if (commandMentionsOutsideProject(command, projectPath, cwd)) return false;
-	if (looksLikeGitCommand(command)) return isReadOnlyGitCommand(command);
-	return isReadOnlyShellCommand(command);
+	return index.isOutsideProject(requestedPath, projectPath, cwd) as boolean;
 }
 
 function commandMentionsOutsideProject(command: string, projectPath: string, cwd: string): boolean {
-	const tokens = command.match(/(?:"[^"]+"|'[^']+'|\S+)/g) || [];
-	for (const rawToken of tokens) {
-		const token = rawToken.replace(/^['"]|['"]$/g, "");
-		if (token === ".." || token.startsWith(`..${path.sep}`)) return true;
-		if (path.isAbsolute(token) && isOutsideProject(token, projectPath, cwd)) return true;
-	}
-	return false;
+	return index.commandMentionsOutsideProject(command, projectPath, cwd) as boolean;
+}
+
+function classifyBashCommand(command: string): string[] {
+	return (index.classifyBashCommand(command) as { key: string }[]).map((request) => request.key);
+}
+
+async function classifyToolCall(toolName: string, input: Record<string, unknown>, projectPath: string, cwd: string): Promise<string[]> {
+	return ((await index.classifyToolCall(toolName, input, projectPath, cwd)) as { key: string }[]).map((request) => request.key);
+}
+
+// The extension's readOnlyAuto gate takes a full PermissionRequest and routes
+// by request key; mirror classifyBashCommand's key assignment for bash text.
+function isReadOnlyAutoAllowedForBash(command: string, projectPath: string, cwd: string): boolean {
+	const key = index.looksLikeGitCommand(command) && !index.looksDestructive(command) ? "git" : "bashCommands";
+	return index.isReadOnlyAutoAllowed({ key, title: "", detail: "", command }, projectPath, cwd) as boolean;
+}
+
+function isYoloHardDeniedBool(command: string, projectPath: string, cwd: string): boolean {
+	return !!index.isYoloHardDenied(command, projectPath, cwd);
+}
+
+function parseMode(mode: string): string | undefined {
+	return index.parseMode(mode);
 }
 
 // ---- Tests ----
@@ -220,6 +86,37 @@ function check(scenarioName: string, actual: unknown, expected: unknown) {
 	}
 }
 
+async function main() {
+	// Redirect HOME BEFORE importing index.ts: its module-level POLICY_DIR and
+	// PROMPT_SHIELD_STATE_PATH constants are computed from os.homedir() at load.
+	process.env.HOME = mkdtempSync(path.join(os.tmpdir(), "classif-home-"));
+
+	// Minimal stub for index.ts's runtime import of @earendil-works/pi-ai.
+	// A6: removed again in the finally below, but only when this run created
+	// it, so a pre-existing install is never clobbered.
+	const stubDir = path.join(REPO_ROOT, "node_modules", "@earendil-works", "pi-ai");
+	const createdStub = !existsSync(stubDir);
+	try {
+		mkdirSync(stubDir, { recursive: true });
+		writeFileSync(
+			path.join(stubDir, "package.json"),
+			JSON.stringify({ name: "@earendil-works/pi-ai", version: "0.0.0-test-stub", type: "module", main: "index.js" }, null, "\t"),
+		);
+		writeFileSync(
+			path.join(stubDir, "index.js"),
+			"export function complete() { throw new Error('stubbed: complete() is not used by these tests'); }\n",
+		);
+		index = (await import("../index.ts")) as IndexModule;
+		await runScenarios();
+	} finally {
+		if (createdStub) rmSync(stubDir, { recursive: true, force: true });
+	}
+
+	console.log(`\n${passed} passed, ${failed} failed out of ${scenario} scenarios`);
+	if (failed > 0) process.exit(1);
+}
+
+async function runScenarios(): Promise<void> {
 // destructive detection
 check("rm is destructive", looksDestructive("rm -rf /tmp/x"), true);
 check("mv is destructive", looksDestructive("mv a b"), true);
@@ -265,6 +162,10 @@ check("pwd is read-only", isReadOnlyShellCommand("pwd"), true);
 check("ls is read-only", isReadOnlyShellCommand("ls -la"), true);
 check("cat is read-only", isReadOnlyShellCommand("cat file"), true);
 check("grep is read-only", isReadOnlyShellCommand("grep pattern file"), true);
+check("command -v <word> is the only command shape that is read-only (B1)", isReadOnlyShellCommand("command -v node"), true);
+check("command node -e is not read-only (B1)", isReadOnlyShellCommand("command node -e x"), false);
+check("command bash -c is not read-only (B1)", isReadOnlyShellCommand("command bash -c x"), false);
+check("command -v with two words is not read-only (B1)", isReadOnlyShellCommand("command -v node -e x"), false);
 check("find is read-only (strict shape)", isReadOnlyShellCommand("find . -name '*.ts'"), true);
 check("find -delete is not read-only (N1)", isReadOnlyShellCommand("find . -name '*.ts' -delete"), false);
 check("find -exec is not read-only (N1)", isReadOnlyShellCommand("find . -exec rm {} +"), false);
@@ -328,6 +229,11 @@ check("above project root is outside", isOutsideProject("../../other", projectPa
 check("cat /etc/passwd mentions outside", commandMentionsOutsideProject("cat /etc/passwd", projectPath, cwd), true);
 check("ls -la does not mention outside", commandMentionsOutsideProject("ls -la", projectPath, cwd), false);
 check("cd .. mentions outside", commandMentionsOutsideProject("cd ..", projectPath, cwd), true);
+// Option values are paths too (A3/B2/B8): --opt=value and glued -Xvalue.
+check("--import=/abs mentions outside (A3)", commandMentionsOutsideProject("node --test --import=/abs/x.js", projectPath, cwd), true);
+check("--prefix=../.. mentions outside (A3)", commandMentionsOutsideProject("npm test --prefix=../..", projectPath, cwd), true);
+check("glued -X/abs mentions outside (A3)", commandMentionsOutsideProject("tool -L/abs/x", projectPath, cwd), true);
+check("--flag=value inside project does not mention outside", commandMentionsOutsideProject("node --test --import=./setup.js", projectPath, cwd), false);
 
 // classifyBashCommand
 check("git cmd -> git", classifyBashCommand("git status"), ["git"]);
@@ -341,23 +247,23 @@ check("read-only -> bashCommands (no auto)", classifyBashCommand("ls -la"), ["ba
 check("empty -> no request", classifyBashCommand("  "), []);
 
 // classifyToolCall
-check("write tool -> writeFiles", classifyToolCall("write", { path: "x", content: "y" }, projectPath, cwd), ["writeFiles"]);
-check("edit tool -> writeFiles", classifyToolCall("edit", { path: "x" }, projectPath, cwd), ["writeFiles"]);
-check("inside read -> none", classifyToolCall("read", { path: "file.ts" }, projectPath, cwd), []);
-check("outside read -> readOutsideProject", classifyToolCall("read", { path: "/etc/passwd" }, projectPath, cwd), ["readOutsideProject"]);
-check("web tool -> web", classifyToolCall("web_search", {}, projectPath, cwd), ["web"]);
-check("secure_web_search -> web", classifyToolCall("secure_web_search", {}, projectPath, cwd), ["web"]);
-check("search_web -> web", classifyToolCall("search_web", {}, projectPath, cwd), ["web"]);
-check("browser -> web", classifyToolCall("browser", {}, projectPath, cwd), ["web"]);
-check("bash -> classifyBashCommand", classifyToolCall("bash", { command: "ls" }, projectPath, cwd), ["bashCommands"]);
-check("unknown tool -> none", classifyToolCall("grep", {}, projectPath, cwd), []);
+check("write tool -> writeFiles", await classifyToolCall("write", { path: "x", content: "y" }, projectPath, cwd), ["writeFiles"]);
+check("edit tool -> writeFiles", await classifyToolCall("edit", { path: "x" }, projectPath, cwd), ["writeFiles"]);
+check("inside read -> none", await classifyToolCall("read", { path: "file.ts" }, projectPath, cwd), []);
+check("outside read -> readOutsideProject", await classifyToolCall("read", { path: "/etc/passwd" }, projectPath, cwd), ["readOutsideProject"]);
+check("web tool -> web", await classifyToolCall("web_search", {}, projectPath, cwd), ["web"]);
+check("secure_web_search -> web", await classifyToolCall("secure_web_search", {}, projectPath, cwd), ["web"]);
+check("search_web -> web", await classifyToolCall("search_web", {}, projectPath, cwd), ["web"]);
+check("browser -> web", await classifyToolCall("browser", {}, projectPath, cwd), ["web"]);
+check("bash -> classifyBashCommand", await classifyToolCall("bash", { command: "ls" }, projectPath, cwd), ["bashCommands"]);
+check("unknown tool -> none", await classifyToolCall("grep", {}, projectPath, cwd), []);
 
 // MCP bridge tools: own category, never misclassified as web by name.
-check("mcp knowledge_search -> mcp only", classifyToolCall("mcp_knowledge_knowledge_search", {}, projectPath, cwd), ["mcp"]);
-check("mcp task_list -> mcp only", classifyToolCall("mcp_taskboard_task_list", {}, projectPath, cwd), ["mcp"]);
-check("mcp message_list -> mcp only", classifyToolCall("mcp_taskboard_message_list", {}, projectPath, cwd), ["mcp"]);
-check("mcp searxng search -> mcp only (web gate not applied by name)", classifyToolCall("mcp_searxng_web_search", {}, projectPath, cwd), ["mcp"]);
-check("mcp episodic_search -> mcp only", classifyToolCall("mcp_knowledge_episodic_search", {}, projectPath, cwd), ["mcp"]);
+check("mcp knowledge_search -> mcp only", await classifyToolCall("mcp_knowledge_knowledge_search", {}, projectPath, cwd), ["mcp"]);
+check("mcp task_list -> mcp only", await classifyToolCall("mcp_taskboard_task_list", {}, projectPath, cwd), ["mcp"]);
+check("mcp message_list -> mcp only", await classifyToolCall("mcp_taskboard_message_list", {}, projectPath, cwd), ["mcp"]);
+check("mcp searxng search -> mcp only (web gate not applied by name)", await classifyToolCall("mcp_searxng_web_search", {}, projectPath, cwd), ["mcp"]);
+check("mcp episodic_search -> mcp only", await classifyToolCall("mcp_knowledge_episodic_search", {}, projectPath, cwd), ["mcp"]);
 
 // YOLO hard-deny behavior: auto-allow everything except rm -f/rm -rf style commands and repo deletion.
 check("YOLO allows ordinary bash", isYoloHardDeniedBool("npm test", projectPath, cwd), false);
@@ -384,18 +290,6 @@ check("YOLO blocks forced git worktree removal", isYoloHardDeniedBool("git workt
 check("YOLO allows non-forced git worktree removal by hard-deny scope", isYoloHardDeniedBool("git worktree remove ../project", projectPath, cwd), false);
 
 // parseMode (for CLI --permission-mode flag)
-type PermissionMode = "ask" | "readOnlyAuto" | "llmAuto" | "seatAuto" | "yolo";
-
-function parseMode(mode: string): PermissionMode | undefined {
-	if (mode === "ask" || mode === "manual") return "ask";
-	if (mode === "read-only" || mode === "readonly" || mode === "readOnlyAuto".toLowerCase()) return "readOnlyAuto";
-	if (mode === "auto" || mode === "llm" || mode === "llm-auto" || mode === "automatic") return "llmAuto";
-	if (mode === "seat-auto" || mode === "seatauto") return "seatAuto";
-	if (mode === "yolo" || mode === "unsafe" || mode === "dangerous") return "yolo";
-	return undefined;
-}
-
-// parseMode tests
 check("parseMode ask", parseMode("ask"), "ask");
 check("parseMode manual", parseMode("manual"), "ask");
 check("parseMode read-only", parseMode("read-only"), "readOnlyAuto");
@@ -412,6 +306,9 @@ check("parseMode seat-auto", parseMode("seat-auto"), "seatAuto");
 check("parseMode seatauto", parseMode("seatauto"), "seatAuto");
 check("parseMode invalid", parseMode("garbage"), undefined);
 check("parseMode empty", parseMode(""), undefined);
+}
 
-console.log(`\n${passed} passed, ${failed} failed out of ${scenario} scenarios`);
-if (failed > 0) process.exit(1);
+main().catch((error) => {
+	console.error(error);
+	process.exit(1);
+});
