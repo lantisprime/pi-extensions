@@ -232,6 +232,9 @@ check("rm blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("rm x", project
 check("backslash path blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("cat \\/etc/passwd", projectPath, cwd), false);
 check("unquoted $ blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("cat $TMPDIR/x", projectPath, cwd), false);
 check("glued quotes blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash('cat "a"b', projectPath, cwd), false);
+check("glob blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("cat .*/../*", projectPath, cwd), false);
+check("brace blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("cat {..,src}/x", projectPath, cwd), false);
+check("quoted glob allowed in readOnlyAuto", isReadOnlyAutoAllowedForBash("find . -name '*.ts'", projectPath, cwd), true);
 check("single-quoted backslash allowed in readOnlyAuto", isReadOnlyAutoAllowedForBash("grep 'x\\.y' f.txt", projectPath, cwd), true);
 check("chmod blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("chmod 777 x", projectPath, cwd), false);
 check("git status allowed in readOnlyAuto", isReadOnlyAutoAllowedForBash("git status", projectPath, cwd), true);

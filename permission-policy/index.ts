@@ -432,6 +432,7 @@ export function isReadOnlyAutoAllowed(request: PermissionRequest, projectPath: s
 	// R3: the same "checked text is what runs" guards as seatAuto.
 	if (!hasTriviallyModelledQuotes(request.command)) return false;
 	if (containsUnquotedDollar(request.command) || containsUnquotedBackslash(request.command)) return false;
+	if (!hasOnlyModelledCharacters(request.command)) return false;
 	if (commandMentionsOutsideProject(request.command, projectPath, cwd)) return false;
 	if (looksDestructive(request.command)) return false;
 	if (request.key === "git") return isReadOnlyGitCommand(request.command);
@@ -997,6 +998,18 @@ function containsUnquotedBackslash(segment: string): boolean {
 	return segment.replace(/'[^']*'/g, " ").includes("\\");
 }
 
+// R4: a positive allowlist for unquoted text, so the whole "bash expands what
+// the checker resolved literally" class is closed at once instead of one
+// metacharacter per review round (globs * ? [ ], braces { }, tilde forms,
+// history !, subshells ( ), input redirects <). Quoted spans are whole-token
+// pairs (hasTriviallyModelledQuotes) and carry no expansion here because $
+// and backslash are rejected separately. What remains must be plain words,
+// whitespace and the operators the splitter and redirect parser model.
+function hasOnlyModelledCharacters(segment: string): boolean {
+	const unquoted = segment.replace(/'[^']*'|"[^"]*"/g, " ");
+	return !/[^A-Za-z0-9_.\/:@%+=,\-\s>&|;#]/.test(unquoted);
+}
+
 // B3/R2: quoting must be trivially modelled. Every token is either unquoted
 // or exactly one quote pair wrapping the whole token ('a b', "x # y") flanked
 // by whitespace. Internal quotes ("x'$PWD/..'y" — the case
@@ -1039,6 +1052,7 @@ async function isSeatAutoBashAllowed(command: string, projectPath: string, cwd: 
 		// path-bearing tokens would be checked literally but expanded by bash.
 		if (containsUnquotedDollar(segment)) return false;
 		if (containsUnquotedBackslash(segment)) return false;
+		if (!hasOnlyModelledCharacters(segment)) return false;
 		const parsed = parseSegmentRedirects(segment);
 		if (parsed.forbidden || !parsed.bare) return false;
 		for (const redirect of parsed.redirects) {

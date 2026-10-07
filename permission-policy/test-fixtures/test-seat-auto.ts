@@ -526,6 +526,28 @@ async function runSuite(stubDir: string): Promise<void> {
 		await expectAllowed(harness, ctx, "bash", { command: "grep 'x\\.y' README.md" });
 	});
 
+	await check("glob, brace, tilde and other unmodelled characters ask (R4)", async () => {
+		const ctx = makeCtx(wtProject);
+		for (const command of [
+			"cat .*/../*",
+			"cat {..,src}/x",
+			"cat [.][.]/x",
+			"cat ??/x",
+			"echo x > .*/../pwn",
+			"echo x >> .*/../pwn",
+			"git diff --no-index .*/x .gitignore",
+			"git -C .*/.. status",
+			"cat < ../x",
+			"cat ~root/x",
+			"ls src/*",
+			"sh tests/*.sh",
+		]) {
+			await expectDialog(harness, ctx, "bash", { command });
+		}
+		await expectAllowed(harness, ctx, "bash", { command: "cat README.md" });
+		await expectAllowed(harness, ctx, "bash", { command: "find . -name '*.ts'" });
+	});
+
 	await check("file -f, dotted sh tests/ paths and node --test -e ask (R3)", async () => {
 		const ctx = makeCtx(wtProject);
 		await expectDialog(harness, ctx, "bash", { command: "file -f list.txt" });
