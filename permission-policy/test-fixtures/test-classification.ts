@@ -1,140 +1,70 @@
 #!/usr/bin/env -S node --require jiti/register
 // Usage: node --require jiti/register permission-policy/test-fixtures/test-classification.ts
 // or run via the shell wrapper
+//
+// These scenarios import the classification helpers from the REAL extension
+// module (permission-policy/index.ts) so the tests cannot drift from the
+// implementation (spec A.2/B6). Like test-seat-auto.ts, it points HOME at a
+// throwaway directory and stubs @earendil-works/pi-ai before the dynamic
+// import, removing the stub afterwards (only when this run created it).
 
-import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const PERMISSION_LABELS: Record<string, string> = {
-	readOutsideProject: "Read files outside this project",
-	bashCommands: "Run bash commands",
-	destructiveBash: "Run destructive shell commands",
-	git: "Run git commands",
-	web: "Search or fetch from the web",
-	writeFiles: "Write or edit files",
-	mcp: "Call MCP server tools",
-};
+const THIS_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = path.resolve(THIS_DIR, "..", "..");
 
-const WEB_TOOL_NAMES = new Set(["web_search", "search_web", "web", "browser", "fetch", "http_get"]);
-
-const readOnlyCommands = new Set([
-	"pwd", "ls", "find", "grep", "rg", "cat", "head", "tail", "wc",
-	"sort", "uniq", "awk", "sed", "file", "stat", "du", "df",
-	"echo", "printf", "which", "command", "test",
-]);
+// Filled in by main() after the dynamic import below.
+type IndexModule = Record<string, any>;
+let index: IndexModule;
 
 function looksLikeGitCommand(command: string): boolean {
-	return /\bgit\b/i.test(command);
+	return index.looksLikeGitCommand(command) as boolean;
 }
 
 function looksDestructive(command: string): boolean {
-	const destructiveCommand = /(^|[;&|()\s])(rm|mv|cp|unlink|rmdir|chmod|chown|install|truncate)\s+/i.test(command);
-	const overwriteRedirect = /(^|\s)(\d?>|&>|tee\s+)(?!>)/i.test(command);
-	const inPlaceEdit = /(^|[;&|()\s])(sed|perl|python|node|ruby)\s+.*\s(-i|--in-place)\b/i.test(command);
-	return destructiveCommand || overwriteRedirect || inPlaceEdit;
-}
-
-function isYoloHardDenied(command: string, projectPath: string, cwd: string): string | undefined {
-	const normalized = command.replace(/\\n|[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
-	if (!normalized) return undefined;
-	if (/(^|[;&|()\s])rm\s+[^;&|()]*?(?:--force\b|-[A-Za-z]*f[A-Za-z]*\b)/i.test(normalized)) return "rm -f/rm -rf commands are blocked even in YOLO mode";
-	if (/(^|[;&|()\s])rm\s+[^;&|()]*\s(?:\.git|\.git\/|\.\/\.git|\.\/\.git\/)(?:\s|$)/i.test(normalized)) return "commands that delete the repository metadata are blocked even in YOLO mode";
-	if (/(?:\.git\b.{0,120}\brm\b|\brm\b.{0,120}\.git\b)/i.test(normalized)) return "commands that delete the repository metadata are blocked even in YOLO mode";
-	if (/\bgit\s+worktree\s+remove\b/i.test(normalized) && /(?:^|\s)(?:--force|-f)(?:\s|$)/i.test(normalized)) return "forced repository worktree deletion is blocked even in YOLO mode";
-
-	const rmTargets = extractRmLikeTargets(normalized);
-	for (const target of rmTargets) {
-		if (target === ".git" || target.startsWith(`.git${path.sep}`)) return "commands that delete the repository metadata are blocked even in YOLO mode";
-		const absolute = path.resolve(cwd, target);
-		if (absolute === projectPath || projectPath.startsWith(`${absolute}${path.sep}`)) {
-			return "commands that delete the project repository are blocked even in YOLO mode";
-		}
-	}
-	return undefined;
-}
-
-function isYoloHardDeniedBool(command: string, projectPath: string, cwd: string): boolean {
-	return !!isYoloHardDenied(command, projectPath, cwd);
-}
-
-function extractRmLikeTargets(command: string): string[] {
-	const targets: string[] = [];
-	for (const segment of command.split(/\s*(?:&&|\|\||;|\|)\s*/)) {
-		const tokens = segment.match(/(?:"[^"]+"|'[^']+'|\S+)/g) || [];
-		const commandIndex = tokens.findIndex((token) => /^(rm|rmdir|unlink)$/.test(token));
-		if (commandIndex < 0) continue;
-		for (const raw of tokens.slice(commandIndex + 1)) {
-			const token = raw.replace(/^['"]|['"]$/g, "");
-			if (!token || token === "--" || token.startsWith("-")) continue;
-			targets.push(token);
-		}
-	}
-	return targets;
+	return index.looksDestructive(command) as boolean;
 }
 
 function isReadOnlyShellCommand(command: string): boolean {
-	if (/[;&]\s*(rm|mv|cp|chmod|chown|install|truncate|touch|mkdir|rmdir)\b/i.test(command)) return false;
-	const normalized = command.replace(/\s+/g, " ").trim();
-	const segments = normalized.split(/\s*(?:&&|\|\||\|)\s*/);
-	return segments.every((segment) => {
-		const first = segment.trim().match(/^([A-Za-z0-9_.-]+)/)?.[1];
-		return !!first && readOnlyCommands.has(first) && !/\s(-i|--in-place)\b/.test(segment);
-	});
+	return index.isReadOnlyShellCommand(command) as boolean;
 }
 
 function isReadOnlyGitCommand(command: string): boolean {
-	const match = command.match(/\bgit\s+(?:-[^\s]+\s+)*(\w[\w-]*)/i);
-	if (!match) return false;
-	return new Set([
-		"status", "diff", "log", "show", "branch", "remote", "rev-parse",
-		"ls-files", "grep", "describe", "blame",
-	]).has(match[1].toLowerCase());
+	return index.isReadOnlyGitCommand(command) as boolean;
 }
 
 function isOutsideProject(requestedPath: string, projectPath: string, cwd: string): boolean {
-	const absolute = path.resolve(cwd, requestedPath);
-	const relative = path.relative(projectPath, absolute);
-	return relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
-}
-
-function classifyBashCommand(command: string): string[] {
-	const keys: string[] = [];
-	if (looksLikeGitCommand(command)) keys.push("git");
-	if (looksDestructive(command)) keys.push("destructiveBash");
-	if (keys.length === 0 && command.trim()) keys.push("bashCommands");
-	return keys;
-}
-
-function classifyToolCall(toolName: string, input: Record<string, unknown>, projectPath: string, cwd: string): string[] {
-	if (toolName === "read") {
-		const requestedPath = String(input.path || "");
-		if (requestedPath && isOutsideProject(requestedPath, projectPath, cwd)) return ["readOutsideProject"];
-		return [];
-	}
-	if (toolName === "write" || toolName === "edit") return ["writeFiles"];
-	if (toolName === "bash") return classifyBashCommand(String(input.command || ""));
-	// MCP bridge tools (mcp_<server>_<tool>) are user-configured integrations
-	// with their own "mcp" permission key; do not classify them as web by name.
-	if (toolName.startsWith("mcp_")) return ["mcp"];
-	if (WEB_TOOL_NAMES.has(toolName) || /(^|_)(web|search|browser)(_|$)/i.test(toolName)) return ["web"];
-	return [];
-}
-
-function isReadOnlyAutoAllowedForBash(command: string, projectPath: string, cwd: string): boolean {
-	if (looksDestructive(command)) return false;
-	if (commandMentionsOutsideProject(command, projectPath, cwd)) return false;
-	if (looksLikeGitCommand(command)) return isReadOnlyGitCommand(command);
-	return isReadOnlyShellCommand(command);
+	return index.isOutsideProject(requestedPath, projectPath, cwd) as boolean;
 }
 
 function commandMentionsOutsideProject(command: string, projectPath: string, cwd: string): boolean {
-	const tokens = command.match(/(?:"[^"]+"|'[^']+'|\S+)/g) || [];
-	for (const rawToken of tokens) {
-		const token = rawToken.replace(/^['"]|['"]$/g, "");
-		if (token === ".." || token.startsWith(`..${path.sep}`)) return true;
-		if (path.isAbsolute(token) && isOutsideProject(token, projectPath, cwd)) return true;
-	}
-	return false;
+	return index.commandMentionsOutsideProject(command, projectPath, cwd) as boolean;
+}
+
+function classifyBashCommand(command: string): string[] {
+	return (index.classifyBashCommand(command) as { key: string }[]).map((request) => request.key);
+}
+
+async function classifyToolCall(toolName: string, input: Record<string, unknown>, projectPath: string, cwd: string): Promise<string[]> {
+	return ((await index.classifyToolCall(toolName, input, projectPath, cwd)) as { key: string }[]).map((request) => request.key);
+}
+
+// The extension's readOnlyAuto gate takes a full PermissionRequest and routes
+// by request key; mirror classifyBashCommand's key assignment for bash text.
+function isReadOnlyAutoAllowedForBash(command: string, projectPath: string, cwd: string): boolean {
+	const key = index.looksLikeGitCommand(command) && !index.looksDestructive(command) ? "git" : "bashCommands";
+	return index.isReadOnlyAutoAllowed({ key, title: "", detail: "", command }, projectPath, cwd) as boolean;
+}
+
+function isYoloHardDeniedBool(command: string, projectPath: string, cwd: string): boolean {
+	return !!index.isYoloHardDenied(command, projectPath, cwd);
+}
+
+function parseMode(mode: string): string | undefined {
+	return index.parseMode(mode);
 }
 
 // ---- Tests ----
@@ -156,6 +86,44 @@ function check(scenarioName: string, actual: unknown, expected: unknown) {
 	}
 }
 
+async function main() {
+	// Redirect HOME BEFORE importing index.ts: its module-level POLICY_DIR and
+	// PROMPT_SHIELD_STATE_PATH constants are computed from os.homedir() at load.
+	process.env.HOME = mkdtempSync(path.join(os.tmpdir(), "classif-home-"));
+
+	// Minimal stub for index.ts's runtime import of @earendil-works/pi-ai.
+	// A6: removed again in the finally below, but only when this run created
+	// it, so a pre-existing install is never clobbered. A3/R2: if a stub (or a
+	// real install) is already present, fail instead of overwriting it.
+	const stubDir = path.join(REPO_ROOT, "node_modules", "@earendil-works", "pi-ai");
+	if (existsSync(stubDir)) {
+		console.error(
+			`refusing to run: ${stubDir} already exists — remove the @earendil-works/pi-ai stub from node_modules first (A3: the suites never overwrite an existing install)`,
+		);
+		process.exit(1);
+	}
+	const createdStub = !existsSync(stubDir);
+	try {
+		mkdirSync(stubDir, { recursive: true });
+		writeFileSync(
+			path.join(stubDir, "package.json"),
+			JSON.stringify({ name: "@earendil-works/pi-ai", version: "0.0.0-test-stub", type: "module", main: "index.js" }, null, "\t"),
+		);
+		writeFileSync(
+			path.join(stubDir, "index.js"),
+			"export function complete() { throw new Error('stubbed: complete() is not used by these tests'); }\n",
+		);
+		index = (await import("../index.ts")) as IndexModule;
+		await runScenarios();
+	} finally {
+		if (createdStub) rmSync(stubDir, { recursive: true, force: true });
+	}
+
+	console.log(`\n${passed} passed, ${failed} failed out of ${scenario} scenarios`);
+	if (failed > 0) process.exit(1);
+}
+
+async function runScenarios(): Promise<void> {
 // destructive detection
 check("rm is destructive", looksDestructive("rm -rf /tmp/x"), true);
 check("mv is destructive", looksDestructive("mv a b"), true);
@@ -168,6 +136,12 @@ check("unlink is destructive", looksDestructive("unlink x"), true);
 check("rmdir is destructive", looksDestructive("rmdir x"), true);
 check("overwrite redirect is destructive", looksDestructive("echo x > y"), true);
 check("tee is destructive", looksDestructive("echo x | tee y"), true);
+check("2>&1 is not an overwrite redirect (A.4)", looksDestructive("npm test 2>&1"), false);
+check(">&2 is not an overwrite redirect (A.4)", looksDestructive("npm test >&2"), false);
+check(">/dev/null is not an overwrite redirect (A.4)", looksDestructive("npm test > /dev/null"), false);
+check("2>/dev/null is not an overwrite redirect (A.4)", looksDestructive("npm test 2> /dev/null"), false);
+check("&>file is an overwrite redirect", looksDestructive("npm test &> out.txt"), true);
+check(">| is an overwrite redirect", looksDestructive("echo x >| out.txt"), true);
 check("append redirect is not destructive", looksDestructive("echo x >> y"), false);
 // The in-place-edit regex requires text between the command name and the flag.
 // When -i/--in-place is the first argument, the greedy .* consumes it and 
@@ -195,13 +169,39 @@ check("pwd is read-only", isReadOnlyShellCommand("pwd"), true);
 check("ls is read-only", isReadOnlyShellCommand("ls -la"), true);
 check("cat is read-only", isReadOnlyShellCommand("cat file"), true);
 check("grep is read-only", isReadOnlyShellCommand("grep pattern file"), true);
-check("find is read-only", isReadOnlyShellCommand("find . -name '*.ts'"), true);
+check("command -v <word> is the only command shape that is read-only (B1)", isReadOnlyShellCommand("command -v node"), true);
+check("command node -e is not read-only (B1)", isReadOnlyShellCommand("command node -e x"), false);
+check("command bash -c is not read-only (B1)", isReadOnlyShellCommand("command bash -c x"), false);
+check("command -v with two words is not read-only (B1)", isReadOnlyShellCommand("command -v node -e x"), false);
+check("find is read-only (strict shape)", isReadOnlyShellCommand("find . -name '*.ts'"), true);
+check("find -delete is not read-only (N1)", isReadOnlyShellCommand("find . -name '*.ts' -delete"), false);
+check("find -exec is not read-only (N1)", isReadOnlyShellCommand("find . -exec rm {} +"), false);
+check("find -fprint is not read-only (N1)", isReadOnlyShellCommand("find . -fprint out.txt"), false);
 check("wc is read-only", isReadOnlyShellCommand("wc -l file"), true);
 check("head is read-only", isReadOnlyShellCommand("head -20 file"), true);
 check("tail is read-only", isReadOnlyShellCommand("tail -f file"), true);
 check("sort is read-only", isReadOnlyShellCommand("sort file"), true);
-check("awk is read-only", isReadOnlyShellCommand("awk '{print $1}' file"), true);
-check("sed is read-only (no -i)", isReadOnlyShellCommand("sed 's/a/b/' file"), true);
+// B1/R2: strict shapes for members with write/exec argument forms.
+check("sort -o writes OUT, not read-only (B1/R2)", isReadOnlyShellCommand("sort -o out.txt in.txt"), false);
+check("sort --output= is not read-only (B1/R2)", isReadOnlyShellCommand("sort --output=x in.txt"), false);
+check("sort --output==x is not read-only (B1/R2)", isReadOnlyShellCommand("sort --output==x in.txt"), false);
+check("sort short cluster containing o (-no) is not read-only (B1/R2)", isReadOnlyShellCommand("sort -no in.txt"), false);
+check("sort --compress-program executes, not read-only (B1/R2)", isReadOnlyShellCommand("sort --compress-program=gzip in.txt"), false);
+check("sort with benign flags stays read-only (B1/R2)", isReadOnlyShellCommand("sort -rn -k2 in.txt"), true);
+check("uniq IN OUT writes OUT, not read-only (B1/R2)", isReadOnlyShellCommand("uniq in.txt out.txt"), false);
+check("uniq with a single input stays read-only (B1/R2)", isReadOnlyShellCommand("uniq -c in.txt"), true);
+check("wc --files0-from is not read-only (B1/R2)", isReadOnlyShellCommand("wc --files0-from=list.txt"), false);
+check("du --files0-from is not read-only (B1/R2)", isReadOnlyShellCommand("du --files0-from=list.txt"), false);
+check("file -C compiles a magic file, not read-only (B1/R2)", isReadOnlyShellCommand("file -C"), false);
+check("rg --pre executes CMD, not read-only (B1/R2)", isReadOnlyShellCommand("rg --pre=./evil.sh pat f"), false);
+check("rg search stays read-only (B1/R2)", isReadOnlyShellCommand("rg pattern src"), true);
+check("awk is not read-only (N1)", isReadOnlyShellCommand("awk '{print $1}' file"), false);
+check("xargs is not read-only (N1)", isReadOnlyShellCommand("ls | xargs cat"), false);
+check("sed -n with a print script is read-only (N1)", isReadOnlyShellCommand("sed -n '10,20p' file"), true);
+check("sed -n with an address print is read-only (N1)", isReadOnlyShellCommand("sed -n '/error/p' log"), true);
+check("sed without -n is not read-only (N1)", isReadOnlyShellCommand("sed 's/a/b/' file"), false);
+check("sed -n with a w command is not read-only (N1)", isReadOnlyShellCommand("sed -n 's/a/b/w out.txt' file"), false);
+check("sed -i is not read-only (N1)", isReadOnlyShellCommand("sed -i 's/a/b/' file"), false);
 check("echo is read-only", isReadOnlyShellCommand("echo hello"), true);
 check("which is read-only", isReadOnlyShellCommand("which node"), true);
 check("touch is not read-only", isReadOnlyShellCommand("touch file"), false);
@@ -210,6 +210,8 @@ check("npm install is not read-only", isReadOnlyShellCommand("npm install"), fal
 check("rm in chain makes not read-only", isReadOnlyShellCommand("ls && rm -f x"), false);
 check("chained read-only is read-only", isReadOnlyShellCommand("ls && cat file"), true);
 check("pipe with read-only is read-only", isReadOnlyShellCommand("cat file | grep pattern"), true);
+check("newline smuggles a second command (N4)", isReadOnlyShellCommand("ls\ntouch file"), false);
+check("newline-joined read-only stays read-only (N4)", isReadOnlyShellCommand("ls\nwc -l file"), true);
 
 // read-only git
 check("git status is read-only", isReadOnlyGitCommand("git status"), true);
@@ -226,10 +228,23 @@ check("pwd allowed in readOnlyAuto", isReadOnlyAutoAllowedForBash("pwd", project
 check("ls allowed in readOnlyAuto", isReadOnlyAutoAllowedForBash("ls -la", projectPath, cwd), true);
 check("touch blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("touch x", projectPath, cwd), false);
 check("rm blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("rm x", projectPath, cwd), false);
+// R3: readOnlyAuto checks only text bash will run as written
+check("backslash path blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("cat \\/etc/passwd", projectPath, cwd), false);
+check("unquoted $ blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("cat $TMPDIR/x", projectPath, cwd), false);
+check("glued quotes blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash('cat "a"b', projectPath, cwd), false);
+check("glob blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("cat .*/../*", projectPath, cwd), false);
+check("brace blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("cat {..,src}/x", projectPath, cwd), false);
+check("quoted glob allowed in readOnlyAuto", isReadOnlyAutoAllowedForBash("find . -name '*.ts'", projectPath, cwd), true);
+check("single-quoted backslash allowed in readOnlyAuto", isReadOnlyAutoAllowedForBash("grep 'x\\.y' f.txt", projectPath, cwd), true);
 check("chmod blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("chmod 777 x", projectPath, cwd), false);
 check("git status allowed in readOnlyAuto", isReadOnlyAutoAllowedForBash("git status", projectPath, cwd), true);
 check("git push blocked in readOnlyAuto", isReadOnlyAutoAllowedForBash("git push", projectPath, cwd), false);
 check("overwrite redirect blocked", isReadOnlyAutoAllowedForBash("echo x > y", projectPath, cwd), false);
+check("/dev/null is not an overwrite redirect (A.4)", looksDestructive("echo x > /dev/null"), false);
+check("echo with /dev/null redirect still blocked by the outside-mention gate in readOnlyAuto", isReadOnlyAutoAllowedForBash("echo x > /dev/null", projectPath, cwd), false);
+check("awk blocked in readOnlyAuto (N1)", isReadOnlyAutoAllowedForBash("awk '{print $1}' f", projectPath, cwd), false);
+check("sed -n print allowed in readOnlyAuto (N1)", isReadOnlyAutoAllowedForBash("sed -n '1p' f", projectPath, cwd), true);
+check("sed without -n blocked in readOnlyAuto (N1)", isReadOnlyAutoAllowedForBash("sed 's/a/b/' f", projectPath, cwd), false);
 
 // outside project detection
 check("/etc outside", isOutsideProject("/etc/passwd", projectPath, cwd), true);
@@ -243,6 +258,21 @@ check("above project root is outside", isOutsideProject("../../other", projectPa
 check("cat /etc/passwd mentions outside", commandMentionsOutsideProject("cat /etc/passwd", projectPath, cwd), true);
 check("ls -la does not mention outside", commandMentionsOutsideProject("ls -la", projectPath, cwd), false);
 check("cd .. mentions outside", commandMentionsOutsideProject("cd ..", projectPath, cwd), true);
+// Option values are paths too (A3/B2/B8): --opt=value and glued -Xvalue.
+check("--import=/abs mentions outside (A3)", commandMentionsOutsideProject("node --test --import=/abs/x.js", projectPath, cwd), true);
+check("--prefix=../.. mentions outside (A3)", commandMentionsOutsideProject("npm test --prefix=../..", projectPath, cwd), true);
+check("glued -X/abs mentions outside (A3)", commandMentionsOutsideProject("tool -L/abs/x", projectPath, cwd), true);
+check("--flag=value inside project does not mention outside", commandMentionsOutsideProject("node --test --import=./setup.js", projectPath, cwd), false);
+// B2: relative tokens that escape lexically must resolve to outside. Real
+// callers pass cwd ≡ the project root (commandMentionsOutsideProject is fed
+// projectPath/ctx.cwd), so the brief-literal rows run from the project root.
+check("cat x/../../.zsh_history mentions outside (B2)", commandMentionsOutsideProject("cat x/../../.zsh_history", projectPath, projectPath), true);
+check("cat ./../.netrc mentions outside (B2)", commandMentionsOutsideProject("cat ./../.netrc", projectPath, projectPath), true);
+check("git diff --no-index with ../ escape mentions outside (B2)", commandMentionsOutsideProject("git diff --no-index x/../../etc/passwd /dev/null", projectPath, projectPath), true);
+check("../ escape resolves against a subdirectory cwd too (B2)", commandMentionsOutsideProject("cat x/../../../.zsh_history", projectPath, cwd), true);
+check("alias-spelled cwd does not make in-project tokens look outside (B2)", commandMentionsOutsideProject("ls -la", "/p", "/link/p"), false);
+check("plain in-project relative path does not mention outside (B2)", commandMentionsOutsideProject("cat src/a.ts", projectPath, cwd), false);
+check("./-prefixed in-project relative path does not mention outside (B2)", commandMentionsOutsideProject("cat ./src/a.ts", projectPath, cwd), false);
 
 // classifyBashCommand
 check("git cmd -> git", classifyBashCommand("git status"), ["git"]);
@@ -256,23 +286,23 @@ check("read-only -> bashCommands (no auto)", classifyBashCommand("ls -la"), ["ba
 check("empty -> no request", classifyBashCommand("  "), []);
 
 // classifyToolCall
-check("write tool -> writeFiles", classifyToolCall("write", { path: "x", content: "y" }, projectPath, cwd), ["writeFiles"]);
-check("edit tool -> writeFiles", classifyToolCall("edit", { path: "x" }, projectPath, cwd), ["writeFiles"]);
-check("inside read -> none", classifyToolCall("read", { path: "file.ts" }, projectPath, cwd), []);
-check("outside read -> readOutsideProject", classifyToolCall("read", { path: "/etc/passwd" }, projectPath, cwd), ["readOutsideProject"]);
-check("web tool -> web", classifyToolCall("web_search", {}, projectPath, cwd), ["web"]);
-check("secure_web_search -> web", classifyToolCall("secure_web_search", {}, projectPath, cwd), ["web"]);
-check("search_web -> web", classifyToolCall("search_web", {}, projectPath, cwd), ["web"]);
-check("browser -> web", classifyToolCall("browser", {}, projectPath, cwd), ["web"]);
-check("bash -> classifyBashCommand", classifyToolCall("bash", { command: "ls" }, projectPath, cwd), ["bashCommands"]);
-check("unknown tool -> none", classifyToolCall("grep", {}, projectPath, cwd), []);
+check("write tool -> writeFiles", await classifyToolCall("write", { path: "x", content: "y" }, projectPath, cwd), ["writeFiles"]);
+check("edit tool -> writeFiles", await classifyToolCall("edit", { path: "x" }, projectPath, cwd), ["writeFiles"]);
+check("inside read -> none", await classifyToolCall("read", { path: "file.ts" }, projectPath, cwd), []);
+check("outside read -> readOutsideProject", await classifyToolCall("read", { path: "/etc/passwd" }, projectPath, cwd), ["readOutsideProject"]);
+check("web tool -> web", await classifyToolCall("web_search", {}, projectPath, cwd), ["web"]);
+check("secure_web_search -> web", await classifyToolCall("secure_web_search", {}, projectPath, cwd), ["web"]);
+check("search_web -> web", await classifyToolCall("search_web", {}, projectPath, cwd), ["web"]);
+check("browser -> web", await classifyToolCall("browser", {}, projectPath, cwd), ["web"]);
+check("bash -> classifyBashCommand", await classifyToolCall("bash", { command: "ls" }, projectPath, cwd), ["bashCommands"]);
+check("unknown tool -> none", await classifyToolCall("grep", {}, projectPath, cwd), []);
 
 // MCP bridge tools: own category, never misclassified as web by name.
-check("mcp knowledge_search -> mcp only", classifyToolCall("mcp_knowledge_knowledge_search", {}, projectPath, cwd), ["mcp"]);
-check("mcp task_list -> mcp only", classifyToolCall("mcp_taskboard_task_list", {}, projectPath, cwd), ["mcp"]);
-check("mcp message_list -> mcp only", classifyToolCall("mcp_taskboard_message_list", {}, projectPath, cwd), ["mcp"]);
-check("mcp searxng search -> mcp only (web gate not applied by name)", classifyToolCall("mcp_searxng_web_search", {}, projectPath, cwd), ["mcp"]);
-check("mcp episodic_search -> mcp only", classifyToolCall("mcp_knowledge_episodic_search", {}, projectPath, cwd), ["mcp"]);
+check("mcp knowledge_search -> mcp only", await classifyToolCall("mcp_knowledge_knowledge_search", {}, projectPath, cwd), ["mcp"]);
+check("mcp task_list -> mcp only", await classifyToolCall("mcp_taskboard_task_list", {}, projectPath, cwd), ["mcp"]);
+check("mcp message_list -> mcp only", await classifyToolCall("mcp_taskboard_message_list", {}, projectPath, cwd), ["mcp"]);
+check("mcp searxng search -> mcp only (web gate not applied by name)", await classifyToolCall("mcp_searxng_web_search", {}, projectPath, cwd), ["mcp"]);
+check("mcp episodic_search -> mcp only", await classifyToolCall("mcp_knowledge_episodic_search", {}, projectPath, cwd), ["mcp"]);
 
 // YOLO hard-deny behavior: auto-allow everything except rm -f/rm -rf style commands and repo deletion.
 check("YOLO allows ordinary bash", isYoloHardDeniedBool("npm test", projectPath, cwd), false);
@@ -299,17 +329,6 @@ check("YOLO blocks forced git worktree removal", isYoloHardDeniedBool("git workt
 check("YOLO allows non-forced git worktree removal by hard-deny scope", isYoloHardDeniedBool("git worktree remove ../project", projectPath, cwd), false);
 
 // parseMode (for CLI --permission-mode flag)
-type PermissionMode = "ask" | "readOnlyAuto" | "llmAuto" | "yolo";
-
-function parseMode(mode: string): PermissionMode | undefined {
-	if (mode === "ask" || mode === "manual") return "ask";
-	if (mode === "read-only" || mode === "readonly" || mode === "readOnlyAuto".toLowerCase()) return "readOnlyAuto";
-	if (mode === "auto" || mode === "llm" || mode === "llm-auto" || mode === "automatic") return "llmAuto";
-	if (mode === "yolo" || mode === "unsafe" || mode === "dangerous") return "yolo";
-	return undefined;
-}
-
-// parseMode tests
 check("parseMode ask", parseMode("ask"), "ask");
 check("parseMode manual", parseMode("manual"), "ask");
 check("parseMode read-only", parseMode("read-only"), "readOnlyAuto");
@@ -322,8 +341,13 @@ check("parseMode automatic", parseMode("automatic"), "llmAuto");
 check("parseMode yolo", parseMode("yolo"), "yolo");
 check("parseMode unsafe", parseMode("unsafe"), "yolo");
 check("parseMode dangerous", parseMode("dangerous"), "yolo");
+check("parseMode seat-auto", parseMode("seat-auto"), "seatAuto");
+check("parseMode seatauto", parseMode("seatauto"), "seatAuto");
 check("parseMode invalid", parseMode("garbage"), undefined);
 check("parseMode empty", parseMode(""), undefined);
+}
 
-console.log(`\n${passed} passed, ${failed} failed out of ${scenario} scenarios`);
-if (failed > 0) process.exit(1);
+main().catch((error) => {
+	console.error(error);
+	process.exit(1);
+});
