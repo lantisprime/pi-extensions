@@ -54,6 +54,9 @@ jobs:
       - name: Run permission-policy herdr:blocked unit tests
         run: npx --yes tsx permission-policy/test-fixtures/test-herdr-blocked.ts
 
+      - name: Run permission-policy seatAuto tests
+        run: npx --yes tsx permission-policy/test-fixtures/test-seat-auto.ts
+
       - name: Run MCP bridge protocol tests
         run: |
           npx --yes tsx mcp/test/run-config-test.mjs
