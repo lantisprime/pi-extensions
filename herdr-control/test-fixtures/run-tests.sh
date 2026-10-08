@@ -34,4 +34,6 @@ echo "Running herdr-control classifier/watchdog tests..."
 node --experimental-strip-types test-fixtures/test-watch-classify.mjs
 echo "Running herdr-control socket event tests..."
 node --experimental-strip-types test-fixtures/test-events.mjs
+echo "Running herdr-control dialog wiring tests..."
+node --experimental-strip-types test-fixtures/test-dialog.mjs
 echo "herdr-control tests passed"
