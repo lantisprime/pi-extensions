@@ -45,7 +45,7 @@ export type JevAvailability = {
 };
 
 export function defaultEndpoint(): string {
-	return process.env.JEV_ENDPOINT?.trim() || "https://litellm.lab.znp.pw/typesafe/v1/systemone";
+	return process.env.JEV_ENDPOINT?.trim() || "https://litellm.lab.znp.pw/kev/v1/systemone";
 }
 
 function resolveKey(): string | undefined {

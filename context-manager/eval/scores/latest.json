@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-23T09:03:58.960Z",
+  "generatedAt": "2026-10-14T09:55:41.871Z",
   "requestedModel": "jev-latest",
   "endpoint": "(extension default)",
   "keySource": "models.json",
@@ -28,16 +28,18 @@
     },
     "live": {
       "relevance": {
-        "aggregate": 1,
+        "floorsNotAsserted": "site ships heuristic (judge.backends) — live kev metrics diagnostic-only",
+        "aggregate": 0.7058823529411765,
         "majorityBaseline": 0.4117647058823529,
         "relevantRecall": 1,
-        "aggregateAll": 0.9047619047619048,
+        "aggregateAll": 0.7619047619047619,
         "hardTier": {
           "total": 2,
-          "correct": 0
+          "correct": 2
         }
       },
       "drift": {
+        "floorsNotAsserted": "site ships heuristic (judge.backends) — live kev metrics diagnostic-only",
         "precision": 1,
         "recall": 1
       }

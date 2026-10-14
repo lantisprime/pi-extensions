@@ -114,3 +114,40 @@ balanced corpus — composition changes silently change what floors mean,
 amendment A3). Hard cases (low-overlap stays, paraphrase dups, boundary
 relevance) belong in later additions, not the anchor: anchor rows must stay
 label-unambiguous.
+
+## Phase 5 (spec-phase5.md@96cec6ce): kev backend, raw capture, sweep
+
+The judge backend is **Kev** (self-hosted System One recreation) behind the
+homelab LiteLLM passthrough `POST /kev/v1/systemone` — API-compatible with
+the dead hosted Jev (HTTP 402, 2026-10-14). The optional `model` field is
+tolerated and echoed; Jev source labels are kept (spec D2).
+
+```sh
+# live pass (also captures scores/raw-live.jsonl — per-row raw probabilities):
+JEV_EVALS=1 node --test eval/run.test.ts
+
+# offline threshold sweep from the raw file (zero network):
+JEV_SWEEP=1 node --test eval/run.test.ts
+```
+
+- **Floors guard what ships** (M13.3): live floor assertions run only for sites
+  whose `DEFAULTS.judge.backends` site is `"kev"`; sites shipping `heuristic`
+  record live kev metrics diagnostic-only (`floorsNotAsserted`). The sweep
+  guardrail follows the same coupling.
+- **Adopted defaults (2026-10-14 sweep)**: relevance/drift/rescore heuristic
+  (kev's saturated nouls miss floors at every cutoff — `scores/sweep.json`),
+  poison kev. Per-site override via `.pi/context-manager.json`
+  `judge.backends`; hermetic tests force kev with `CM_JUDGE_BACKENDS`.
+
+### M14 — model-swap re-validation procedure
+
+The homelab checkpoint is replaceable under the same URL. After ANY kev
+checkpoint swap (e.g. the announced 6-bit retrain):
+
+1. `JEV_EVALS=1 node --test eval/run.test.ts` — regenerates `scores/latest.json`
+   + `scores/raw-live.jsonl` against the new checkpoint.
+2. `JEV_SWEEP=1 node --test eval/run.test.ts` — sweep offline; read the table.
+3. If a site's floors pass at some cutoff, flip its `judge.backends` default to
+   `kev` in `index.ts` DEFAULTS **in the same commit** as the passing scores;
+   the floor assertions then guard it. If floors fail everywhere, defaults stay
+   heuristic — nothing to do.

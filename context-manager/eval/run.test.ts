@@ -5,6 +5,10 @@
 //
 //   JEV_EVALS=1 node --test eval/run.test.ts            # heuristic pass only
 //   JEV_EVALS=1 JEV_API_KEY=... node --test eval/run.test.ts  # + live Jev pass
+//   JEV_SWEEP=1 node --test eval/run.test.ts            # OFFLINE threshold sweep
+//     (replays scores/raw-live.jsonl — zero network; run the live pass first.
+//     M13, spec-phase5.md@e9c4194e: thresholds are calibration-relative per
+//     backend checkpoint; after any kev model swap re-run live + sweep.)
 //
 // Relevance rows replay through the production decision function
 // (__eval.ingestRelevance). Drift rows replay the PRODUCTION CASCADE through
@@ -20,6 +24,7 @@ import path from "node:path";
 import test from "node:test";
 
 const GATED = process.env.JEV_EVALS?.trim() === "1";
+const SWEEP = process.env.JEV_SWEEP?.trim() === "1";
 const DEAD = "http://127.0.0.1:9/unreachable";
 const PROD_ENDPOINT = process.env.JEV_ENDPOINT?.trim() ?? ""; // "" ⇒ extension default
 
@@ -272,6 +277,13 @@ if (GATED) {
 	});
 
 	const skipLive = keySource() === null ? "no Jev key (JEV_API_KEY / models.json litellm)" : false;
+	// M13.3 (spec-phase5): live floors are asserted ONLY for sites whose SHIPPED
+	// default backend is "kev" (DEFAULTS.judge.backends) — floors guard what
+	// ships. Sites shipping heuristic record live kev metrics as diagnostics with
+	// floorsNotAsserted. Flip a site default to "kev" only alongside a passing
+	// run (guardrail AC-6).
+	const relShipsKev = (__eval.DEFAULTS as any).judge.backends.relevance === "kev";
+	const driftShipsKev = (__eval.DEFAULTS as any).judge.backends.drift === "kev";
 
 	test("L2 live pass: relevance floors (Jev)", { skip: skipLive }, async () => {
 		const rows = await runRelevancePass();
@@ -282,6 +294,7 @@ if (GATED) {
 		const hard = rows.filter((r) => r.hard);
 		scores.passes.live = {
 			relevance: {
+				...(!relShipsKev ? { floorsNotAsserted: "site ships heuristic (judge.backends) — live kev metrics diagnostic-only" } : {}),
 				aggregate: agg,
 				majorityBaseline: maj,
 				relevantRecall: relRec,
@@ -289,6 +302,7 @@ if (GATED) {
 				hardTier: { total: hard.length, correct: hard.filter((r) => r.expected === r.got).length },
 			},
 		};
+		if (!relShipsKev) return; // diagnostic-only (M13.3)
 		assertFloor("live relevance aggregate", agg, 0.75);
 		assertFloor("live relevant-recall", relRec, 0.85);
 		assertFloor("live majority-baseline margin", agg - maj, 0.1);
@@ -298,7 +312,12 @@ if (GATED) {
 		await assertCascadeSanity();
 		const rows = await runDriftPass();
 		const { precision, recall } = pr(rows);
-		scores.passes.live.drift = { precision, recall };
+		scores.passes.live.drift = {
+			...(!driftShipsKev ? { floorsNotAsserted: "site ships heuristic (judge.backends) — live kev metrics diagnostic-only" } : {}),
+			precision,
+			recall,
+		};
+		if (!driftShipsKev) return; // diagnostic-only (M13.3)
 		assertFloor("live drift precision", precision, 0.75);
 		assertFloor("live drift recall", recall, 0.65);
 	});
@@ -310,4 +329,100 @@ if (GATED) {
 		fs.writeFileSync(path.join(dir, "latest.json"), JSON.stringify(scores, null, 2) + "\n");
 		assert.ok(fs.existsSync(path.join(dir, "latest.json")));
 	});
+
+	// ---------------- M13.1 (spec-phase5@e9c4194e): raw-probability capture ----------------
+	// One extra judge call per row; self-hosted kev makes re-capture cheap. The
+	// raw file is the OFFLINE input for threshold sweeps after a model swap.
+	const rawLines: string[] = [];
+
+	test("L2 live raw capture: relevance nouls per row", { skip: skipLive }, async () => {
+		let captured = 0;
+		for (const r of relevanceRows) {
+			const raws = await __eval.fetchIngestNouls(
+				makeSpan(r.candidate.excerpt, r.candidate.path, 0),
+				r.existing.map((e: any, i: number) => makeSpan(e.excerpt, e.path, i + 1)),
+				r.tasks,
+			);
+			if (raws) captured += 1;
+			rawLines.push(JSON.stringify({ kind: "relevance", id: r.id, expected: r.expected, capable: r.tasks.length > 0 && r.tier !== "hard", ...(raws ?? { newInfo: null, onTask: null }) }));
+		}
+		assert.ok(captured > 0, "no raw relevance values captured — endpoint/key");
+	});
+
+	test("L2 live raw capture: drift p per row (pinned model mirrors the cascade)", { skip: skipLive }, async () => {
+		let captured = 0;
+		for (const r of driftRows.filter((r) => !r.taskListChanged)) {
+			const model = __eval.pinnedModelFromPrompt(r.pinnedPrompt, r.firstUser);
+			const p = await __eval.jevDriftCall(r.nextUser, model);
+			if (typeof p === "number") captured += 1;
+			rawLines.push(JSON.stringify({ kind: "drift", id: r.id, expected: r.expected, p }));
+		}
+		assert.ok(captured > 0, "no raw drift values captured — endpoint/key");
+	});
+
+	test("L2 write scores/raw-live.jsonl", { skip: skipLive }, async () => {
+		const dir = path.join(import.meta.dirname, "scores");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(path.join(dir, "raw-live.jsonl"), rawLines.join("\n") + "\n");
+		assert.ok(fs.existsSync(path.join(dir, "raw-live.jsonl")));
+	});
 }
+
+// ---------------- M13.2: OFFLINE threshold sweep (JEV_SWEEP=1; zero network) ----------------
+// Replays scores/raw-live.jsonl across cutoffs. Drift floors are precision-led
+// (eval-plan amendment B); the guardrail assertion (AC-6) fails the sweep when
+// NO cutoff reaches floors on a site — that site then defaults to heuristic.
+test(
+	"L2 threshold sweep: floors reachable at some cutoff (guardrail)",
+	{ skip: SWEEP ? false : "set JEV_SWEEP=1 to sweep offline from scores/raw-live.jsonl" },
+	() => {
+		const RAW_PATH = path.join(import.meta.dirname, "scores", "raw-live.jsonl");
+		assert.ok(fs.existsSync(RAW_PATH), "scores/raw-live.jsonl missing — run the live pass first (JEV_EVALS=1)");
+		const raws = fs.readFileSync(RAW_PATH, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+		const rel = raws.filter((r) => r.kind === "relevance" && r.capable && typeof r.newInfo === "number");
+		const drf = raws.filter((r) => r.kind === "drift" && typeof r.p === "number");
+		assert.ok(rel.length > 0 && drf.length > 0, "raw file lacks relevance or drift rows");
+
+		const relAt = (t: number) =>
+			rel.map((r) => ({
+				expected: r.expected,
+				got: r.newInfo < t ? "duplicate" : r.onTask < t ? "unrelated" : "relevant",
+				capable: true,
+				hard: false,
+			})) as Cls[];
+		const sweepRel = [0.25, 0.3, 0.35, 0.4, 0.45].map((t) => ({
+			cutoff: t,
+			aggregate: aggregate(relAt(t)),
+			relevantRecall: perClassRecall(relAt(t), "relevant"),
+			duplicateRecall: perClassRecall(relAt(t), "duplicate"),
+			unrelatedPrecision: perClassPrecision(relAt(t), "unrelated"),
+		}));
+		const drfAt = (c: number) => drf.map((r) => ({ expected: !!r.expected, got: r.p > c }));
+		const sweepDrf = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9].map((c) => ({ cutoff: c, ...pr(drfAt(c)) }));
+
+		fs.writeFileSync(
+			path.join(import.meta.dirname, "scores", "sweep.json"),
+			JSON.stringify(
+				{
+					generatedAt: new Date().toISOString(),
+					note: "tuning upper bound (in-corpus optimization) — adopting a cutoff also requires a passing committed live run at that value",
+					relevance: sweepRel,
+					drift: sweepDrf,
+			},
+				null,
+				2,
+			) + "\n",
+		);
+		for (const s of sweepRel) console.log(`sweep relevance cutoff=${s.cutoff}: agg=${s.aggregate.toFixed(3)} relRec=${s.relevantRecall.toFixed(3)} dupRec=${s.duplicateRecall.toFixed(3)} unrelPrec=${s.unrelatedPrecision.toFixed(3)}`);
+		for (const s of sweepDrf) console.log(`sweep drift cutoff=${s.cutoff}: P=${s.precision.toFixed(3)} R=${s.recall.toFixed(3)}`);
+
+		const relOk = sweepRel.some((s) => s.aggregate >= 0.75 && s.relevantRecall >= 0.85);
+		const drfOk = sweepDrf.some((s) => s.precision >= 0.75 && s.recall >= 0.65);
+		// M13.3 coupling: the guardrail asserts only for sites SHIPPED as kev (flip a
+		// default to "kev" only alongside a sweep + live run that pass floors).
+		const relShipsKev = (__eval.DEFAULTS as any).judge.backends.relevance === "kev";
+		const driftShipsKev = (__eval.DEFAULTS as any).judge.backends.drift === "kev";
+		if (relShipsKev) assert.ok(relOk, "relevance ships kev but NO cutoff reaches floors (agg 0.75 / relRec 0.85) — flip the default to heuristic (spec-phase5 AC-6)");
+		if (driftShipsKev) assert.ok(drfOk, "drift ships kev but NO cutoff reaches floors (P 0.75 / R 0.65) — flip the default to heuristic (spec-phase5 AC-6)");
+	},
+);
