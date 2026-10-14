@@ -1284,15 +1284,19 @@ async function ensurePermission(
 	const policy = await loadPolicy(projectPath);
 	const userBash = opts.userBash === true;
 
-	// Spec A.1: hard-deny categories never reach any allow path in any mode.
-	// Only the interactive dialog keystroke may let them through; stored
-	// session/project grants are not operator actions (N6). Operator-typed !
-	// commands keep today's flow and skip this gate (N6).
-	if (!userBash && request.command) {
+	// Spec A.1 hard-deny set: applies ONLY to an active seat (PERMFIX
+	// 2026-10-14, operator directive — amends A.1's "any mode" scope). A session
+	// that is not an unexpired seatAuto seat — interactive ask/readOnlyAuto/
+	// llmAuto/yolo, operator `!` commands, expired seats — never sees seat
+	// policy. Non-seat sessions keep only the universal isYoloHardDenied set
+	// (rm -f/rm -rf, repo deletion) checked in the yolo branch below; ask still
+	// prompts for every not-yet-granted category through the normal flow.
+	// Protected-path gates (B3/B4) remain global and unchanged.
+	if (!userBash && request.command && isSeatAutoActive(policy)) {
 		const hardDenyReason = await isSeatHardDenied(request.command, projectPath, projectPath);
 		if (hardDenyReason) {
 			if (policy.mode === "yolo") {
-				// YOLO denies outright and never shows a dialog.
+				// Defensive only: seatActive implies mode seatAuto, not yolo.
 				if (ctx.hasUI) ctx.ui.notify(hardDenyReason, "warning");
 				return { allowed: false };
 			}
