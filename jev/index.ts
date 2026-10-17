@@ -20,9 +20,15 @@
 //      answer the following: <q>") returns a flat ~0.92 for EVERY candidate —
 //      confident-looking and completely non-discriminative.
 //
-// Transport: the homelab LiteLLM gateway proxies TypeSafe, so the existing
-// LiteLLM virtual key already at rest in ~/.pi/agent/models.json is the
-// credential — no new secret.
+// Transport: the homelab LiteLLM gateway proxies Kev — a self-hosted, Apache-2.0
+// System One recreation (github.com/jaredpalmer/kev) — at /kev/v1/systemone
+// (a passthrough route; no model name needed, an optional `model` field is
+// tolerated and echoed). The API is compatible with TypeSafe's Jev, so the
+// existing LiteLLM virtual key already at rest in ~/.pi/agent/models.json is
+// the credential — no new secret. TypeSafe's hosted Jev died 2026-10-14
+// (HTTP 402, org out of credits) and remains reachable only via an explicit
+// JEV_ENDPOINT override. Labels stay "jev" for consumer-contract stability
+// (status files, agents child-args, telemetry) — Kev is the engine beneath.
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -33,7 +39,7 @@ import { Type } from "typebox";
 import { probeJev, readJevAvailabilitySync, writeJevStatus } from "./lib/availability.ts";
 import { standingRuleAppend } from "./lib/standing-rule.ts";
 
-const DEFAULT_ENDPOINT = "https://litellm.lab.znp.pw/typesafe/v1/systemone";
+const DEFAULT_ENDPOINT = "https://litellm.lab.znp.pw/kev/v1/systemone";
 const DEFAULT_MODEL = "jev-latest";
 const DEFAULT_TIMEOUT_MS = 120_000;
 

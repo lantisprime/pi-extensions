@@ -9,6 +9,12 @@
 //   2. user config glob entries, in config order
 //   3. built-in family glob, in BUILTIN order
 //   4. GENERIC default
+//
+// Price resolution (SCFIX 2026-10-06) returns a PROVENANCE, not just numbers:
+//   catalog cost fields → user config (defaultPrices / profile prices) →
+//   built-in family price table (BUILTIN_PRICES) → assumed generic.
+// Only "assumed" disables the economy gate (AC-10); the first three count as
+// pricingKnown (see resolvePricing).
 
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -166,6 +172,92 @@ export const BUILTIN_PROFILES: Profile[] = [
 	},
 ];
 
+export type PriceSource = "catalog" | "config" | "builtin" | "assumed";
+
+/**
+ * Built-in family price table — $/MTok, standard (non-batch) tier, sourced
+ * from OpenRouter's public model list (https://openrouter.ai/api/v1/models,
+ * fetched 2026-10-06). Gateway catalogs (LiteLLM proxies) publish no cost
+ * fields for these families, which left the economy gate permanently declined
+ * ("pricing-unknown") for 74/75 models in the live fleet (SCFIX-1); the
+ * gateway's own /model/info carries no prices either (verified: priced=0).
+ *
+ * Entries are FAMILY list prices: variant suffixes (-inferx, -opencode,
+ * -openrouter, -zai, quantization/community tags) inherit the family base.
+ * cacheWrite 0 means the provider publishes free cache writes; unlike the
+ * all-zero-catalog rule in resolvePrices, these zeros are PUBLISHED data and
+ * are honored as real. Corroboration: minimax-m3's entry (0.30/1.20) matches
+ * the one manually-captured catalog cost (litellm/minimax) exactly.
+ *
+ * Order matters: first match wins (full "provider/id" key or bare model id).
+ */
+export interface FamilyPrices {
+	/** Glob(s) matched against the bare model id and the full provider/id key. */
+	match: string | string[];
+	prices: Prices;
+	/** Where the numbers come from / what they approximate. */
+	note?: string;
+}
+
+export const BUILTIN_PRICES: FamilyPrices[] = [
+	// --- Z.ai GLM ---
+	{ match: "glm-5.3-flash*", prices: { input: 0.036, output: 0.9, cacheRead: 0.011, cacheWrite: 0 }, note: "z-ai/glm-5.3-flash" },
+	{ match: "glm-5.3*", prices: { input: 0.079, output: 4.8, cacheRead: 0.059, cacheWrite: 0 }, note: "z-ai/glm-5.3" },
+	{ match: ["glm-5.2*", "glm-5*"], prices: { input: 0.05, output: 7.0, cacheRead: 0.049, cacheWrite: 0 }, note: "z-ai/glm-5.2; bare glm-5 variants approximated by the nearest published generation" },
+	// --- Moonshot Kimi ---
+	{ match: "kimi-k2.7*", prices: { input: 0.671, output: 3.35, cacheRead: 0.18, cacheWrite: 0 }, note: "moonshotai/kimi-k2.7-code" },
+	{ match: "kimi-k2.6*", prices: { input: 0.65, output: 3.41, cacheRead: 0.15, cacheWrite: 0 }, note: "moonshotai/kimi-k2.6" },
+	{ match: "kimi-k2.5*", prices: { input: 0.5, output: 2.5, cacheRead: 0.15, cacheWrite: 0 }, note: "moonshotai/kimi-k2.5" },
+	{ match: "kimi-k3*", prices: { input: 0.7, output: 15.0, cacheRead: 0.32, cacheWrite: 0 }, note: "moonshotai/kimi-k3" },
+	{ match: "kimi-k2*", prices: { input: 0.671, output: 3.35, cacheRead: 0.18, cacheWrite: 0 }, note: "unversioned kimi-k2 → k2.7 base" },
+	// --- MiniMax (corroborated by live catalog cost on litellm/minimax) ---
+	{ match: "minimax*", prices: { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 }, note: "minimax/minimax-m3; matches manual catalog capture for litellm/minimax" },
+	// --- DeepSeek ---
+	{ match: "deepseek-v4-pro*", prices: { input: 0.955, output: 1.911, cacheRead: 0.08, cacheWrite: 0 }, note: "deepseek/deepseek-v4-pro" },
+	{ match: "deepseek-v4.1*", prices: { input: 0.02, output: 0.891, cacheRead: 0.005, cacheWrite: 0 }, note: "deepseek/deepseek-v4.1-flash" },
+	{ match: "deepseek-v4-flash*", prices: { input: 0.091, output: 0.182, cacheRead: 0.018, cacheWrite: 0 }, note: "deepseek/deepseek-v4-flash (0731/vision variants approximated by base)" },
+	{ match: "deepseek-reasoner*", prices: { input: 0.955, output: 1.911, cacheRead: 0.08, cacheWrite: 0 }, note: "bare alias → v4-pro class" },
+	{ match: "deepseek", prices: { input: 0.091, output: 0.182, cacheRead: 0.018, cacheWrite: 0 }, note: "bare alias → v4-flash class" },
+	// --- Qwen ---
+	{ match: "qwen3.8-max*", prices: { input: 2.0, output: 6.0, cacheRead: 0.25, cacheWrite: 0 }, note: "qwen/qwen3.8-max-0902" },
+	{ match: "qwen3.8-flash*", prices: { input: 0.15, output: 0.47, cacheRead: 0.016, cacheWrite: 0 }, note: "qwen/qwen3.8-flash" },
+	{ match: "qwen3.8-27b*", prices: { input: 0.04, output: 2.3, cacheRead: 0.02, cacheWrite: 0 }, note: "qwen/qwen3.8-27b" },
+	{ match: "qwen3.8", prices: { input: 0.15, output: 0.47, cacheRead: 0.016, cacheWrite: 0 }, note: "bare alias → flash class" },
+	{ match: "qwen3.7-max*", prices: { input: 1.475, output: 4.425, cacheRead: 0.295, cacheWrite: 1.844 }, note: "qwen/qwen3.7-max (published cache-write premium)" },
+	{ match: "qwen3.7-flash*", prices: { input: 0.03, output: 0.13, cacheRead: 0.006, cacheWrite: 0.038 }, note: "qwen/qwen3.7-flash" },
+	{ match: ["qwen3.7-plus*", "qwen-plus*", "qwen"], prices: { input: 0.32, output: 1.28, cacheRead: 0.064, cacheWrite: 0.4 }, note: "qwen/qwen3.7-plus; bare qwen/qwen-plus aliases → Plus tier" },
+	{ match: "qwen3.6-plus*", prices: { input: 0.325, output: 1.95, cacheRead: 0, cacheWrite: 0.406 }, note: "qwen/qwen3.6-plus (cache reads published free)" },
+	{ match: "qwen3.6-35b*", prices: { input: 0.1, output: 0.95, cacheRead: 0.1, cacheWrite: 0 }, note: "qwen/qwen3.6-35b-a3b" },
+	{ match: "qwen3.6*", prices: { input: 0.325, output: 1.95, cacheRead: 0, cacheWrite: 0.406 }, note: "unversioned qwen3.6 → plus tier" },
+	{ match: "qwen3.5-plus*", prices: { input: 0.325, output: 1.95, cacheRead: 0, cacheWrite: 0.406 }, note: "no published 3.5-plus listing → nearest (3.6-plus)" },
+	{ match: "qwen3-coder-next*", prices: { input: 0.12, output: 0.8, cacheRead: 0.07, cacheWrite: 0 }, note: "qwen/qwen3-coder-next" },
+	{ match: "qwen3-coder-30b*", prices: { input: 0.07, output: 0.28, cacheRead: 0, cacheWrite: 0 }, note: "qwen/qwen3-coder-30b-a3b-instruct; cache pricing unpublished (quality-mode models anyway)" },
+	// --- xAI / OpenAI / others ---
+	{ match: "grok-4.5*", prices: { input: 2.0, output: 6.0, cacheRead: 0.3, cacheWrite: 0 }, note: "x-ai/grok-4.5" },
+	{ match: "grok-4.6*", prices: { input: 2.0, output: 6.0, cacheRead: 0.5, cacheWrite: 0 }, note: "x-ai/grok-4.6" },
+	{ match: "gpt-5.6-luna*", prices: { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 }, note: "openai/gpt-5.6-luna" },
+	{ match: "gpt-5.6-sol*", prices: { input: 2.0, output: 10.0, cacheRead: 0.2, cacheWrite: 2.5 }, note: "openai/gpt-5.6-sol; the builtin profile's writePremium:0 pin still wins for cacheWrite (known-free OpenAI prompt-cache writes)" },
+	{ match: "longcat-2.0*", prices: { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 }, note: "meituan/longcat-2.0" },
+	{ match: "hy3-preview*", prices: { input: 0.18, output: 0.6, cacheRead: 0.06, cacheWrite: 0 }, note: "tencent/hy3-preview" },
+	{ match: "hy3*", prices: { input: 0.132, output: 0.528, cacheRead: 0.033, cacheWrite: 0 }, note: "tencent/hy3" },
+	{ match: ["mimo-v2.5-pro*", "mimo-v2-pro*"], prices: { input: 0.435, output: 0.87, cacheRead: 0.004, cacheWrite: 0 }, note: "xiaomi/mimo-v2.5-pro" },
+	{ match: "mimo-v2*", prices: { input: 0.14, output: 0.28, cacheRead: 0.003, cacheWrite: 0 }, note: "xiaomi/mimo-v2.5" },
+	{ match: "gpt-oss-20b*", prices: { input: 0.018, output: 0.09, cacheRead: 0.009, cacheWrite: 0 }, note: "openai/gpt-oss-20b" },
+	{ match: "gemma-4-31b*", prices: { input: 0.09, output: 0.34, cacheRead: 0.05, cacheWrite: 0 }, note: "google/gemma-4-31b-it" },
+	{ match: "gemma-4-26b*", prices: { input: 0.09, output: 0.3, cacheRead: 0.05, cacheWrite: 0 }, note: "google/gemma-4-26b-a4b-it" },
+	{ match: "devstral*", prices: { input: 0.4, output: 2.0, cacheRead: 0.04, cacheWrite: 0 }, note: "mistralai/devstral-2512" },
+];
+
+/** Family-table lookup: full "provider/id" key first, then the bare model id. */
+export function lookupBuiltinPrices(provider: string, modelId: string): Prices | undefined {
+	const key = `${provider}/${modelId}`;
+	for (const fam of BUILTIN_PRICES) {
+		const pats = Array.isArray(fam.match) ? fam.match : [fam.match];
+		if (pats.some((p) => globMatch(p, modelId) || globMatch(p, key))) return { ...fam.prices };
+	}
+	return undefined;
+}
+
 /** Simple glob: only `*` wildcards, full-string match. */
 export function globMatch(pattern: string, value: string): boolean {
 	if (!pattern.includes("*")) return pattern === value;
@@ -253,9 +345,54 @@ const hasAnyPrice = (c: Partial<Prices> | null | undefined): boolean =>
  * fallbacks. False (null/undefined/all-zero catalog) disables the economy path
  * (design "Model profiles": economy trigger disabled, AC-10); users opt back
  * in via explicit config defaultPrices or profile prices.
+ *
+ * SCFIX 2026-10-06: catalog-only. The live wiring must use resolvePricing()
+ * instead — a config opt-in (defaultPrices / profile prices) or a
+ * BUILTIN_PRICES family match both count as known even when the catalog is
+ * empty, and only the "assumed" generic fallback keeps the gate closed.
  */
 export function pricingKnown(catalog: Partial<Prices> | null | undefined): boolean {
 	return hasAnyPrice(catalog);
+}
+
+const hasAnyDefinedPrice = (c: Partial<Prices> | null | undefined): boolean =>
+	!!c && Object.values(c).some((v) => typeof v === "number");
+
+/** Economy gate may run on this provenance (AC-10: only fabricated numbers may not). */
+export function pricingKnownSource(source: PriceSource): boolean {
+	return source !== "assumed";
+}
+
+/**
+ * Resolve prices WITH provenance (SCFIX 2026-10-06). Precedence:
+ *   catalog cost fields → user config (profile prices / defaultPrices) →
+ *   built-in family table (BUILTIN_PRICES) → assumed generic.
+ * The source is what the economy gate reasons about: catalog/config/builtin
+ * are published or user-pinned numbers (gate runs); "assumed" is fabricated
+ * (gate declines, AC-10) — /compact:why surfaces it as ASSUMED.
+ */
+export function resolvePricing(
+	catalog: Partial<Prices> | null | undefined,
+	provider: string,
+	modelId: string,
+	profile: Profile,
+	config: SmartCompactionConfig,
+): { prices: Prices; source: PriceSource } {
+	if (hasAnyPrice(catalog)) return { prices: resolvePrices(catalog, profile, config), source: "catalog" };
+	// Any user-pinned price field counts as explicit intent, including 0 pins
+	// (cacheRead: 0 for genuinely free cache) — hasAnyDefinedPrice, not >0.
+	if (hasAnyDefinedPrice(profile.prices) || hasAnyDefinedPrice(config.defaultPrices)) {
+		return { prices: resolvePrices(null, profile, config), source: "config" };
+	}
+	const family = lookupBuiltinPrices(provider, modelId);
+	if (family) {
+		// A profile with a KNOWN-free-write pin (writePremium 0, e.g. gpt-5.6-sol)
+		// outranks the table's published cache-write number — the pin is the
+		// stronger, provider-documented fact (design "Model profiles").
+		const prices: Prices = profile.cache.writePremium === 0 ? { ...family, cacheWrite: 0 } : family;
+		return { prices, source: "builtin" };
+	}
+	return { prices: resolvePrices(null, profile, config), source: "assumed" };
 }
 
 /**

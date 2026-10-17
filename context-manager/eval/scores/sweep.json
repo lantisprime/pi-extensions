@@ -1,0 +1,88 @@
+{
+  "generatedAt": "2026-10-14T09:57:02.492Z",
+  "note": "tuning upper bound (in-corpus optimization) — adopting a cutoff also requires a passing committed live run at that value",
+  "relevance": [
+    {
+      "cutoff": 0.25,
+      "aggregate": 0.7058823529411765,
+      "relevantRecall": 1,
+      "duplicateRecall": 0.8571428571428571,
+      "unrelatedPrecision": 1
+    },
+    {
+      "cutoff": 0.3,
+      "aggregate": 0.7058823529411765,
+      "relevantRecall": 1,
+      "duplicateRecall": 0.8571428571428571,
+      "unrelatedPrecision": 1
+    },
+    {
+      "cutoff": 0.35,
+      "aggregate": 0.7058823529411765,
+      "relevantRecall": 1,
+      "duplicateRecall": 0.8571428571428571,
+      "unrelatedPrecision": 1
+    },
+    {
+      "cutoff": 0.4,
+      "aggregate": 0.7058823529411765,
+      "relevantRecall": 1,
+      "duplicateRecall": 0.8571428571428571,
+      "unrelatedPrecision": 1
+    },
+    {
+      "cutoff": 0.45,
+      "aggregate": 0.7058823529411765,
+      "relevantRecall": 1,
+      "duplicateRecall": 0.8571428571428571,
+      "unrelatedPrecision": 1
+    }
+  ],
+  "drift": [
+    {
+      "cutoff": 0.5,
+      "precision": 0.625,
+      "recall": 1
+    },
+    {
+      "cutoff": 0.55,
+      "precision": 0.625,
+      "recall": 1
+    },
+    {
+      "cutoff": 0.6,
+      "precision": 0.625,
+      "recall": 1
+    },
+    {
+      "cutoff": 0.65,
+      "precision": 0.625,
+      "recall": 1
+    },
+    {
+      "cutoff": 0.7,
+      "precision": 0.625,
+      "recall": 1
+    },
+    {
+      "cutoff": 0.75,
+      "precision": 0.625,
+      "recall": 1
+    },
+    {
+      "cutoff": 0.8,
+      "precision": 0.625,
+      "recall": 1
+    },
+    {
+      "cutoff": 0.85,
+      "precision": 0.7142857142857143,
+      "recall": 1
+    },
+    {
+      "cutoff": 0.9,
+      "precision": 0.7142857142857143,
+      "recall": 1
+    }
+  ]
+}

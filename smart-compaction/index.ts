@@ -29,9 +29,10 @@ import { relevanceGate, type GateResult } from "./lib/gate.ts";
 import { parseTaskBoard, type TaskBoard } from "./lib/task-subjects.ts";
 import {
 	loadConfig,
-	pricingKnown,
-	resolvePrices,
+	pricingKnownSource,
+	resolvePricing,
 	resolveProfile,
+	type PriceSource,
 	type Prices,
 	type Profile,
 	type SmartCompactionConfig,
@@ -56,7 +57,14 @@ interface SessionRuntime {
 	profile?: Profile;
 	prices?: Prices;
 	profileSource?: string;
-	/** False when the model catalog carries no positive price field (economy declines). */
+	/**
+	 * Where rt.prices came from (SCFIX 2026-10-06). False economy declines —
+	 * only the "assumed" generic fallback is unknown; catalog, user config
+	 * (defaultPrices / profile prices) and the built-in family table all count
+	 * as known. The pre-SCFIX wiring derived this from the catalog alone, so a
+	 * config opt-in silently never re-enabled the economy gate.
+	 */
+	priceSource?: PriceSource;
 	pricingKnown?: boolean;
 	/**
 	 * System prompt as of the last before_agent_start — the per-run render that
@@ -156,8 +164,14 @@ export default function (pi: ExtensionAPI) {
 		rt.profile = match.profile;
 		rt.profileSource = match.source;
 		const catalog = ctx.model?.cost as Partial<Prices> | undefined;
-		rt.prices = resolvePrices(catalog, match.profile, rt.config);
-		rt.pricingKnown = pricingKnown(catalog);
+		// SCFIX 2026-10-06: provenance-aware resolution. The catalog-only check
+		// previously kept the economy gate closed for every LiteLLM-gateway model
+		// (74/75 fleet models have no catalog cost, live-verified) AND ignored
+		// config opt-ins its own decline message told users to set.
+		const pricing = resolvePricing(catalog, key.provider, key.id, match.profile, rt.config);
+		rt.prices = pricing.prices;
+		rt.priceSource = pricing.source;
+		rt.pricingKnown = pricingKnownSource(pricing.source);
 	}
 
 	function statusLine(ctx: ExtensionContext, extra?: string): void {
@@ -524,7 +538,7 @@ export default function (pi: ExtensionAPI) {
 			const lines = [
 				`model: ${key ? `${key.provider}/${key.id}` : "unknown"} (profile: ${rt.profileSource})`,
 				`mode: ${rt.profile?.mode} · tiers: ${JSON.stringify(rt.profile?.tiers ?? [])}`,
-				`prices: ${JSON.stringify(rt.prices)}${rt.pricingKnown === false ? " (ASSUMED — economy disabled; set defaultPrices to opt in)" : ""}`,
+				`prices: ${JSON.stringify(rt.prices)} (source: ${rt.priceSource ?? "unknown"})${rt.pricingKnown === false ? " — ASSUMED, economy disabled (add defaultPrices or a profile prices block to opt in)" : ""}`,
 				`cache: ${JSON.stringify(rt.profile?.cache)} · lastLLMCall: ${rt.state.lastLLMCallAt ? `${Math.round((Date.now() - rt.state.lastLLMCallAt) / 1000)}s ago` : "never"}`,
 				`growth/turn: ${rt.state.growthPerTurn?.toFixed(0) ?? "?"} tok · turnsSinceCompaction: ${rt.state.turnsSinceCompaction}`,
 				`last decision: ${rt.lastDecision ? `${rt.lastDecision.decision.kind} (${JSON.stringify(rt.lastDecision.decision.kind === "none" ? rt.lastDecision.decision.why : rt.lastDecision.decision)})` : "none yet"}`,

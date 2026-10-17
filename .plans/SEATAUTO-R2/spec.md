@@ -42,3 +42,7 @@
    back at 2684ddf, new tests still present) → new adversarial tests FAIL;
    `git stash pop` → all suites pass again.
 3. Single commit with `-F .brief/COMMIT_MSG`; worktree kept.
+
+## Amendments
+
+- **2026-10-14 v1.1 (operator directive — seat hard-denies are seat-only):** A.1's scope is narrowed. `isSeatHardDenied` (curl/wget/nc/ssh/scp/rsync/ln/eval/source tokens; `git push|config|worktree|remote|submodule`; `~`/`$HOME` paths; command substitution; protected paths via tokens) now runs ONLY while `isSeatAutoActive(policy)` — mode seatAuto with an unexpired seat block (N7 shape). Non-seat sessions (ask/readOnlyAuto/llmAuto/yolo, operator `!` commands, expired seats) never see seat policy; yolo honors its published contract (auto-allow except the universal `isYoloHardDenied` set: rm -f/rm -rf, repo deletion). The protected-path gates B3 (write) and B4 (read) in `ensurePermission` remain global and unchanged. Rationale: an interactive pi-in-herdr session is NOT a seat — the every-mode application hard-denied `git push`/`curl`/`~` paths in the operator's own yolo session with no dialog recourse (denied outright, "yolo never shows a dialog"). Tests: test-seat-auto.ts — "SEAT hard-deny set does NOT apply outside seat mode" (yolo: git push + curl auto-allowed, rm -f still denied outright, no dialogs) and "seat hard-deny set applies ONLY while the seat is active" (seatAuto w/o block asks; active block prompts; expired block asks). Suites after fix: seat-auto 57/57, classification 184/184, herdr-blocked 9/9.

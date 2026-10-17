@@ -9,7 +9,8 @@ import path from "node:path";
 import test from "node:test";
 
 process.env.JEV_ENDPOINT = "http://mock.jev.test/systemone";
-process.env.JEV_API_KEY = "test-key";
+process.env.JEV_API_KEY = "test-key"; // M12: opt into kev paths (shipped DEFAULTS are heuristic; spec-phase5 AC-3)
+process.env.CM_JUDGE_BACKENDS = "relevance,drift,rescore,poison";
 
 const { default: createExtension } = await import("../index.ts");
 

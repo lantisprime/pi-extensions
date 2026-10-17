@@ -1,7 +1,8 @@
 // smart-compaction/lib/gate.ts — relevance gate (AC-6).
 //
 // Estimates P(summarized context is related to the current session tasks):
-//   - primary: one Jev noul question (same gateway as the jev extension)
+//   - primary: one Kev noul question (same gateway/route as the jev extension;
+//     Kev = self-hosted System One backend, spec-phase5.md@e9c4194e)
 //   - fallback: keyword-overlap heuristic
 //   - policy:  a task board that is present but all-settled defers outright
 // Any failure / timeout / no-tasks-at-all resolves to a conservative default so
@@ -16,7 +17,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const DEFAULT_ENDPOINT = "https://litellm.lab.znp.pw/typesafe/v1/systemone";
+const DEFAULT_ENDPOINT = "https://litellm.lab.znp.pw/kev/v1/systemone";
 const DEFAULT_MODEL = "jev-latest";
 const TIMEOUT_MS = 15_000;
 

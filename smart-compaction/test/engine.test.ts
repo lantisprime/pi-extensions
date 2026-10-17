@@ -17,7 +17,17 @@ import {
 	type EvalInput,
 } from "../lib/engine.ts";
 import { heuristicRelevance, mapAction } from "../lib/gate.ts";
-import { BUILTIN_PROFILES, globMatch, loadConfig, pricingKnown, resolvePrices, resolveProfile } from "../lib/profiles.ts";
+import {
+	BUILTIN_PROFILES,
+	globMatch,
+	loadConfig,
+	lookupBuiltinPrices,
+	pricingKnown,
+	pricingKnownSource,
+	resolvePricing,
+	resolveProfile,
+	resolvePrices,
+} from "../lib/profiles.ts";
 
 const GEMINI_TIERS = [
 	{ upTo: 200_000, inputMult: 1, outputMult: 1 },
@@ -772,4 +782,81 @@ test("compact-request content: floor / interval / pricing guards never yield to 
 	const pricing = baseInput({ usage: { tokens: 250_000, contextWindow: 1_048_576 }, pricingKnown: false, request: { kind: "content", reclaimableTokens: 120_000 } });
 	pricing.state.turnsSinceCompaction = 10;
 	assert.match((evaluateEconomy(pricing) as { why: string }).why, /pricing-unknown/);
+});
+
+// ----- SCFIX-1 (2026-10-06): pricing provenance + built-in family table -----
+
+test("SCFIX-1: resolvePricing — catalog prices win and report source=catalog", () => {
+	const cfg = { reserveTokens: 16_384, continuationProbability: 0.7, tierSafety: 1.5 };
+	const profile = resolveProfile("litellm", "minimax", cfg).profile;
+	const r = resolvePricing({ input: 0.3, output: 1.2, cacheRead: 0, cacheWrite: 0 }, "litellm", "minimax", profile, cfg);
+	assert.equal(r.source, "catalog");
+	assert.equal(r.prices.input, 0.3);
+});
+
+test("SCFIX-1: config defaultPrices opts back in on an empty catalog (the wiring bug)", () => {
+	// Pre-SCFIX the wiring computed pricingKnown from the catalog alone, so this
+	// documented opt-in silently never re-enabled the economy gate.
+	const cfg = { reserveTokens: 16_384, continuationProbability: 0.7, tierSafety: 1.5, defaultPrices: { input: 1.5, output: 4 } };
+	const profile = resolveProfile("litellm", "cerebras", cfg).profile; // no family-table entry
+	const r = resolvePricing(undefined, "litellm", "cerebras", profile, cfg);
+	assert.equal(r.source, "config");
+	assert.ok(pricingKnownSource(r.source), "explicit config must count as known");
+	assert.equal(r.prices.input, 1.5);
+	assert.equal(r.prices.output, 4);
+});
+
+test("SCFIX-1: glm-5.3-zai resolves the built-in family table with no catalog and no config", () => {
+	const cfg = { reserveTokens: 16_384, continuationProbability: 0.7, tierSafety: 1.5 };
+	const profile = resolveProfile("litellm", "glm-5.3-zai", cfg).profile;
+	const r = resolvePricing(undefined, "litellm", "glm-5.3-zai", profile, cfg);
+	assert.equal(r.source, "builtin");
+	assert.ok(pricingKnownSource(r.source), "family-table prices are published numbers — economy gate must run");
+	// z-ai/glm-5.3 list prices, verbatim from the table source
+	assert.equal(r.prices.input, 0.079);
+	assert.equal(r.prices.output, 4.8);
+	assert.equal(r.prices.cacheRead, 0.059);
+	assert.equal(r.prices.cacheWrite, 0, "published free cache writes are honored as real zeros");
+	// published zeros must NOT trip the all-zero defense (savings>cost stays decidable)
+	assert.ok(r.prices.input > 0 && r.prices.output > 0);
+});
+
+test("SCFIX-1: family table covers the live gateway fleet; unknowns stay assumed", () => {
+	const cfg = { reserveTokens: 16_384, continuationProbability: 0.7, tierSafety: 1.5 };
+	const covered = [
+		["litellm", "glm-5.3-zai"], ["litellm", "glm-5.3-flash-zai"], ["litellm", "kimi-k3-opencode"],
+		["litellm", "minimax-m3-opencode"], ["litellm", "deepseek-v4-pro"], ["litellm", "deepseek-reasoner"],
+		["litellm", "qwen3.8-max-openrouter"], ["litellm", "grok-4.6-opencode"], ["litellm", "gpt-5.6-luna-opencode"],
+		["litellm", "longcat-2.0-opencode"], ["litellm", "hy3-opencode"], ["litellm", "mimo-v2.5-pro-opencode"],
+		["litellm", "qwen3.7-plus-opencode"], ["litellm-qwen", "qwen3.8"], ["litellm-qwen", "qwen"],
+	];
+	for (const [p, m] of covered) assert.ok(lookupBuiltinPrices(p, m), `${p}/${m} must hit the family table`);
+	const uncovered = ["cerebras", "muse-spark-1.2-contributor-opencode", "agents-a1-inferx", "opencode", "openrouter"];
+	for (const m of uncovered) assert.equal(lookupBuiltinPrices("litellm", m), undefined, `${m} must stay assumed (AC-10)`);
+});
+
+test("SCFIX-1: profile writePremium pin outranks the table's cache-write number", () => {
+	const cfg = { reserveTokens: 16_384, continuationProbability: 0.7, tierSafety: 1.5 };
+	const profile = resolveProfile("litellm", "gpt-5.6-sol-openrouter", cfg).profile; // writePremium 0 pin
+	const r = resolvePricing(undefined, "litellm", "gpt-5.6-sol-openrouter", profile, cfg);
+	assert.equal(r.source, "builtin");
+	assert.equal(r.prices.cacheWrite, 0, "known-free OpenAI prompt-cache writes beat the published 2.5");
+});
+
+test("SCFIX-1: economy evaluation runs on table provenance (no pricing-unknown decline)", () => {
+	const cfg = { reserveTokens: 16_384, continuationProbability: 0.7, tierSafety: 1.5 };
+	const profile = resolveProfile("litellm", "glm-5.3-zai", cfg).profile;
+	const { prices, source } = resolvePricing(undefined, "litellm", "glm-5.3-zai", profile, cfg);
+	const i = baseInput({
+		profile: { ...profile, compaction: { ...profile.compaction, tokenFloor: 20_000, minIntervalTurns: 0 } },
+		prices,
+		pricingKnown: pricingKnownSource(source),
+		usage: { tokens: 170_000, contextWindow: 262_144 },
+	});
+	i.state.turnsSinceCompaction = 10;
+	i.state.lastLLMCallAt = null; // cold cache
+	i.state.growthPerTurn = 2_000; // real regrowth -> the horizon savings math has something to price
+	const d = evaluateEconomy(i);
+	assert.doesNotMatch((d as { why?: string }).why ?? "", /pricing-unknown/, "table-sourced prices must not decline as pricing-unknown");
+	assert.equal(d.kind, "economy", `expected the table-priced model to fire; got ${JSON.stringify(d)}`);
 });

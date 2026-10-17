@@ -28,7 +28,10 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-const JEV_ENDPOINT_DEFAULT = "https://litellm.lab.znp.pw/typesafe/v1/systemone";
+// Kev backend (spec-phase5.md@e9c4194e): self-hosted System One recreation
+// behind the homelab LiteLLM passthrough at /kev/v1/systemone; Jev-labels and
+// request bodies (incl. the tolerated `model` field) unchanged per D2.
+const JEV_ENDPOINT_DEFAULT = "https://litellm.lab.znp.pw/kev/v1/systemone";
 const JEV_TIMEOUT_MS = 15_000;
 
 interface CMConfig {
@@ -46,6 +49,13 @@ interface CMConfig {
 	compactInstructions: string;
 	shaping: { enabled: boolean; qualityFloor: number; cacheTtlMin: number; maxEvictShare: number; argsCap: number };
 	dirtyQueue: { maxEntries: number; maxTok: number };
+	// M12 (spec-phase5@e9c4194e): per-site judge backend. "kev" attempts the
+	// System One call first (any failure degrades to heuristic as before);
+	// "heuristic" skips the call entirely. Defaults come from the 2026-10-14
+	// corpus sweep: kev's saturated nouls miss Jev floors at EVERY cutoff on
+	// relevance/drift (scores/sweep.json) — heuristic ships those sites; kev
+	// uniquely backs the poison battery. Re-validate after any kev swap (M14).
+	judge: { backends: { relevance: "kev" | "heuristic"; drift: "kev" | "heuristic"; rescore: "kev" | "heuristic"; poison: "kev" | "heuristic" } };
 	poison: {
 		enabled: boolean;
 		contradictionAct: number;
@@ -80,6 +90,7 @@ const DEFAULTS: CMConfig = {
 	compactInstructions: "drop unrelated/dup/stale content",
 	shaping: { enabled: true, qualityFloor: 0.85, cacheTtlMin: 5, maxEvictShare: 0.4, argsCap: 2048 },
 	dirtyQueue: { maxEntries: 64, maxTok: 32768 },
+	judge: { backends: { relevance: "heuristic", drift: "heuristic", rescore: "heuristic", poison: "kev" } },
 	poison: {
 		enabled: true,
 		contradictionAct: 0.8,
@@ -235,6 +246,17 @@ interface CMState {
 	lastPoison: { turn: number; candidates: number; acted: number; review: number; degraded: number; inputTokens: number; noulPolicy: "raw-probability" } | null;
 }
 
+/** M12 test hatch (spec-phase5 AC-3): CM_JUDGE_BACKENDS="drift,rescore" forces those
+ *  sites to "kev" — hermetic wiring tests ride a mocked JEV_ENDPOINT against the
+ *  kev path while shipped DEFAULTS stay heuristic; production never sets it. */
+function applyJudgeEnvHatch(cfg: CMConfig): CMConfig {
+	const sites = process.env.CM_JUDGE_BACKENDS?.split(",").map((s) => s.trim()).filter(Boolean);
+	if (!sites?.length) return cfg;
+	const backends = { ...cfg.judge.backends } as Record<string, "kev" | "heuristic">;
+	for (const s of sites) if (s in backends) backends[s] = "kev";
+	return { ...cfg, judge: { backends: { relevance: backends.relevance, drift: backends.drift, rescore: backends.rescore, poison: backends.poison } } };
+}
+
 function loadConfig(cwd: string): CMConfig {
 	const base: CMConfig = {
 		...DEFAULTS,
@@ -246,6 +268,7 @@ function loadConfig(cwd: string): CMConfig {
 		compactRequest: { ...DEFAULTS.compactRequest },
 		shaping: { ...DEFAULTS.shaping },
 		dirtyQueue: { ...DEFAULTS.dirtyQueue },
+		judge: { backends: { ...DEFAULTS.judge.backends } },
 		poison: { ...DEFAULTS.poison, redactionPatterns: [...DEFAULTS.poison.redactionPatterns] },
 	};
 	const p = join(cwd, ".pi", "context-manager.json");
@@ -270,6 +293,7 @@ function loadConfig(cwd: string): CMConfig {
 			compactRequest: { ...base.compactRequest, ...(raw.compactRequest ?? {}) },
 			shaping: sanitizeShaping({ ...base.shaping, ...(raw.shaping ?? {}) }),
 			dirtyQueue: sanitizeDirtyQueue({ ...base.dirtyQueue, ...(raw.dirtyQueue ?? {}) }),
+			judge: sanitizeJudge({ ...base.judge, ...(raw.judge ?? {}), backends: { ...base.judge.backends, ...(raw.judge?.backends ?? {}) } }),
 			poison: sanitizePoison({ ...base.poison, ...(raw.poison ?? {}) }),
 		};
 	} catch {
@@ -306,7 +330,23 @@ function sanitizeDirtyQueue(q: CMConfig["dirtyQueue"]): CMConfig["dirtyQueue"] {
 	return out;
 }
 
-// AC-19/AC-43 (spec-phase4): malformed poison values warn + default; never throw.
+// M12/AC-19-style (spec-phase5): malformed judge values warn + default; never throw.
+function sanitizeJudge(j: CMConfig["judge"]): CMConfig["judge"] {
+	const d = DEFAULTS.judge;
+	const one = (v: unknown, dflt: "kev" | "heuristic"): "kev" | "heuristic" => (v === "kev" || v === "heuristic" ? v : dflt);
+	const out = {
+		backends: {
+			relevance: one(j?.backends?.relevance, d.backends.relevance),
+			drift: one(j?.backends?.drift, d.backends.drift),
+			rescore: one(j?.backends?.rescore, d.backends.rescore),
+			poison: one(j?.backends?.poison, d.backends.poison),
+		},
+	};
+	if (JSON.stringify(out) !== JSON.stringify(j)) {
+		console.warn("[context-manager] malformed judge.backends value(s); default(s) applied");
+	}
+	return out;
+}
 function sanitizePoison(p: CMConfig["poison"]): CMConfig["poison"] {
 	const d = DEFAULTS.poison;
 	const out = {
@@ -491,47 +531,59 @@ function currentNonCompletedTaskIds(ctx: ExtensionContext): string[] {
 	}
 }
 
+/** M13 (spec-phase5@e9c4194e): raw ingest nouls for eval capture — the SAME
+ *  body/fetch/parse the production path uses, returning raw floats or null.
+ *  ingestRelevance delegates here so capture and production cannot drift. */
+async function fetchIngestNouls(
+	candidate: Span,
+	existing: Span[],
+	tasks: string[],
+): Promise<{ newInfo: number; onTask: number } | null> {
+	const key = jevKey();
+	if (!key) return null;
+	try {
+		const body = JSON.stringify({
+			model: "jev-latest",
+			state: {
+				question: "Does this new artifact add information not already present in the existing context, and is it relevant to the current tasks?",
+				tasks,
+				existingInventory: existing.slice(-30).map((s) => ({ path: s.path, tok: s.tok, class: s.cls, excerpt: s.excerpt.slice(0, 600) })),
+				candidate: { path: candidate.path, excerpt: candidate.excerpt.slice(0, 2000) },
+			},
+			questions: {
+				new_info: { type: "noul", instructions: "noul: the candidate artifact contains substantive information NOT already covered by the existing inventory." },
+				on_task: { type: "noul", instructions: "noul: the candidate artifact is relevant to the listed current tasks, including progress, verification, dependencies, or constraints that affect completing them." },
+			},
+		});
+		const res = await fetch(process.env.JEV_ENDPOINT?.trim() || JEV_ENDPOINT_DEFAULT, {
+			method: "POST",
+			headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+			body,
+			signal: AbortSignal.timeout(JEV_TIMEOUT_MS),
+		});
+		if (res.ok) {
+			const parsed = (await res.json()) as { answers?: Record<string, { noul?: number }> };
+			const newInfo = parsed.answers?.new_info?.noul;
+			const onTask = parsed.answers?.on_task?.noul;
+			if (typeof newInfo === "number" && typeof onTask === "number") return { newInfo, onTask };
+		}
+	} catch {
+		// degrade (AC-14)
+	}
+	return null;
+}
+
 async function ingestRelevance(
 	candidate: Span,
 	existing: Span[],
 	tasks: string[],
 	cfg: CMConfig,
 ): Promise<{ v: Verdict; source: "jev" | "heuristic-degraded" }> {
-	const key = jevKey();
-	if (key) {
-		try {
-			const body = JSON.stringify({
-				model: "jev-latest",
-				state: {
-					question: "Does this new artifact add information not already present in the existing context, and is it relevant to the current tasks?",
-					tasks,
-					existingInventory: existing.slice(-30).map((s) => ({ path: s.path, tok: s.tok, class: s.cls, excerpt: s.excerpt.slice(0, 600) })),
-					candidate: { path: candidate.path, excerpt: candidate.excerpt.slice(0, 2000) },
-				},
-				questions: {
-					new_info: { type: "noul", instructions: "noul: the candidate artifact contains substantive information NOT already covered by the existing inventory." },
-					on_task: { type: "noul", instructions: "noul: the candidate artifact is relevant to the listed current tasks, including progress, verification, dependencies, or constraints that affect completing them." },
-				},
-			});
-			const res = await fetch(process.env.JEV_ENDPOINT?.trim() || JEV_ENDPOINT_DEFAULT, {
-				method: "POST",
-				headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-				body,
-				signal: AbortSignal.timeout(JEV_TIMEOUT_MS),
-			});
-			if (res.ok) {
-				const parsed = (await res.json()) as { answers?: Record<string, { noul?: number }> };
-				const newInfo = parsed.answers?.new_info?.noul;
-				const onTask = parsed.answers?.on_task?.noul;
-				if (typeof newInfo === "number" && typeof onTask === "number") {
-					if (newInfo < 0.35) return { v: "duplicate", source: "jev" };
-					if (onTask < 0.35) return { v: "unrelated", source: "jev" };
-					return { v: "relevant", source: "jev" };
-				}
-			}
-		} catch {
-			// degrade (AC-14)
-		}
+	const raws = cfg.judge?.backends?.relevance === "heuristic" ? null : await fetchIngestNouls(candidate, existing, tasks);
+	if (raws) {
+		if (raws.newInfo < 0.35) return { v: "duplicate", source: "jev" };
+		if (raws.onTask < 0.35) return { v: "unrelated", source: "jev" };
+		return { v: "relevant", source: "jev" };
 	}
 	// degraded heuristic (AC-14): overlap vs existing texts
 	const p = overlapScore(candidate.excerpt, existing.map((s) => s.excerpt));
@@ -601,10 +653,24 @@ async function jevDriftCall(userMsg: string, model: TaskModel): Promise<number |
 	return null;
 }
 
+/** M13: mirror of the M1 first-turn pin logic (subjects of non-completed task
+ *  rows, ≤8; topic = first user text) — lets the eval capture raw drift nouls
+ *  against EXACTLY the model the production cascade would pin. */
+function pinnedModelFromPrompt(prompt: string, firstUser: string): TaskModel {
+	const subjects: string[] = [];
+	for (const r of parseTaskRows(prompt)) {
+		if (r.status !== "completed" && r.status !== "cancelled") {
+			subjects.push(r.subject);
+			if (subjects.length >= 8) break;
+		}
+	}
+	return { tasks: subjects, topic: firstUser.slice(0, 200), turn: 0 };
+}
+
 // __eval — test/eval-only access to the judgment functions (L1 wire-contract
 // test, L2 eval runner; .plans/CTXEVAL/eval-plan.md@4961e6ff). Not an
-// extension API surface.
-export const __eval = { ingestRelevance, jevDriftCall, overlapScore };
+// extension API surface. M13 (spec-phase5) adds the raw-capture pair.
+export const __eval = { ingestRelevance, fetchIngestNouls, jevDriftCall, overlapScore, pinnedModelFromPrompt, parseTaskRows, DEFAULTS };
 
 const STATUS_CHANNEL = "pi-extensions:status-line";
 /**
@@ -699,7 +765,7 @@ export default function (pi: ExtensionAPI) {
 
 	function refreshConfig(ctx: ExtensionContext) {
 		st = {
-			config: loadConfig(ctx.cwd),
+			config: applyJudgeEnvHatch(loadConfig(ctx.cwd)),
 			spans: [],
 			hashCount: new Map(),
 			verdictMemo: new Map(),
@@ -801,7 +867,7 @@ export default function (pi: ExtensionAPI) {
 				drift = true; // deterministic diff ⇒ drift, zero Jev fetches (AC-2)
 				source = "task-diff";
 			} else {
-				const p = await jevDriftCall(userText, st.taskModel); // ≤1 Jev fetch per user turn (AC-1)
+				const p = st.config.judge.backends.drift === "kev" ? await jevDriftCall(userText, st.taskModel) : null; // M12 drift gate — ≤1 fetch/turn (AC-1)
 				if (p != null) {
 					if (p > st.config.taskSwitch.driftThreshold) {
 						drift = true;
@@ -949,8 +1015,8 @@ export default function (pi: ExtensionAPI) {
 			span.rescoredAtTurn = turn;
 		};
 		const key = jevKey();
-		if (!key) {
-			for (const span of batch) applyAnswer(span, null); // degraded (AC-12)
+		if (!key || st.config.judge.backends.rescore !== "kev") {
+			for (const span of batch) applyAnswer(span, null); // degraded (AC-12; M12 rescore gate)
 			return;
 		}
 		const pending = (async (): Promise<void> => {
@@ -1505,8 +1571,8 @@ export default function (pi: ExtensionAPI) {
 		let inputTokens = 0;
 		let live: Span[] = candidates;
 		const key = jevKey();
-		if (!key) {
-			degraded = true;
+		if (!key || rt.config.judge.backends.poison !== "kev") {
+			degraded = true; // M12 poison gate: default "kev"; "heuristic" selects the AC-6 capped battery
 		} else {
 			const questions: Record<string, unknown> = {};
 			const candTools = new Set(candidates.map((s) => rt.toolNames.get(s.contentHash)));
@@ -1997,6 +2063,7 @@ export default function (pi: ExtensionAPI) {
 					metrics,
 					cache: { source: rt.cacheSource, chPct: rt.lastChPct ?? null, missedTokens: rt.missStats.missedTokens, missedCost: 0, cause: rt.missStats.cause, modelChanged: null },
 				taskSwitch: { driftSource: rt.lastDriftSource, staged: rt.stagedModel != null, pinnedTurn: rt.taskModel?.turn ?? null },
+				judge: { backends: rt.config.judge.backends }, // M12 AC-4: which backend each site shipped this session
 				elision: { ...rt.elisionStats },
 				purity: rt.lastPurity,
 				flush,
@@ -2058,6 +2125,7 @@ export default function (pi: ExtensionAPI) {
 						`  view ~${st.lastViewTokens} tok vs baseline ~${st.baselineViewTokens} tok · last flush: ${st.lastFlush ? `${st.lastFlush.trigger} @turn ${st.lastFlush.turn}` : "none"}`,
 						`  evicted (stub + /ctx:restore <sha8>): ${unrelated.map((s) => s.contentHash.slice(0, 8)).join(", ") || "none"}`,
 						`poison: acted ${st.shapeStats.poisonActed} · review ${st.shapeStats.poisonReview} · degraded ${st.shapeStats.poisonDegraded}${st.lastPoison ? ` (last turn: ${st.lastPoison.candidates} candidates, ${st.lastPoison.acted} acted, ${st.lastPoison.inputTokens} input tok)` : ""} · noulPolicy raw-probability`,
+						`judge (M12): rel=${st.config.judge.backends.relevance} · drift=${st.config.judge.backends.drift} · rescore=${st.config.judge.backends.rescore} · poison=${st.config.judge.backends.poison}`,
 						`error-loop: collapsed ${st.shapeStats.errorLoopCollapsed} · kept ${st.shapeStats.errorLoopKept} · redaction hits: ${Object.entries(st.shapeStats.redactHits).map(([k, n]) => `${k}:${n}`).join(", ") || "none"}`,
 					]
 					: []),
