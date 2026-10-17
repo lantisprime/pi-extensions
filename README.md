@@ -578,7 +578,9 @@ Monitor event content is **untrusted data** — investigate with `tail`/`doctor`
 
 ### Jev
 
-Typed judgments from TypeSafe's **System One** model (Jev). Jev is not a chat model: you send a bounded `state` plus typed `questions` and get back typed `answers` with probabilities — never prose. Code owns the workflow; Jev supplies the judgement.
+Typed judgments from a **System One** API: you send a bounded `state` plus typed `questions` and get back typed `answers` with probabilities — never prose. Code owns the workflow; the model supplies the judgement.
+
+**Backend (2026-10-14, spec-phase5):** self-hosted **Kev** ([jaredpalmer/kev](https://github.com/jaredpalmer/kev), Apache-2.0 System One recreation) behind the homelab LiteLLM passthrough — hosted TypeSafe Jev died in an HTTP 402 credits outage and remains reachable only via an explicit `JEV_ENDPOINT` override. Tool name, source labels, and status files keep the `jev` name for consumer-contract stability; Kev is the engine beneath. Note kev's small-checkpoint nouls are **saturated** (near-0/1) — fine for routing, weak for fine thresholds; the context-manager corpus sweep (`.plans/CONTEXT/spec-phase5.md`) keeps its similarity sites on heuristics until a checkpoint passes the floors.
 
 | Primitive | Question shape | Returns |
 |---|---|---|
@@ -598,7 +600,7 @@ Install globally (symlink):
 ln -sfn "$(pwd)/jev" ~/.pi/agent/extensions/jev
 ```
 
-Transport: the homelab LiteLLM gateway proxies TypeSafe, so the **existing** LiteLLM virtual key at rest in `~/.pi/agent/models.json` is the credential — no new secret. Override with `JEV_API_KEY`, `JEV_ENDPOINT`, or `JEV_MODEL`.
+Transport: the homelab LiteLLM gateway proxies Kev at `/kev/v1/systemone` (a passthrough route; the optional `model` field is tolerated and echoed), so the **existing** LiteLLM virtual key at rest in `~/.pi/agent/models.json` is the credential — no new secret. Override with `JEV_API_KEY`, `JEV_ENDPOINT`, or `JEV_MODEL`.
 
 #### Two rules that decide whether this works
 

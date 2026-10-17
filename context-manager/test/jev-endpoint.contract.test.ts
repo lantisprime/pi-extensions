@@ -7,6 +7,10 @@
 // malformed JSON, socket destroy). Not covered: the 15s AbortSignal.timeout
 // (JEV_TIMEOUT_MS is a const; a real timeout test would cost 15s per case —
 // socket destroy exercises the same catch-and-degrade path).
+// 2026-10-14 (spec-phase5.md@96cec6ce): the live endpoint is the kev passthrough
+// at /kev/v1/systemone — bodies keep the optional `model` field (tolerated and
+// echoed by the backend) and Jev source labels (D2). HTTP 402 is the billing
+// outage class that killed hosted Jev — it must degrade like any hard error.
 //
 // Keyless behavior is deliberately NOT tested here: jevKey() falls back to
 // ~/.pi/agent/models.json, so "no env key" is machine-dependent and could hit
@@ -119,6 +123,13 @@ test("L1 ingest degrade: HTTP 500 falls back to heuristic with source recorded",
 		const out = await __eval.ingestRelevance(span(text), [span(text)], ["AUTH-1"], CFG);
 		assert.equal(out.v, "duplicate", "verbatim overlap ⇒ duplicate");
 		assert.equal(out.source, "heuristic-degraded", "degraded source recorded");
+	});
+});
+
+test("L1 ingest degrade: HTTP 402 (billing — the 2026-10-14 hosted-Jev outage class) falls back to heuristic", async () => {
+	await withServer(() => ({ status: 402, payload: JSON.stringify({ detail: { error_type: "billing_error", message: "no credits" } }) }), async () => {
+		const out = await __eval.ingestRelevance(span("novel content entirely"), [span("unrelated base")], ["AUTH-1"], CFG);
+		assert.equal(out.source, "heuristic-degraded", "402 is a hard error, not a retry/degrade-ambiguous one");
 	});
 });
 

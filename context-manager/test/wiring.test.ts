@@ -271,6 +271,11 @@ test("live regression 2026-10-04: object-shaped tool results enter the ledger wi
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cm-shape-"));
 	const file = path.join(dir, "f.txt");
 	fs.writeFileSync(file, "hello world content");
+	// pre-existing flake (found 2026-10-14, phase-5 run): probeFreshness marks a
+	// span stale when statSync(path).mtimeMs > capturedAt — with APFS sub-ms mtimes
+	// a same-millisecond write+capture can satisfy that spuriously. Pin the mtime
+	// 1s into the past so the assertion is deterministic.
+	fs.utimesSync(file, Date.now() / 1000 - 1, Date.now() / 1000 - 1);
 	const { pi, handlers } = mockPi();
 	createExtension(pi);
 	const { ctx } = mockCtx({ cwd: dir, tokens: 100 });
