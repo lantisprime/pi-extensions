@@ -1,6 +1,7 @@
 import { complete, type UserMessage } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { scanTextForAgentRisk, type Finding, type RiskLevel } from "./lib/security-scan";
+import type { EventBus, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { confirmWithBlocked } from "./lib/dialog.ts";
+import { scanTextForAgentRisk, type Finding, type RiskLevel } from "./lib/security-scan.ts";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -85,7 +86,12 @@ type ShieldState = {
 	strictPermissions: boolean;
 };
 
+// The extension event bus, captured at registration so dialog helpers can
+// report herdr:blocked state (see lib/dialog.ts).
+let extensionEvents: EventBus | undefined;
+
 export default function (pi: ExtensionAPI) {
+	extensionEvents = pi.events;
 	pi.on("session_start", async (_event, ctx) => scanAndNotify(ctx, false));
 	pi.on("resources_discover", async (_event, ctx) => scanAndNotify(ctx, false));
 
@@ -105,7 +111,7 @@ export default function (pi: ExtensionAPI) {
 				return { block: true, reason: `Prompt Shield blocked dangerous ${kind}: ${target}` };
 			}
 			if (config.mode === "ask" && result.risk !== "safe" && !result.approved && ctx.hasUI) {
-				const ok = await ctx.ui.confirm("Prompt Shield warning", formatResult(result, ctx.cwd));
+				const ok = await confirmWithBlocked(ctx, extensionEvents, "Prompt Shield warning", formatResult(result, ctx.cwd), "Prompt Shield: risky resource write");
 				if (!ok) return { block: true, reason: `Prompt Shield denied ${kind}: ${target}` };
 			}
 		}
@@ -150,7 +156,7 @@ async function handleCommand(args: string, ctx: ExtensionContext) {
 		const { result } = match;
 		if (action === "approve") {
 			if (result.risk !== "safe" && ctx.hasUI) {
-				const ok = await ctx.ui.confirm("Approve risky resource?", `${formatResult(result, ctx.cwd)}\n\nThis does not make the content safe; it only trusts this exact hash. Approve anyway?`);
+				const ok = await confirmWithBlocked(ctx, extensionEvents, "Approve risky resource?", `${formatResult(result, ctx.cwd)}\n\nThis does not make the content safe; it only trusts this exact hash. Approve anyway?`, "Prompt Shield: approve risky resource");
 				if (!ok) return ctx.ui.notify("Prompt Shield approval cancelled", "info");
 			}
 			config.approved[result.path] = result.hash;
@@ -164,7 +170,7 @@ async function handleCommand(args: string, ctx: ExtensionContext) {
 		// Deny removes the risky resource outright. Recording an untrusted hash does not
 		// make Pi stop loading the file, so the safe resolution is to delete it.
 		if (ctx.hasUI) {
-			const ok = await ctx.ui.confirm("Delete risky resource?", `${formatResult(result, ctx.cwd)}\n\nDenying deletes this file from disk so Pi can no longer load it. Delete now?`);
+			const ok = await confirmWithBlocked(ctx, extensionEvents, "Delete risky resource?", `${formatResult(result, ctx.cwd)}\n\nDenying deletes this file from disk so Pi can no longer load it. Delete now?`, "Prompt Shield: delete risky resource");
 			if (!ok) return ctx.ui.notify("Prompt Shield deny cancelled; file left in place", "info");
 		}
 		try {

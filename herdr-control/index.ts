@@ -22,7 +22,7 @@
 //   - session_shutdown mechanically CLOSES every pane this session spawned
 //     (keep_on_exit opts out); session_start reaps stale settled panes left
 //     by crashed sessions — pane lifecycle is code, not instructions
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { EventBus, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
 	DEFAULT_HERDR_PREFIX,
 	DEFAULT_SPAWN_TIMEOUT_MS,
@@ -38,6 +38,7 @@ import { defaultHerdrExecutor, type HerdrExecutor } from "./lib/exec.ts";
 import { ensureServer } from "./lib/gate.ts";
 import { stringEnum, Type } from "./lib/string-enum.ts";
 import { isValidAgentName, isPaneRef, matchesPrefix, requirePaneRef, validateKeyTokens } from "./lib/safety.ts";
+import { confirmWithBlocked } from "./lib/dialog.ts";
 import { formatAgent, getAgent, listAgents, type HerdrAgentInfo } from "./lib/list.ts";
 import { spawnAgent, type SpawnOutcome } from "./lib/launch.ts";
 import { promptAgent } from "./lib/prompt.ts";
@@ -62,6 +63,9 @@ const registry = new SpawnRegistry();
 // Watchdog (created lazily on first use; needs the executor + pi surface).
 let watchdog: Watchdog | null = null;
 let watchdogPi: ExtensionAPI | null = null;
+// The extension event bus, captured at registration so dialog helpers can
+// report herdr:blocked state (see lib/dialog.ts).
+let extensionEvents: EventBus | undefined;
 
 function makeWatchdog(executor: HerdrExecutor): Watchdog {
 	return new Watchdog(
@@ -528,9 +532,12 @@ function registerTools(pi: ExtensionAPI, executor: HerdrExecutor): void {
 				const keys = validateKeyTokens(params.keys);
 				if (!keys.ok) throw new Error(keys.error);
 				if (!ctx.hasUI) throw new Error("refusing to send keys without interactive confirmation (no UI in this mode)");
-				const confirmed = await ctx.ui.confirm(
+				const confirmed = await confirmWithBlocked(
+					ctx,
+					extensionEvents,
 					`Send keys to ${params.agent}?`,
 					`Keys: ${keys.tokens.join(" ")}${params.reason ? `\nReason: ${params.reason}` : ""}`,
+					`herdr: send keys to ${params.agent}`,
 				);
 				if (!confirmed) return toolText("User declined to send keys.", { ok: false, declined: true });
 				const result = await executor.exec(["agent", "send-keys", params.agent, ...keys.tokens], { timeoutMs: HERDR_SHORT_TIMEOUT_MS });
@@ -567,9 +574,12 @@ function registerTools(pi: ExtensionAPI, executor: HerdrExecutor): void {
 						);
 					}
 					if (!ctx.hasUI) throw new Error(`"${params.agent}" is not in this session's registry and no UI is available to confirm`);
-					const confirmed = await ctx.ui.confirm(
+					const confirmed = await confirmWithBlocked(
+						ctx,
+						extensionEvents,
 						"Close unregistered herdr agent?",
 						`"${params.agent}" was not spawned by this session (or the session was replaced). Close its pane anyway?`,
+						`herdr: close unregistered agent ${params.agent}`,
 					);
 					if (!confirmed) return toolText("User declined to close.", { ok: false, declined: true });
 					const ref = requirePaneRef(params.agent);
@@ -990,6 +1000,7 @@ export default function herdrControlExtension(pi: ExtensionAPI): void {
 
 	const executor = defaultHerdrExecutor();
 	watchdogPi = pi;
+	extensionEvents = pi.events;
 	registerTools(pi, executor);
 	registerCommands(pi, executor);
 	registerInputHook(pi, executor);
