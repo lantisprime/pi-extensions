@@ -327,3 +327,38 @@ sole EXECUTOR and **no longer self-triggers**.
 Tests: engine 42/42 (+4 contract), wiring 60/60 total (+2 Option A regressions:
 no-request never fires; the 870-token incident declines on savings with a
 `declined` ack).
+
+### Amendment 6 — Pricing provenance: built-in family price table (2026-10-06, SCFIX-1)
+
+Live fleet survey: the LiteLLM gateway publishes NO cost fields — `models.json`
+carries cost for 1 of 75 models and `/model/info` for 0 (verified) — so the
+Amendment-5 rule "no positive catalog price field disables the economy path"
+skipped EVERY gateway model (`pricing-unknown`), glm-5.3-zai being the one seen
+live. Worse, the wiring computed `pricingKnown` from the catalog alone while its
+own decline message told users to set `config.defaultPrices` / profile `prices`
+to opt in — which silently did nothing. Both are corrected:
+
+- **Price resolution returns provenance** (`resolvePricing`):
+  `catalog → user config (profile prices / defaultPrices) → BUILTIN_PRICES
+  family table → assumed generic`. The economy gate runs on the first three and
+  declines only on `assumed` (AC-10 unchanged in spirit: fabricated numbers may
+  never drive the math).
+- **BUILTIN_PRICES**: family-level list prices ($/MTok, standard tier) sourced
+  from OpenRouter's public model list (fetched 2026-10-06), covering the live
+  fleet's families (GLM, Kimi, DeepSeek, Qwen, MiniMax, Grok, GPT-5.6, MiMo,
+  HY3, Longcat, gpt-oss, gemma, devstral). Published zeros (free cache
+  writes/reads) are honored as real — unlike the all-zero-catalog rule, which
+  stays. A profile `writePremium: 0` pin still outranks the table's
+  cache-write number (gpt-5.6-sol). Corroboration: the minimax-m3 entry matches
+  the one manually-captured catalog cost exactly. Variant suffixes (-inferx,
+  -opencode, -openrouter, -zai) inherit the family base; bare aliases map to
+  their nearest published class. Router aliases with unknown upstream
+  (`cerebras`, `opencode`, `openrouter`, `muse-*`) stay `assumed`.
+- Fleet effect: pricingKnown 1/75 → 68/75 (the 7 misses are unknown-upstream or
+  quality-mode local models whose economy path is inert).
+- Wiring: `refreshModel` uses `resolvePricing`; `pricingKnown = source ≠
+  "assumed"`; `/compact:why` prints the price source.
+
+Tests: engine 48/48 (+6 SCFIX provenance/table), wiring 9/9 (+2 LESSON-1
+regressions: catalog-less glm-5.3-zai compacts end-to-end on table prices;
+defaultPrices opts in for untabled models with an AC-10 negative control).

@@ -52,3 +52,17 @@ Built-in families: `gemini-*-pro*` (200K ×2 tier, cost), `gpt-5.6-sol*` (272K
 ×2/×1.5, cost), `claude-*` (flat price, 1.25× cache writes, balanced),
 `*local_mlx`/`*inferx` (quality). Resolution: config exact → config globs in
 order → built-in → generic (AC-12).
+
+### Pricing (SCFIX-1, 2026-10-06)
+
+Price resolution returns a provenance: **catalog cost fields → config
+(`defaultPrices` / profile `prices`) → built-in family table → assumed
+generic**. The economy gate runs on the first three and declines only on
+`assumed` (reported as `pricing-unknown` in telemetry and `/compact:why`).
+Gateway catalogs (LiteLLM proxies) usually carry no cost fields, so a built-in
+family price table (`BUILTIN_PRICES` in `lib/profiles.ts`) ships list prices
+for common families — GLM, Kimi, DeepSeek, Qwen, MiniMax, Grok, GPT-5.6, MiMo,
+HY3, Longcat, gpt-oss, gemma, devstral — sourced from OpenRouter's public model
+list (2026-10-06). Models with no catalog, config, or table pricing keep the
+fail-closed behavior; set `defaultPrices` (or a profile `prices` block) to opt
+in — the wiring honors it.
