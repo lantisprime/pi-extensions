@@ -526,3 +526,73 @@ test("Option A incident 2026-10-04 (executor side): ~870-token reclaimable at 16
 	assert.ok(statusSets.some((s) => s.includes("req declined")), "status line reports the declined request");
 	fs.rmSync(dir, { recursive: true, force: true });
 });
+
+// ----- SCFIX-1 regressions (2026-10-06): pricing provenance through the real handler map -----
+
+async function driveCompactRequest(dir: string, modelId: string, config: object | null) {
+	const d = fs.mkdtempSync(path.join(os.tmpdir(), "sc-wiring3-"));
+	fs.mkdirSync(path.join(d, ".pi"));
+	if (config) fs.writeFileSync(path.join(d, ".pi", "smart-compaction.json"), JSON.stringify(config));
+	const { pi, handlers, busEmissions } = mockPi();
+	createExtension(pi);
+	const sessionId = `scfix-${Date.now()}-${modelId}`;
+	const base = mockCtx({ sessionId, cwd: d, tokens: 40_000 });
+	// strip the catalog cost: the whole point — gateway models carry none
+	(base.ctx as any).model = { provider: "litellm", id: modelId };
+	await drive(handlers, "session_start", {}, base.ctx);
+	await drive(handlers, "message_end", { message: { role: "assistant", usage: { totalTokens: 40_000 } } }, base.ctx);
+	await drive(handlers, "turn_end", {}, { ...base.ctx, getContextUsage: () => ({ tokens: 38_000, contextWindow: 1_048_576, percent: 4 }) });
+	await drive(handlers, "turn_end", {}, base.ctx); // growth > 0 → economy math armed
+	propose(pi);
+	await drive(handlers, "agent_settled", {}, base.ctx);
+	const rows = telemetryLines(sessionId).filter((r) => r.event === "compact-request");
+	fs.rmSync(d, { recursive: true, force: true });
+	return { rows, compactCalls: base.compactCalls, acks: decisionAcks(busEmissions) };
+}
+
+const SCFIX_PROFILE = {
+	match: "litellm/{MODEL}",
+	mode: "cost",
+	tiers: [{ upTo: 30_000, inputMult: 1, outputMult: 1 }, { upTo: 1e9, inputMult: 2, outputMult: 1.5 }],
+	cache: { readRatio: 0.1, writePremium: 0, ttlShort: 300, ttlLong: 3600 },
+	compaction: { tokenFloor: 20_000, minIntervalTurns: 0, floorFraction: 0 },
+	gate: { enabled: false, aggressiveBelow: 0.35, deferAbove: 0.7 },
+};
+
+test("SCFIX-1 wiring: catalog-less glm-5.3-zai prices from the family table and compacts", async () => {
+	const config = { enabled: true, profiles: [JSON.parse(JSON.stringify(SCFIX_PROFILE).replaceAll("{MODEL}", "glm-5.3-zai"))] };
+	const { rows, compactCalls, acks } = await driveCompactRequest("", "glm-5.3-zai", config);
+	assert.ok(rows.length > 0, "compact-request must be evaluated");
+	for (const r of rows) {
+		assert.doesNotMatch(r.why ?? "", /pricing-unknown/, "family-table prices must not decline as pricing-unknown");
+	}
+	assert.equal(compactCalls.length, 1, "table-priced economy decision must fire end-to-end");
+	assert.ok(
+		rows.some((r) => r.decision === "economy" && typeof r.estimates?.cost === "number" && r.estimates.cost > 0),
+		"telemetry must record a real cost from the table prices",
+	);
+	assert.ok(
+		acks.some((a) => a.decision === "accepted"),
+		"executor must accept the proposer request when the economy gate fires",
+	);
+});
+
+test("SCFIX-1 wiring: config defaultPrices opts in where the table has no entry (AC-10 control)", async () => {
+	const prof = JSON.parse(JSON.stringify(SCFIX_PROFILE).replaceAll("{MODEL}", "cerebras"));
+	// WITH defaultPrices: known (source=config) — must not decline as pricing-unknown
+	const withCfg = { enabled: true, defaultPrices: { input: 1.5, output: 4 }, profiles: [prof] };
+	const a = await driveCompactRequest("", "cerebras", withCfg);
+	assert.ok(a.rows.length > 0);
+	assert.ok(
+		a.rows.every((r) => !(r.why ?? "").includes("pricing-unknown")),
+		"explicit defaultPrices must re-enable the economy gate (pre-SCFIX wiring ignored it)",
+	);
+	// WITHOUT defaultPrices: truly unknown — the fail-closed decline must persist
+	const withoutCfg = { enabled: true, profiles: [prof] };
+	const b = await driveCompactRequest("", "cerebras", withoutCfg);
+	assert.ok(
+		b.rows.some((r) => (r.why ?? "").includes("pricing-unknown")),
+		"AC-10: an untabled, unconfigured model must still decline as pricing-unknown",
+	);
+	assert.equal(b.compactCalls.length, 0, "assumed prices must not compact");
+});
