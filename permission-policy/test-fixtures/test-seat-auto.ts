@@ -904,17 +904,52 @@ async function runSuite(stubDir: string): Promise<void> {
 	// Other modes keep their behaviour
 	// -----------------------------------------------------------------------
 
-	await check("yolo: rm -f still denied outright, extended hard-deny denies without dialog, rest allowed", async () => {
+	await check("yolo: rm -f still denied outright; SEAT hard-deny set does NOT apply outside seat mode (PERMFIX 2026-10-14)", async () => {
 		const project = freshProjectDir();
 		writePolicy(project, { projectPath: project, updatedAt: new Date().toISOString(), mode: "yolo", permissions: {} });
 		const ctx = makeCtx(project);
 		const rmResult = await harness.toolCall({ toolName: "bash", input: { command: "rm -f x.txt" }, toolCallId: nextId() }, ctx);
 		assert.equal((rmResult as { block?: boolean }).block, true);
-		assert.equal(ctx.dialogs.length, 0, "yolo hard-deny denies outright without a dialog");
+		assert.equal(ctx.dialogs.length, 0, "yolo hard-deny (universal set) denies outright without a dialog");
+		// Seat hard-deny members (git push / curl / ~ paths) are seat policy — a
+		// yolo session is not a seat, so these follow yolo's published contract:
+		// auto-allow except the universal set.
 		const pushResult = await harness.toolCall({ toolName: "bash", input: { command: "git push" }, toolCallId: nextId() }, ctx);
-		assert.equal((pushResult as { block?: boolean }).block, true, "extended hard-deny set applies in yolo too (A.1: every mode)");
-		assert.equal(ctx.dialogs.length, 0, "yolo denies hard-deny categories outright");
+		assert.equal((pushResult as { block?: boolean } | undefined)?.block, undefined, "git push is seat policy; yolo auto-allows it");
+		const curlResult = await harness.toolCall({ toolName: "bash", input: { command: "curl -sS https://example.com" }, toolCallId: nextId() }, ctx);
+		assert.equal((curlResult as { block?: boolean } | undefined)?.block, undefined, "curl is seat policy; yolo auto-allows it");
+		assert.equal(ctx.dialogs.length, 0, "no dialog for seat-policy commands in yolo");
 		await expectAllowed(harness, ctx, "bash", { command: "touch y.txt" });
+	});
+
+	await check("PERMFIX: seat hard-deny set applies ONLY while the seat is active (unexpired seatAuto block)", async () => {
+		const project = freshProjectDir();
+		// seatAuto WITHOUT a seat block (N7: behaves as ask) — no seat policy.
+		writePolicy(project, { projectPath: project, updatedAt: new Date().toISOString(), mode: "seatAuto", permissions: {} });
+		let ctx = makeCtx(project);
+		await expectDialog(harness, ctx, "bash", { command: "git push" }); // ask flow, not seat hard-deny
+		// ACTIVE seat — seat policy engages: hard-deny members prompt (a seat
+		// cannot answer, so this is the fail-closed path).
+		writePolicy(project, {
+			projectPath: project,
+			updatedAt: new Date().toISOString(),
+			mode: "seatAuto",
+			permissions: {},
+			seat: seatBlock(path.join(project, ".seat-manifest.json"), new Date(Date.now() + 60_000).toISOString()),
+		});
+		ctx = makeCtx(project);
+		await expectDialog(harness, ctx, "bash", { command: "git push" });
+		await expectDialog(harness, ctx, "bash", { command: "curl -sS https://example.com" });
+		// EXPIRED seat (N7) — seat policy lifts again.
+		writePolicy(project, {
+			projectPath: project,
+			updatedAt: new Date().toISOString(),
+			mode: "seatAuto",
+			permissions: {},
+			seat: seatBlock(path.join(project, ".seat-manifest.json"), new Date(Date.now() - 60_000).toISOString()),
+		});
+		ctx = makeCtx(project);
+		await expectDialog(harness, ctx, "bash", { command: "curl -sS https://example.com" });
 	});
 
 	await check("ask mode is unchanged: everything asks", async () => {
