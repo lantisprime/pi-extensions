@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "sources": [
+    ".github/workflows/ci.yml"
+  ],
+  "packages": [
+    {
+      "glob": "agents/**",
+      "test": "npx --yes tsx --test agents/test/test-agents-run-tool.mjs && npx --yes tsx --test agents/test/test-agents-run-wiring.mjs && npx --yes tsx --test agents/test/test-chain-runner.mjs && npx --yes tsx --test agents/test/test-bg-trust.mjs && npx --yes tsx --test agents/test/test-bg-wake.mjs && npx --yes tsx --test agents/test/test-builtins.mjs"
+    },
+    {
+      "glob": "cmux-control/**",
+      "test": "bash cmux-control/test-fixtures/run-tests.sh"
+    },
+    {
+      "glob": "cmux-terminal/**",
+      "test": "bash cmux-terminal/test-fixtures/run-cmux-tests.sh"
+    },
+    {
+      "glob": "context-manager/**",
+      "test": "npx --yes tsx --test context-manager/test/"
+    },
+    {
+      "glob": "herdr-control/**",
+      "test": "bash herdr-control/test-fixtures/run-tests.sh"
+    },
+    {
+      "glob": "mcp/**",
+      "test": "npx --yes tsx mcp/test/run-config-test.mjs && npx --yes tsx mcp/test/run-headers-test.mjs && npx --yes tsx mcp/test/run-client-test.mjs && npx --yes tsx mcp/test/run-http-test.mjs"
+    },
+    {
+      "glob": "mcp-gateway/**",
+      "test": "bash mcp-gateway/test-fixtures/run-mcp-gateway-tests.sh"
+    },
+    {
+      "glob": "permission-policy/**",
+      "test": "npx --yes tsx permission-policy/test-fixtures/test-classification.ts && npx --yes tsx permission-policy/test-fixtures/test-herdr-blocked.ts && npx --yes tsx permission-policy/test-fixtures/test-seat-auto.ts"
+    },
+    {
+      "glob": "prompt-shield/**",
+      "test": "bash prompt-shield/test-fixtures/run-cache-management-test.sh"
+    },
+    {
+      "glob": "scripts/**",
+      "test": "scripts/test-security-scan.mjs"
+    },
+    {
+      "glob": "smart-compaction/**",
+      "test": "npx --yes tsx --test smart-compaction/test/"
+    },
+    {
+      "glob": "tmux-control/**",
+      "test": "npm test --prefix tmux-control"
+    },
+    {
+      "glob": "tmux-terminal/**",
+      "test": "bash tmux-terminal/test-fixtures/run-p5-tests.sh"
+    },
+    {
+      "glob": "tool-context-loader/**",
+      "test": "tool-context-loader/test-fixtures/run-p1a-tests.sh"
+    },
+    {
+      "glob": "web-search/**",
+      "test": "web-search/test-fixtures/run-redirect-fetch-tests.sh"
+    },
+    {
+      "glob": "workflow-guard/**",
+      "test": "npx --yes tsx --test workflow-guard/test/unit.test.mjs workflow-guard/test/wiring.test.mjs"
+    },
+    {
+      "glob": "zellij-terminal/**",
+      "test": "bash zellij-terminal/test-fixtures/run-zellij-tests.sh"
+    },
+    {
+      "glob": "shared/**",
+      "test": "node scripts/test-security-scan.mjs"
+    }
+  ],
+  "docsOnly": [
+    "**/*.md",
+    "docs/**",
+    ".plans/**"
+  ],
+  "protectedPaths": [
+    "AGENTS.md",
+    "MEMORY.md",
+    ".pi/runbooks/**",
+    ".pi/workflow.json"
+  ],
+  "gates": {
+    "protect-instructions": {
+      "enabled": true
+    },
+    "test-before-commit": {
+      "enabled": true
+    },
+    "plan-before-pr": {
+      "enabled": false
+    }
+  }
+}

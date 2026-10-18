@@ -22,6 +22,7 @@ const RESOURCE_GLOBS = [
 	{ dir: ".agents/skills", kind: "skill", provenance: "project" },
 	{ dir: ".pi/prompts", kind: "prompt", provenance: "project" },
 	{ dir: ".pi/extensions", kind: "extension", provenance: "project" },
+	{ dir: ".pi/runbooks", kind: "skill", provenance: "project" },
 ] as const;
 
 const ROOT_FILES = [
@@ -29,6 +30,7 @@ const ROOT_FILES = [
 	{ file: ".pi/APPEND_SYSTEM.md", kind: "prompt", provenance: "project" },
 	{ file: "AGENTS.md", kind: "prompt", provenance: "project" },
 	{ file: "CLAUDE.md", kind: "prompt", provenance: "project" },
+	{ file: ".pi/workflow.json", kind: "prompt", provenance: "project" },
 ] as const;
 
 const GLOBAL_RESOURCE_DIRS = [
@@ -42,6 +44,8 @@ const RESOURCE_PATH_MARKERS = [
 	".agents/skills",
 	".pi/prompts",
 	".pi/extensions",
+	".pi/runbooks",
+	".pi/workflow.json",
 	".pi/SYSTEM.md",
 	".pi/APPEND_SYSTEM.md",
 	"AGENTS.md",

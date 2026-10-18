@@ -1,0 +1,9 @@
+{
+  "name": "pi-workflow-guard-extension-types",
+  "private": true,
+  "description": "Type-only dependency for typechecking workflow-guard. The extension is loaded from source by pi; this exists so tsc resolves the host API the same way on a dev machine and on CI.",
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.0.0",
+    "@types/node": "^22.0.0"
+  }
+}

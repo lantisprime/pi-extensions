@@ -1,5 +1,14 @@
 .episodic-memory/
-.pi/
+.pi/*
+!.pi/workflow.json
+!.pi/runbooks/
+!.pi/runbooks/**
+
+# Workflow guard: drafts are quarantine, telemetry is local audit
+.pi/workflow-drafts/
+.pi/workflow-telemetry.jsonl
+**/.pi/context-telemetry.jsonl
+**/.pi/context-elisions.jsonl
 node_modules/
 *.swp
 .*.swp

@@ -48,6 +48,26 @@ jobs:
       - name: Run tool-context-loader tests
         run: tool-context-loader/test-fixtures/run-p1a-tests.sh
 
+      - name: Run workflow-guard tests
+        run: npx --yes tsx --test workflow-guard/test/unit.test.mjs workflow-guard/test/wiring.test.mjs
+
+      # Negative control: BREAK_GATE=1 asserts a dirty commit is allowed, so the
+      # suite MUST fail. A pass here means the gate stopped blocking.
+      - name: workflow-guard negative control (must fail)
+        run: |
+          if BREAK_GATE=1 npx --yes tsx --test workflow-guard/test/unit.test.mjs; then
+            echo "negative control failed: gate allowed a dirty commit" >&2
+            exit 1
+          fi
+
+      - name: Typecheck workflow-guard
+        run: |
+          npm ci --prefix workflow-guard
+          npx --yes -p typescript@5.9.3 tsc --noEmit -p workflow-guard/tsconfig.json
+
+      - name: Workflow derive smoke (no writes)
+        run: node scripts/workflow-derive.mjs --json > /dev/null
+
       - name: Run permission-policy classification unit tests
         run: npx --yes tsx permission-policy/test-fixtures/test-classification.ts
 

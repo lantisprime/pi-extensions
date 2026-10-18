@@ -73,6 +73,21 @@ genuinely help the task at hand — it does not override this repo's own
 conventions, and it is not a reason to introduce TypeSafe into work that does not
 call for it.
 
+## Workflow enforcement
+
+- Machine-checkable repo rules live in `.pi/workflow.json` (packages → exact
+  test command, docs-only globs, protected paths, gate toggles). `AGENTS.md` is
+  the narrative; do not duplicate it in the contract.
+- `workflow-guard` enforces G1 (steering files need operator confirmation) and
+  G2 (commit/push/PR needs a green run for every changed package). Use
+  `/workflow status`; `/workflow override <reason>` is audited and one-shot.
+- Refresh the contract when CI entry points change:
+  `node scripts/workflow-derive.mjs --write`, review the drafts in
+  `.pi/workflow-drafts/`, then `--accept <id>` (operator verification is the
+  only activation path).
+- Rule of thumb: every rule must map to a check in the contract or stay
+  advisory. If it cannot be checked, do not add it as a per-turn instruction.
+
 ## Skills layout
 
 - `.agents/skills/` — project skills loaded by pi and Codex (`episodic-memory`,
