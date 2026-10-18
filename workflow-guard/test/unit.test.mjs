@@ -25,6 +25,7 @@ import { emptyState, loadState, recordGreen, saveState } from "../lib/state.ts";
 import { normalizeContract } from "../lib/contract.ts";
 import { DEFAULT_PROTECTED_PATHS } from "../lib/types.ts";
 import { acceptDecision, buildDrafts, draftScanText, mergeContracts, redactCommand } from "../../scripts/workflow-derive.mjs";
+import { buildContract, discoverFromCi, discoverPackages } from "../lib/derive.ts";
 
 const CWD = "/repo";
 
@@ -254,4 +255,34 @@ test("derive: acceptance is fail-closed on dangerous content", () => {
 	assert.equal(acceptDecision("suspicious").ok, false);
 	assert.equal(acceptDecision("suspicious", true).ok, true);
 	assert.equal(acceptDecision("safe").ok, true);
+});
+
+test("derive: python + nested node + CI workdir", () => {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "wg-derive-"));
+	fs.mkdirSync(path.join(root, "tests"), { recursive: true });
+	fs.writeFileSync(path.join(root, "tests", "test_a.py"), "def test_a():\n    assert True\n");
+	fs.mkdirSync(path.join(root, "docs", "mocks"), { recursive: true });
+	fs.writeFileSync(path.join(root, "docs", "mocks", "package.json"), JSON.stringify({ scripts: { test: "playwright test" } }));
+	fs.writeFileSync(path.join(root, "CLAUDE.md"), "# rules\n");
+	fs.mkdirSync(path.join(root, ".github", "workflows"), { recursive: true });
+	fs.writeFileSync(
+		path.join(root, ".github", "workflows", "ui.yml"),
+		"jobs:\n  t:\n    defaults:\n      run:\n        working-directory: docs/mocks\n    steps:\n      - run: npm test\n",
+	);
+	const ci = discoverFromCi(root);
+	assert.equal(ci.steps.length, 1);
+	assert.deepEqual(ci.byDir.get("docs/mocks"), ["npm test"]);
+	const packages = discoverPackages(root, ci.byDir);
+	const globs = packages.map((pkg) => pkg.glob);
+	assert.ok(globs.includes("docs/mocks/**"));
+	assert.ok(globs.includes("**/*"));
+	const contract = buildContract(root, packages, ci.steps);
+	assert.ok(!contract.docsOnly.includes("docs/**"), "docs with a test package must not be docs-only");
+	assert.ok(contract.protectedPaths.includes("CLAUDE.md"));
+});
+
+test("gate: tea and glab PR commands are commit-like", () => {
+	assert.equal(isCommitLikeCommand("tea pr create --repo x"), true);
+	assert.equal(isCommitLikeCommand("glab mr create"), true);
+	assert.equal(isCommitLikeCommand("tea pr list"), false);
 });

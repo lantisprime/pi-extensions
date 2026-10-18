@@ -18,6 +18,11 @@ extensions = [
     pathlib.Path.home() / '.pi/agent/extensions/prompt-shield/index.ts',
     pathlib.Path.home() / '.pi/agent/extensions/web-search/index.ts',
 ]
+# workflow-guard is first-party defensive code; approve its installed sources
+# (index + lib) so a reinstall does not surface it as unapproved risk.
+workflow_guard = pathlib.Path.home() / '.pi/agent/extensions/workflow-guard'
+if workflow_guard.exists():
+    extensions.extend(sorted(workflow_guard.rglob('*.ts')))
 base = pathlib.Path.home() / '.pi/agent/prompt-shield'
 config_path = base / 'config.json'
 cache_path = base / 'cache.json'

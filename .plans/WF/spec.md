@@ -194,7 +194,7 @@ project.
   than the gated ones.
 
 Escape hatches: `/workflow enforce on|off|status`, `/workflow override <reason>`
-(one next action, appended to `.pi/workflow-telemetry.jsonl`). Kill switch must
+(one next action, appended to the user-level audit `~/.pi/agent/workflow/<hash>.telemetry.jsonl`; never inside the repo). Kill switch must
 work without a reload.
 
 ### F. Runbook derivation (mine → quarantine → verify → activate)
@@ -393,6 +393,15 @@ claim against the code:
   loader segment filter (AC-18); one delta per turn (AC-2); `git push` gated and
   alias bypass documented; bash-mutation audit (AC-17); scan-before-use
   (AC-19); S1 owns scan roots + exclusion, S4 is staleness only.
+- 2026-10-18 | v6 | Repos without `.pi/workflow.json` now get an in-memory
+  contract derived at session start (CI steps, nested package.json test scripts,
+  documented pytest command) and a project-scoped runbook projected to
+  `~/.pi/agent/runbooks/derived/`. Nothing is written into the scanned repo;
+  audit moved beside the ledger. Validation: home-network dry run detected 3
+  packages, fresh process logged `contract=loaded (derived) packages=3`, and
+  discovery reported `runbooks: 1` scoped to that project. Reviewed by GLM
+  (accept-with-changes): telemetry deadlock, TCL record shape, tea gating,
+  lifecycle, trust, and Python fallback were addressed or designed around.
 - 2026-10-18 | v5 | Derivation collapsed to one aggregate `ship-change` runbook
   that fires on git inspection (status/diff) before the commit, instead of
   per-package drafts that only appeared after their test ran. Accepted after a

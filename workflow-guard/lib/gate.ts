@@ -42,8 +42,12 @@ export function isCommitLikeCommand(command: string): boolean {
 	return segments.some((segment) => {
 		const subcommand = gitSubcommand(segment);
 		if (subcommand === "commit" || subcommand === "push") return true;
-		// `gh pr create|merge`, with any global gh options before `pr`.
-		return /\bgh\b[^;&|]*\bpr\s+(?:create|merge)\b/.test(segment);
+		// `gh pr create|merge`, `tea pr create|merge` (forgejo), `glab mr|pr`.
+		return (
+			/\bgh\b[^;&|]*\bpr\s+(?:create|merge)\b/.test(segment) ||
+			/\btea\b[^;&|]*\bpr\s+(?:create|merge)\b/.test(segment) ||
+			/\bglab\b[^;&|]*\b(?:mr|pr)\s+(?:create|merge)\b/.test(segment)
+		);
 	});
 }
 

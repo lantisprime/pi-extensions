@@ -472,7 +472,10 @@ workflow-guard/index.ts
 Keeps repo workflow rules load-bearing with near-zero context cost. Rules are
 compiled into `.pi/workflow.json` (packages → exact test commands, docs-only
 globs, protected steering paths, gate toggles); `AGENTS.md` stays the narrative
-and is not repeated per turn.
+and is not repeated per turn. When a repo has no contract, the guard derives one
+in memory at session start (CI steps, nested `package.json` test scripts, a
+documented pytest command) and projects a project-scoped runbook to
+`~/.pi/agent/runbooks/derived/` — no files are written into that repo.
 
 Steering ladder:
 
@@ -485,7 +488,7 @@ Gates:
 - **G1** protected steering files (`AGENTS.md`, `MEMORY.md`, `.pi/runbooks/**`,
   `.pi/workflow.json`) require operator confirmation, including bash-mediated
   writes (`sed -i`, `tee`, `>`, `cp`/`mv`).
-- **G2** `git commit` / `git push` / `gh pr create` require the changed
+- **G2** `git commit` / `git push` / `gh pr create` / `tea pr create` require the changed
   package's current hash to match a recorded green test run. A read-only git
   snapshot plus a persisted ledger survive restart; an uncomputable snapshot
   fails closed.
@@ -498,8 +501,8 @@ Gates:
 Runbooks are derived, never auto-activated:
 
 ```bash
-node scripts/workflow-derive.mjs --write     # contract + drafts in .pi/workflow-drafts/
-node scripts/workflow-derive.mjs --accept <id>  # operator-only; scanner-gated
+npx --yes tsx scripts/workflow-derive.mjs --write     # contract + drafts in .pi/workflow-drafts/
+npx --yes tsx scripts/workflow-derive.mjs --accept <id>  # operator-only; scanner-gated
 ```
 
 See [`workflow-guard/README.md`](workflow-guard/README.md) for install, state,

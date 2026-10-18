@@ -7,3 +7,4 @@ npx --yes tsx tool-context-loader/test-fixtures/test-jit.ts
 npx --yes tsx tool-context-loader/test-fixtures/test-jit-e2e.ts
 npx --yes tsx tool-context-loader/test-fixtures/test-p1d-hardening.ts
 npx --yes tsx tool-context-loader/test-fixtures/test-draft-exclusion.ts
+npx --yes tsx tool-context-loader/test-fixtures/test-project-scope.ts

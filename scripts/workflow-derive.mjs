@@ -2,39 +2,79 @@
 // Derive the repo workflow contract and runbook drafts from deterministic
 // sources: CI steps, package scripts, test entry points. No LLM, no network.
 //
-//   node scripts/workflow-derive.mjs            # preview (no writes)
-//   node scripts/workflow-derive.mjs --write    # write .pi/workflow.json + drafts
-//   node scripts/workflow-derive.mjs --accept test-agents,ship-change
+// Run with tsx (the shared discovery module is TypeScript):
 //
-// Acceptance is operator-only and fail-closed: the rendered draft must pass the
-// shared scanner before it moves from .pi/workflow-drafts/ to .pi/runbooks/.
+//   npx --yes tsx scripts/workflow-derive.mjs                 # preview
+//   npx --yes tsx scripts/workflow-derive.mjs --write         # contract + drafts
+//   npx --yes tsx scripts/workflow-derive.mjs --accept <ids>  # operator-only
+//
+// Discovery lives in workflow-guard/lib/derive.ts so the guard can derive the
+// same contract at session start without writing into the scanned repo.
+// Acceptance is fail-closed: the draft must pass the shared scanner before it
+// moves from .pi/workflow-drafts/ to .pi/runbooks/.
 
 import { spawnSync } from "node:child_process";
-import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+	buildContract as buildDerivedContract,
+	buildRunbook,
+	discoverFromCi as discoverCiFor,
+	discoverPackages as discoverPackagesFor,
+	discoverPythonPackage as discoverPythonFor,
+	parseCi,
+	redactCommand,
+} from "../workflow-guard/lib/derive.ts";
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+export { parseCi, redactCommand };
+
+const SCRIPT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+function rootArgument() {
+	const argv = process.argv.slice(2);
+	for (let i = 0; i < argv.length; i += 1) {
+		if (argv[i] === "--root") return argv[i + 1] ?? null;
+		if (argv[i].startsWith("--root=")) return argv[i].slice("--root=".length);
+	}
+	return null;
+}
+
+const ROOT = path.resolve(rootArgument() ?? SCRIPT_ROOT);
+if (!fs.existsSync(ROOT)) {
+	console.error(`root does not exist: ${ROOT}`);
+	process.exit(1);
+}
+
 const CONTRACT = path.join(ROOT, ".pi", "workflow.json");
 const DRAFTS = path.join(ROOT, ".pi", "workflow-drafts");
 const RUNBOOKS = path.join(ROOT, ".pi", "runbooks");
-const DEFAULT_DOCS_ONLY = ["**/*.md", "docs/**", ".plans/**"];
-const DEFAULT_PROTECTED = ["AGENTS.md", "MEMORY.md", ".pi/runbooks/**", ".pi/workflow.json"];
 
-export function redactCommand(command) {
-	let out = command;
-	out = out.replace(
-		/((?:[A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD)[A-Z0-9_]*)=)(?:"[^"]*"|'[^']*'|\S+)/gi,
-		"$1***",
-	);
-	out = out.replace(
-		/(--?(?:token|password|api-key|apikey|secret)(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)/gi,
-		"$1***",
-	);
-	out = out.replaceAll(os.homedir(), "~");
-	return out.replace(/\s+/g, " ").trim();
+export function discoverFromCi() {
+	return discoverCiFor(ROOT);
+}
+
+export function discoverPackages(ciByDir = new Map()) {
+	return discoverPackagesFor(ROOT, ciByDir);
+}
+
+export function discoverPythonPackage() {
+	return discoverPythonFor(ROOT);
+}
+
+export function buildContract(packages, ciSteps) {
+	return buildDerivedContract(ROOT, packages, ciSteps);
+}
+
+export function buildDrafts(packages, ciSteps, commit) {
+	return [
+		{
+			id: "ship-change",
+			file: "ship-change.md",
+			content: buildRunbook({ packages, ciSteps, commit, draft: true }),
+		},
+	];
 }
 
 /** Scan only what will be injected (summary + body), not runbook metadata. */
@@ -69,226 +109,13 @@ function read(file) {
 	}
 }
 
-function leading(line) {
-	return line.length - line.trimStart().length;
-}
-
-export function parseCi(text, source) {
-	const lines = text.split("\n");
-	const steps = [];
-	let currentName = "";
-	for (let i = 0; i < lines.length; i += 1) {
-		const line = lines[i];
-		const named = /^\s*-\s+name:\s*(.+)$/.exec(line);
-		if (named) currentName = named[1].trim();
-
-		const run = /^(\s*)run:\s*(.*)$/.exec(line);
-		if (!run) continue;
-		const indent = run[1].length;
-		let command = run[2].trim();
-		if (command === "|" || command === ">" || command === "|-" || command === ">-") {
-			const block = [];
-			let j = i + 1;
-			while (j < lines.length) {
-				const next = lines[j];
-				if (next.trim() === "") {
-					block.push("");
-					j += 1;
-					continue;
-				}
-				if (leading(next) <= indent) break;
-				block.push(next.trim());
-				j += 1;
-			}
-			command = block.filter((entry) => entry && !entry.startsWith("#")).join("\n");
-			i = j - 1;
-		}
-		if (!command) continue;
-		steps.push({ name: currentName || `step ${steps.length + 1}`, command, source: `${source}:${i + 1}` });
-	}
-	return steps;
-}
-
-const SHELL_NOISE = /^(?:if|then|else|elif|fi|for|while|do|done|set\b|echo\b|#|cd\b|\{)|BREAK_VALIDATE/;
-
-function isTestCommand(command) {
-	if (!command || SHELL_NOISE.test(command.trim())) return false;
-	return /\b(test|--test|run-tests\.sh|run-[a-z-]*tests\.sh|pytest|unittest)\b/.test(command);
-}
-
-function dirOf(command) {
-	const tokens = command.split(/\s+/);
-	for (const token of tokens) {
-		const match = /^([A-Za-z0-9._-]+)\//.exec(token);
-		if (!match) continue;
-		const candidate = match[1];
-		if (fs.existsSync(path.join(ROOT, candidate))) return candidate;
-	}
-	return null;
-}
-
-export function discoverFromCi() {
-	const dirs = path.join(ROOT, ".github", "workflows");
-	if (!fs.existsSync(dirs)) return { steps: [], byDir: new Map() };
-	const steps = [];
-	for (const file of fs.readdirSync(dirs).filter((name) => name.endsWith(".yml") || name.endsWith(".yaml")).sort()) {
-		const relative = path.relative(ROOT, path.join(dirs, file));
-		steps.push(...parseCi(read(path.join(dirs, file)) ?? "", relative));
-	}
-	const byDir = new Map();
-	for (const step of steps) {
-		for (const line of step.command.split("\n")) {
-			const redacted = redactCommand(line);
-			if (!redacted || !isTestCommand(redacted)) continue;
-			const dir = dirOf(redacted);
-			if (!dir) continue;
-			const list = byDir.get(dir) ?? [];
-			if (!list.includes(redacted)) list.push(redacted);
-			byDir.set(dir, list);
-		}
-	}
-	return { steps, byDir };
-}
-
-function firstMarkdownFree(entries, pattern) {
-	return entries.filter((entry) => pattern.test(entry)).sort()[0] ?? null;
-}
-
-export function discoverPackages(ciByDir = new Map()) {
-	const packages = [];
-	for (const entry of fs.readdirSync(ROOT, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-		if (!entry.isDirectory() || entry.name.startsWith(".") || entry.name === "node_modules") continue;
-		const dir = entry.name;
-		const absolute = path.join(ROOT, dir);
-		const candidates = ciByDir.get(dir) ?? [];
-		let test = candidates.length > 0 ? candidates.join(" && ") : null;
-
-		if (!test) {
-			const pkgJson = read(path.join(absolute, "package.json"));
-			if (pkgJson) {
-				try {
-					const scripts = JSON.parse(pkgJson).scripts ?? {};
-					if (typeof scripts.test === "string") test = `npm test --prefix ${dir}`;
-				} catch {
-					// ignore malformed package.json
-				}
-			}
-		}
-		if (!test) {
-			const fixtures = fs.existsSync(path.join(absolute, "test-fixtures"))
-				? fs.readdirSync(path.join(absolute, "test-fixtures")).filter((name) => /^run-.*\.sh$/.test(name)).sort()
-				: [];
-			const race = firstMarkdownFree(fixtures, /run-.*\.sh/);
-			if (race) test = `bash ${dir}/test-fixtures/${race}`;
-		}
-		if (!test) {
-			const tests = fs.existsSync(path.join(absolute, "test"))
-				? fs.readdirSync(path.join(absolute, "test")).filter((name) => /\.(test|spec)\.[cm]?[jt]s$/.test(name)).sort()
-				: [];
-			if (tests.length > 0) test = `npx --yes tsx --test ${dir}/test/`;
-		}
-		if (!test) continue;
-		packages.push({ glob: `${dir}/**`, test: redactCommand(test), dir });
-	}
-	if (fs.existsSync(path.join(ROOT, "shared"))) {
-		packages.push({ glob: "shared/**", test: "node scripts/test-security-scan.mjs", dir: "shared" });
-	}
-	return packages;
-}
-
 function gitSourceCommit() {
 	const result = spawnSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf8" });
 	return result.status === 0 ? result.stdout.trim() : "unknown";
 }
 
-function slug(value) {
-	return value.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase();
-}
-
-export function draftFrontmatter({ id, summary, commandIncludes, source, commit }) {
-	return [
-		"---",
-		`id: ${id}`,
-		`summary: ${summary}`,
-		"tools: [bash]",
-		"tags: [workflow, tool:bash]",
-		"match:",
-		`  commandIncludes: [${commandIncludes.map((value) => JSON.stringify(value)).join(", ")}]`,
-		"injection: tool_result",
-		"priority: 60",
-		"maxBytes: 2048",
-		`derivedFrom: ${JSON.stringify(source)}`,
-		`sourceCommit: ${commit}`,
-		"draft: true",
-		"---",
-	].join("\n");
-}
-
-export function buildDrafts(packages, ciSteps, commit) {
-	// One aggregate runbook, not one per package: the loader injects it after a
-	// git inspection command, i.e. before the commit it is meant to steer.
-	// Per-package drafts only appeared after the test had already run.
-	const table = packages
-		.map((pkg) => `- \`${pkg.glob}\` → \`${redactCommand(pkg.test)}\``)
-		.join("\n");
-	const ciLines = ciSteps
-		.filter((step) => isTestCommand(step.command))
-		.map((step) => `- \`${redactCommand(step.command)}\` (${step.source})`)
-		.join("\n");
-	const id = "ship-change";
-	return [
-		{
-			id,
-			file: `${id}.md`,
-			content: [
-				draftFrontmatter({
-					id,
-					summary: "Changed-package test commands and ship order (derived from CI)",
-					commandIncludes: ["git status", "git diff", "git commit", "git push", "gh pr create"],
-					source: ".github/workflows + package test entry points",
-					commit,
-				}),
-				"",
-				"# Ship a change",
-				"",
-				"1. Inspect the diff (status and diff commands).",
-				"2. Run the suite for every changed package (table below). A green run",
-				"   must be recorded before commit, push, or PR; the workflow guard reads",
-				"   the exact command from `.pi/workflow.json`.",
-				"3. Update the plan/handoff artifact the repo asks for.",
-				"",
-				"## Package suites",
-				"",
-				table || "- (none discovered)",
-				"",
-				"## CI executes",
-				"",
-				ciLines || "- (no CI test steps discovered)",
-				"",
-			].join("\n"),
-		},
-	];
-}
-
-export function buildContract(packages, ciSteps) {
-	const sources = [...new Set(ciSteps.map((step) => step.source.split(":")[0]))];
-	if (sources.length === 0) sources.push(".github/workflows");
-	return {
-		version: 1,
-		sources,
-		packages: packages.map(({ glob, test }) => ({ glob, test })),
-		docsOnly: DEFAULT_DOCS_ONLY,
-		protectedPaths: DEFAULT_PROTECTED,
-		gates: {
-			"protect-instructions": { enabled: true },
-			"test-before-commit": { enabled: true },
-			"plan-before-pr": { enabled: false },
-		},
-	};
-}
-
 async function loadScanner() {
-	const source = path.join(ROOT, "shared", "security-scan.ts");
+	const source = path.join(SCRIPT_ROOT, "shared", "security-scan.ts");
 	if (!fs.existsSync(source)) return null;
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-scan-"));
 	const tsc = spawnSync(
@@ -368,9 +195,9 @@ async function accept(ids, force, dryRun, verifiedBy) {
 
 function usage() {
 	console.log(`usage:
-  node scripts/workflow-derive.mjs                 preview
-  node scripts/workflow-derive.mjs --write         write contract + drafts
-  node scripts/workflow-derive.mjs --accept <ids>  move drafts to .pi/runbooks (comma-separated)
+  npx --yes tsx scripts/workflow-derive.mjs [--root <dir>]  preview
+  npx --yes tsx scripts/workflow-derive.mjs --write         write contract + drafts
+  npx --yes tsx scripts/workflow-derive.mjs --accept <ids>  move drafts to .pi/runbooks (comma-separated)
   flags: --force (accept suspicious), --dry-run (scan without moving),
          --verified-by <who> (provenance; default operator), --json`);
 }
@@ -426,7 +253,7 @@ async function main() {
 	fs.mkdirSync(DRAFTS, { recursive: true });
 	for (const draft of drafts) fs.writeFileSync(path.join(DRAFTS, draft.file), draft.content, "utf8");
 	console.log(`\nwrote ${path.relative(ROOT, CONTRACT)} and ${drafts.length} draft(s) in .pi/workflow-drafts/`);
-	console.log("review drafts, then: node scripts/workflow-derive.mjs --accept <id[,id]>");
+	console.log("review drafts, then: npx --yes tsx scripts/workflow-derive.mjs --accept <id[,id]>");
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
