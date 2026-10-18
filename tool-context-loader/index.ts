@@ -309,6 +309,10 @@ export async function discover(options: DiscoverOptions): Promise<DiscoveryState
 	return state;
 }
 
+// A root of `.pi` or `.` must never discover quarantined drafts, VCS metadata,
+// or dependency trees. Matched by directory name at any depth.
+const EXCLUDED_DIR_NAMES = new Set(["workflow-drafts", ".git", "node_modules"]);
+
 export async function findMarkdownFiles(root: string, rootRealPath?: string, warnings: string[] = []): Promise<string[]> {
 	const resolvedRootRealPath = rootRealPath ?? (await fs.realpath(root));
 	const files: string[] = [];
@@ -341,6 +345,7 @@ export async function findMarkdownFiles(root: string, rootRealPath?: string, war
 				continue;
 			}
 			if (entry.isDirectory()) {
+				if (EXCLUDED_DIR_NAMES.has(entry.name)) continue;
 				await walk(fullPath);
 				continue;
 			}

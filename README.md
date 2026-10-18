@@ -15,6 +15,7 @@ This project contains custom [Pi](https://pi.dev) extensions.
   - [Secure Web Search](#secure-web-search)
   - [P3 Agents](#p3-agents)
   - [Tool Context Loader](#tool-context-loader)
+  - [Workflow Guard](#workflow-guard)
   - [MCP Bridge](#mcp-bridge)
   - [Herdr Control](#herdr-control)
   - [Tasks](#tasks)
@@ -459,6 +460,52 @@ Commands:
 ```
 
 See [`tool-context-loader/README.md`](tool-context-loader/README.md) for details.
+
+### Workflow Guard
+
+Path:
+
+```text
+workflow-guard/index.ts
+```
+
+Keeps repo workflow rules load-bearing with near-zero context cost. Rules are
+compiled into `.pi/workflow.json` (packages → exact test commands, docs-only
+globs, protected steering paths, gate toggles); `AGENTS.md` stays the narrative
+and is not repeated per turn.
+
+Steering ladder:
+
+- one constant standing line per turn (~100 B)
+- at most one delta line per turn when packages are not green (240 B)
+- a gate reason only at a blocked action (400 B); no LLM in the path
+
+Gates:
+
+- **G1** protected steering files (`AGENTS.md`, `MEMORY.md`, `.pi/runbooks/**`,
+  `.pi/workflow.json`) require operator confirmation, including bash-mediated
+  writes (`sed -i`, `tee`, `>`, `cp`/`mv`).
+- **G2** `git commit` / `git push` / `gh pr create` require the changed
+  package's current hash to match a recorded green test run. A read-only git
+  snapshot plus a persisted ledger survive restart; an uncomputable snapshot
+  fails closed.
+- **G3** plan-before-PR is configurable but not implemented (off).
+
+```text
+/workflow status | enforce on|off | verify | override <reason>
+```
+
+Runbooks are derived, never auto-activated:
+
+```bash
+node scripts/workflow-derive.mjs --write     # contract + drafts in .pi/workflow-drafts/
+node scripts/workflow-derive.mjs --accept <id>  # operator-only; scanner-gated
+```
+
+See [`workflow-guard/README.md`](workflow-guard/README.md) for install, state,
+budgets, and known limits.
+
+---
 
 ### MCP Bridge
 
