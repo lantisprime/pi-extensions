@@ -8,6 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { derivedRunbookFile, telemetryFile } from "../lib/state.ts";
 
 const { default: createExtension } = await import("../index.ts");
 
@@ -223,7 +224,7 @@ test("enforcement off and per-action override", async () => {
 		override.ctx,
 	);
 	assert.equal(after, undefined, "override allows exactly the next gated action");
-	assert.match(fs.readFileSync(path.join(REPO, ".pi/workflow-telemetry.jsonl"), "utf8"), /"event":"override"/);
+	assert.match(fs.readFileSync(telemetryFile(REPO), "utf8"), /"event":"override"/);
 	commitAll("override");
 });
 
@@ -289,3 +290,30 @@ function write2(root, relative, content) {
 	fs.mkdirSync(path.dirname(absolute), { recursive: true });
 	fs.writeFileSync(absolute, content, "utf8");
 }
+
+test("derived contract and project-scoped runbook when no contract file", async () => {
+	const repo = fs.mkdtempSync(path.join(os.tmpdir(), "wg-derived-"));
+	const writeFile = (relative, content) => {
+		const absolute = path.join(repo, relative);
+		fs.mkdirSync(path.dirname(absolute), { recursive: true });
+		fs.writeFileSync(absolute, content, "utf8");
+	};
+	writeFile("pkg/package.json", JSON.stringify({ scripts: { test: "node --test" } }));
+	writeFile("pkg/file.js", "export const value = 1;\n");
+	execFileSync("git", ["init", "-q"], { cwd: repo });
+	execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+	execFileSync("git", ["config", "user.name", "test"], { cwd: repo });
+	execFileSync("git", ["add", "-A"], { cwd: repo });
+	execFileSync("git", ["commit", "-q", "-m", "initial"], { cwd: repo });
+
+	const { state } = await start(true, repo);
+	assert.ok(
+		state.statuses.some((value) => /workflow auto \(\d+\)/.test(value)),
+		`expected derived status, got ${state.statuses.join(" | ")}`,
+	);
+	const content = fs.readFileSync(derivedRunbookFile(repo), "utf8");
+	assert.match(content, /commandIncludes: \["git status"/);
+	assert.match(content, /  project: "/);
+	assert.match(content, /npm test --prefix pkg/);
+	assert.equal(fs.existsSync(path.join(repo, ".pi", "workflow-telemetry.jsonl")), false, "audit must stay out of the repo");
+});

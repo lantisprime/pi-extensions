@@ -23,12 +23,22 @@ export type WorkflowState = {
 	updatedAt: string;
 };
 
-function projectKey(projectPath: string): string {
-	return createHash("sha256").update(projectPath).digest("hex").slice(0, 24);
+export function projectKey(projectPath: string): string {
+	return createHash("sha256").update(path.resolve(projectPath)).digest("hex").slice(0, 24);
 }
 
 export function stateFile(projectPath: string): string {
 	return path.join(os.homedir(), ".pi", "agent", "workflow", `${projectKey(projectPath)}.json`);
+}
+
+/** Audit lives beside the ledger, never inside the scanned repository. */
+export function telemetryFile(projectPath: string): string {
+	return path.join(os.homedir(), ".pi", "agent", "workflow", `${projectKey(projectPath)}.telemetry.jsonl`);
+}
+
+/** Auto-derived runbook, project-scoped by its frontmatter `match.project`. */
+export function derivedRunbookFile(projectPath: string): string {
+	return path.join(os.homedir(), ".pi", "agent", "runbooks", "derived", `${projectKey(projectPath)}-ship-change.md`);
 }
 
 export function emptyState(projectPath: string): WorkflowState {

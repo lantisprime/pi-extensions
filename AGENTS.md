@@ -82,7 +82,7 @@ call for it.
   G2 (commit/push/PR needs a green run for every changed package). Use
   `/workflow status`; `/workflow override <reason>` is audited and one-shot.
 - Refresh the contract when CI entry points change:
-  `node scripts/workflow-derive.mjs --write`, review the drafts in
+  `npx --yes tsx scripts/workflow-derive.mjs --write`, review the drafts in
   `.pi/workflow-drafts/`, then `--accept <id>` (operator verification is the
   only activation path).
 - Rule of thumb: every rule must map to a check in the contract or stay

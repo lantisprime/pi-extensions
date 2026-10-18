@@ -66,6 +66,7 @@ export type RunbookRecord = {
 	match: {
 		commandIncludes: string[];
 		pathIncludes: string[];
+		project?: string;
 	};
 	warning?: string;
 	// Body text must not be retained in records.
@@ -153,6 +154,7 @@ export const DEFAULT_CONFIG: LoaderConfig = {
 
 let config: LoaderConfig = DEFAULT_CONFIG;
 let discoveryState: DiscoveryState = emptyDiscoveryState(true, true);
+let lastScanAt = 0;
 let enabledOverride: boolean | undefined;
 let runtimeState = createRuntimeState();
 
@@ -306,6 +308,14 @@ export async function discover(options: DiscoverOptions): Promise<DiscoveryState
 	}
 
 	state.records = dedupeRecords(state.records);
+	// Project-scoped runbooks (auto-derived, user-level) only exist for their
+	// own checkout; everything else stays discovered but ineligible.
+	const scope = projectScopeKey(options.cwd);
+	state.records = state.records.map((record) =>
+		record.match.project && record.match.project !== scope
+			? { ...record, status: "skipped" as DiscoveryStatus, warning: "project-scoped runbook" }
+			: record,
+	);
 	return state;
 }
 
@@ -434,6 +444,7 @@ async function readRecord(
 		match: {
 			commandIncludes: stringArrayField(nestedField(metadata.match, "commandIncludes")),
 			pathIncludes: stringArrayField(nestedField(metadata.match, "pathIncludes")),
+			project: typeof nestedField(metadata.match, "project") === "string" ? (nestedField(metadata.match, "project") as string) : undefined,
 		},
 		warning,
 	};
@@ -1138,6 +1149,26 @@ async function rescan(cwd: string, projectTrusted: boolean) {
 	config = mergeConfig(await loadProjectConfig(cwd, projectTrusted));
 	const effectiveConfig = enabledOverride === undefined ? config : { ...config, enabled: enabledOverride };
 	discoveryState = await discover({ cwd, projectTrusted, config: effectiveConfig });
+	lastScanAt = Date.now();
+}
+
+function projectScopeKey(cwd: string): string {
+	return createHash("sha256").update(path.resolve(cwd)).digest("hex").slice(0, 24);
+}
+
+// Derived runbooks are written outside the repo after this extension's own
+// session_start, so refresh on the first turn when a root changed.
+async function rootsChanged(): Promise<boolean> {
+	if (lastScanAt === 0) return false;
+	for (const root of discoveryState.roots) {
+		try {
+			const stat = await fs.stat(root.absolutePath);
+			if (stat.mtimeMs > lastScanAt) return true;
+		} catch {
+			// Root may not exist; nothing to refresh for it.
+		}
+	}
+	return false;
 }
 
 export function eligibleRunbookCount(state: DiscoveryState): number {
@@ -1167,8 +1198,12 @@ export default function toolContextLoader(pi: ExtensionAPI) {
 		return {};
 	});
 
-	pi.on("turn_start", async () => {
+	pi.on("turn_start", async (_event, ctx) => {
 		resetTurnInjectionState();
+		if (await rootsChanged()) {
+			await rescan(ctx.cwd, ctx.isProjectTrusted());
+			updateStatusLine(ctx);
+		}
 	});
 
 	pi.on("before_agent_start", async (event) => {

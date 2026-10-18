@@ -2,7 +2,10 @@
 
 Keeps the repo's own workflow rules in force without bloating the context.
 
-The rules live in a small machine-checkable contract (`.pi/workflow.json`).
+The rules live in a small machine-checkable contract. `.pi/workflow.json` wins
+when present; otherwise the guard derives one in memory at session start from
+CI steps, nested `package.json` test scripts, and a documented pytest command —
+without writing into the repository.
 `AGENTS.md` stays the human narrative; the guard never re-states it per turn.
 
 ## Context cost
@@ -40,15 +43,15 @@ Read-only tools, `task_*`, and non-gated bash are never blocked.
 ```
 
 `override` allows exactly the next gated action and appends to
-`.pi/workflow-telemetry.jsonl`. There is no silent bypass.
+the user-level audit (below). There is no silent bypass.
 
 ## Derive and verify runbooks
 
 ```bash
-node scripts/workflow-derive.mjs                       # preview
-node scripts/workflow-derive.mjs --write               # contract + drafts
-node scripts/workflow-derive.mjs --accept <id[,id]>    # operator-only activation
-node scripts/workflow-derive.mjs --accept <id> --dry-run
+npx --yes tsx scripts/workflow-derive.mjs                       # preview
+npx --yes tsx scripts/workflow-derive.mjs --write               # contract + drafts
+npx --yes tsx scripts/workflow-derive.mjs --accept <id[,id]>    # operator-only activation
+npx --yes tsx scripts/workflow-derive.mjs --accept <id> --dry-run
 ```
 
 Drafts are written to `.pi/workflow-drafts/` (quarantine, ignored by the loader
@@ -69,13 +72,15 @@ cp -R workflow-guard/index.ts workflow-guard/lib ~/.pi/agent/extensions/workflow
 
 Restart pi or run `/reload`. Project-local installs under `.pi/extensions/` also
 work when the project is trusted. The guard does nothing without a trusted
-project and a contract.
+project; with one, it uses the file contract or derives one at session start.
 
 ## State and audit
 
 - Green ledger: `~/.pi/agent/workflow/<project-hash>.json` (hashes, timestamps,
   package ids; 7-day TTL).
-- Audit: `.pi/workflow-telemetry.jsonl` (gitignored).
+- Audit: `~/.pi/agent/workflow/<sha256(cwd)[0:24]>.telemetry.jsonl` (never inside the repo).
+- Derived runbook: `~/.pi/agent/runbooks/derived/<sha256(cwd)[0:24]>-ship-change.md`,
+  project-scoped via `match.project`; removed when a repo runbook exists.
 - Diagnostics: `PI_WORKFLOW_GUARD_DEBUG=1 pi -p "..."` prints
   `contract=loaded packages=N enforcing=true|false` on session start.
 
